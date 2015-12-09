@@ -68,24 +68,24 @@ while true; do
 	
 	[[ $unread -eq 1 ]] && notify-send -u critical "You have a new message in your jw.org inbox."
 	[[ $unread -gt 1 ]] && notify-send -u critical "You have ($unread) new messages in your jw.org inbox."
-	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player -q "$sound"; done &
+	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player "$sound"; done &
 	[[ $unread -gt 0 ]] && $browser "$login" &>/dev/null &
 
 	[[ $newletters -eq 1 ]] && notify-send -u normal "There is a new Letter in jw.org."
 	[[ $newletters -gt 1 ]] && notify-send -u normal "There are ($newletters) new Letters in jw.org."
-	[[ $newletters -gt 0 ]] && for a in 1 2; do $player -q "$sound"; done &
+	[[ $newletters -gt 0 ]] && for a in 1 2; do $player "$sound"; done &
 
 	[[ $newmedia -eq 1 ]] && notify-send -u normal "There is a new Event Media in jw.org."
 	[[ $newmedia -gt 1 ]] && notify-send -u normal "There are ($newmedia) new Event Media in jw.org."
-	[[ $newmedia -gt 0 ]] && for a in 1 2; do $player -q "$sound"; done &
+	[[ $newmedia -gt 0 ]] && for a in 1 2; do $player "$sound"; done &
 
 	[[ $newforms -eq 1 ]] && notify-send -u normal "There is a new Form in jw.org."
 	[[ $newforms -gt 1 ]] && notify-send -u normal "There are ($newforms) new Forms in jw.org."
-	[[ $newforms -gt 0 ]] && $player -q "$sound" &
+	[[ $newforms -gt 0 ]] && $player "$sound" &
 
 	[[ $newsl -eq 1 ]] && notify-send -u low "There is a new Sign Language document in jw.org."
 	[[ $newsl -gt 1 ]] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
-	[[ $newsl -gt 0 ]] && $player -q "$sound" &
+	[[ $newsl -gt 0 ]] && $player "$sound" &
 
 	sleep "$checkevery"
 done
