@@ -35,7 +35,7 @@ sound="/path/to/sound"
 # URL transforms
 login="https://www.jw.org/apps/E_LOGIN1"
 post="https://www.jw.org/apps/E_LOGIN2"
-logout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
+lout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
 # docs="https://www.jw.org/apps/E_$((txtAcct))_DOCUMENTS" # Depreciated since late 2015
 inbox="https://www.jw.org/apps/E_$((txtAcct))_INBOX"
 changed="https://www.jw.org/apps/E_$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
@@ -51,7 +51,7 @@ while true; do
 	wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
 	wget --load-cookies ./.a -qO .i "$inbox" &
 	wget --load-cookies ./.a -qO .c "$changed"
-	wget --load-cookies ./.a -qO /dev/null "$logout" &
+	wget --load-cookies ./.a -qO /dev/null "$lout" &
 
 	unread=`cat ./.i | grep -o "Inbox ([0-9]*)" | sed 's/[^0-9]*//g'`
 
