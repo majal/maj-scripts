@@ -1,0 +1,87 @@
+#!/bin/bash
+# Automatically check jw.org inbox for new messages
+# In popular Linux distros (e.g. Ubuntu) all of the programs here come pre-installed. You may check stderr if one of those aren't installed
+
+# Check for multiple sessions of script
+[[ "`ps -e | grep -c $(basename $0)`" -gt "2" ]] && echo -e "`basename $0`: Mutiple instances found. Terminating this process." && exit 1
+
+# Change to current directory of the script (optional)
+cd "`dirname $0`"
+
+# jw.org account details
+username=''
+password=''
+
+# Unique account number
+# This is the unique alphanumeric code for your account. It is REQUIRED that you fill this in correctly.
+# First login to your account in a browser and see the URL in the format: https://www.jw.org/apps/<LANG>_<txtAcct>_<PAGE>
+# For example, you may see in the address bar immediately after you logged in: https://www.jw.org/apps/E_1234567890_ADMIN
+# Then your txtAcct would be: 1234567890
+txtAcct=''
+
+# Authentication (modification optional)
+auth="txtUserName=$username&txtPassword=$password"
+# If you prefer a password in an encrypted file separate from the script, for example: (the encrypted-file format should be the same above)
+# auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
+
+# Time to check jw.org inbox, could be: second, minute, hour, day: s m h d
+checkevery=3h
+
+# For sound notifications
+# I personally use aplay since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
+player=mplayer
+sound="/path/to/sound"
+
+# URL transforms
+login="https://www.jw.org/apps/E_LOGIN1"
+post="https://www.jw.org/apps/E_LOGIN2"
+logout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
+# docs="https://www.jw.org/apps/E_$((txtAcct))_DOCUMENTS" # Depreciated since late 2015
+inbox="https://www.jw.org/apps/E_$((txtAcct))_INBOX"
+changed="https://www.jw.org/apps/E_$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+
+# Main script
+
+while true; do
+	while true; do
+		`nm-online` && break
+		sleep 1h
+	done
+
+	wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
+	wget --load-cookies ./.a -qO .i "$inbox" &
+	wget --load-cookies ./.a -qO .c "$changed"
+	wget --load-cookies ./.a -qO /dev/null "$logout" &
+
+	unread=`cat ./.i | grep -o "Inbox ([0-9]*)" | sed 's/[^0-9]*//g'`
+
+	newletters=`cat ./.c | grep -o 'Letters[^}]*' | sed 's/[^0-9]*//g'`
+	newmedia=`cat ./.c | grep -o 'Event Media[^}]*' | sed 's/[^0-9]*//g'`
+	newforms=`cat ./.c | grep -o 'Forms[^}]*' | sed 's/[^0-9]*//g'`
+	newsl=`cat ./.c | grep -o 'Sign Language[^}]*' | sed 's/[^0-9]*//g'`
+
+	shred -fuz .a .i .c
+	
+	[[ $unread -eq 1 ]] && notify-send -u critical "You have a new message in your jw.org inbox."
+	[[ $unread -gt 1 ]] && notify-send -u critical "You have ($unread) new messages in your jw.org inbox."
+	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player -q "$sound"; done &
+	[[ $unread -gt 0 ]] && google-chrome "$login" &>/dev/null &
+
+	[[ $newletters -eq 1 ]] && notify-send -u normal "There is a new Letter in jw.org."
+	[[ $newletters -gt 1 ]] && notify-send -u normal "There are ($newletters) new Letters in jw.org."
+	[[ $newletters -gt 0 ]] && for a in 1 2; do $player -q "$sound"; done &
+
+	[[ $newmedia -eq 1 ]] && notify-send -u normal "There is a new Event Media in jw.org."
+	[[ $newmedia -gt 1 ]] && notify-send -u normal "There are ($newmedia) new Event Media in jw.org."
+	[[ $newmedia -gt 0 ]] && for a in 1 2; do $player -q "$sound"; done &
+
+	[[ $newforms -eq 1 ]] && notify-send -u normal "There is a new Form in jw.org."
+	[[ $newforms -gt 1 ]] && notify-send -u normal "There are ($newforms) new Forms in jw.org."
+	[[ $newforms -gt 0 ]] && $player -q "$sound" &
+
+	[[ $newsl -eq 1 ]] && notify-send -u low "There is a new Sign Language document in jw.org."
+	[[ $newsl -gt 1 ]] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
+	[[ $newsl -gt 0 ]] && $player -q "$sound" &
+
+	sleep "$checkevery"
+done
