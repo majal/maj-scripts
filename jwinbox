@@ -29,8 +29,8 @@ auth="txtUserName=$username&txtPassword=$password"
 checkevery=3h
 
 # For sound notifications
-# I personally use aplay since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
-player=mplayer
+# I personally use "aplay -q" since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
+player="mplayer --quiet"
 sound="/path/to/sound"
 
 # Browser to use, e.g. firefox
