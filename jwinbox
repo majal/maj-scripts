@@ -53,7 +53,7 @@ while true; do
 	done
 
 	wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
-	wget --load-cookies ./.a -qO .i "$inbox" &
+	wget --load-cookies ./.a -qO .i "$inbox"
 	wget --load-cookies ./.a -qO .c "$changed"
 	wget --load-cookies ./.a -qO /dev/null "$lout" &
 
@@ -66,8 +66,8 @@ while true; do
 
 	shred -fuz .a .i .c
 	
-	[[ $unread -eq 1 ]] && notify-send -u critical "You have a new message in your jw.org inbox."
-	[[ $unread -gt 1 ]] && notify-send -u critical "You have ($unread) new messages in your jw.org inbox."
+	[[ $unread -eq 1 ]] && notify-send -u normal "You have a new message in your jw.org inbox."
+	[[ $unread -gt 1 ]] && notify-send -u normal "You have ($unread) new messages in your jw.org inbox."
 	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player "$sound"; done &
 	[[ $unread -gt 0 ]] && $browser "$login" &>/dev/null &
 
