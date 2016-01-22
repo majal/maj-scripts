@@ -1,0 +1,24 @@
+#!/bin/bash
+
+[[ -z "$1" ]] && echo "Please enter a parameter. Exiting..."
+[[ -z "$1" ]] && exit 1
+
+echo
+echo "This will flatten the following:"
+echo
+for p in "$@"; do echo "$p"; done
+echo
+echo "Press [Enter] to continue... [Ctrl+C to cancel]"
+read
+printf "Flattening... "
+
+for a in "$@"; do mv "$a" "$a".orig; done
+
+for b in *.pdf.orig; do gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=/LeaveColorUnchanged -dAutoFilterColorImages=true -dAutoFilterGrayImages=true -dDownsampleMonoImages=true -dDownsampleGrayImages=true -dDownsampleColorImages=true -sOutputFile="${b%.orig}" "$b"; done
+
+temp=`mktemp -d`
+mv *.orig $temp
+echo "done."
+echo
+echo "Originals moved to $temp"
+echo
