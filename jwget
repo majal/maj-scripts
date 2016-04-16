@@ -38,7 +38,7 @@ yearmonth4=`date -u +%Y%m --date='4 months'`
 cd "$DIRBASE"
 [ -f "$LOGFILE.gz" ] && gzip -dqkf "$LOGFILE.gz"
 
-# Start of downloader
+# Start the downloader
 echo "\n`date`\n" >> "$LOGFILE"
 echo "\n******************************START OF SCRIPT RUN*******************************" >> "$LOGFILE"
 
