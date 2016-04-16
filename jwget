@@ -16,7 +16,7 @@ option='TRGCHlZRQVNYVrXF'
 
 # wget options
 LOGFILE="$DIRBASE/jwget.log"
-opts="-bcN -a $LOGFILE --progress=dot:mega --content-disposition"
+opts="-bcN -a \"$LOGFILE\" --progress=dot:mega --content-disposition"
 
 # Date generate
 yearmonthb4=`date -u +%Y%m --date='last month'`
@@ -35,16 +35,16 @@ yearmonth4=`date -u +%Y%m --date='4 months'`
 [ -d "$DIRBASE/mwb" ] || mkdir -p "$DIRBASE/mwb"
 
 # Initialize logfile
-cd $DIRBASE
+cd "$DIRBASE"
 [ -f "$LOGFILE.gz" ] && gzip -dqkf "$LOGFILE.gz"
 
 # Start of downloader
-echo "\n`date`\n" >> $LOGFILE
-echo "\n******************************START OF SCRIPT RUN*******************************" >> $LOGFILE
+echo "\n`date`\n" >> "$LOGFILE"
+echo "\n******************************START OF SCRIPT RUN*******************************" >> "$LOGFILE"
 
 magtype='wp'
 cd "$DIRBASE/$magtype"
-  echo "\n\n" >> $LOGFILE
+  echo "\n\n" >> "$LOGFILE"
 
   if [ $(($yearmonth0%2)) -eq 0 ]; then
   	issue0=$yearmonthb4
@@ -62,7 +62,7 @@ cd "$DIRBASE/$magtype"
   
 magtype='w'
 cd "$DIRBASE/$magtype"
-  echo "\n\n" >> $LOGFILE
+  echo "\n\n" >> "$LOGFILE"
 
   [ $format = "PDF" ] && wopts="-Hr -nd -Aw_E_*.pdf" # Other existing filetypes in the directory will be deleted
   [ $format = "RTF" ] && wopts="-Hr -nd -Aw_E_*.zip" # Other existing filetypes in the directory will be deleted
@@ -74,7 +74,7 @@ cd "$DIRBASE/$magtype"
   
 magtype='g'
 cd "$DIRBASE/$magtype"
-  echo "\n\n" >> $LOGFILE
+  echo "\n\n" >> "$LOGFILE"
 
   if [ $(($yearmonth0%2)) -eq 1 ]; then
   	issue0=$yearmonthb4
@@ -92,7 +92,7 @@ cd "$DIRBASE/$magtype"
 
 magtype='ws'
 cd "$DIRBASE/$magtype"
-  echo "\n\n" >> $LOGFILE
+  echo "\n\n" >> "$LOGFILE"
 
   [ $format = "PDF" ] && wopts="-Hr -nd -Aws_E_*.pdf" # Other existing filetypes in the directory will be deleted
   [ $format = "RTF" ] && wopts="-Hr -nd -Aws_E_*.zip" # Other existing filetypes in the directory will be deleted
@@ -104,7 +104,7 @@ cd "$DIRBASE/$magtype"
   
 magtype='mwb'
 cd "$DIRBASE/$magtype"
-  echo "\n\n" >> $LOGFILE
+  echo "\n\n" >> "$LOGFILE"
 
   wget $opts "$maguribase$option?issue=$yearmonth0&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
   wget $opts "$maguribase$option?issue=$yearmonth1&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
@@ -115,5 +115,5 @@ cd "$DIRBASE/$magtype"
 echo "\n                           ::::: End of script run :::::\n`date`\n" >> $LOGFILE
 
 # Compress logfile
-cd $DIRBASE
-gzip -f $LOGFILE
+cd "$DIRBASE"
+gzip -f "$LOGFILE"
