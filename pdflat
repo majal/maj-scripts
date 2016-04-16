@@ -4,11 +4,11 @@
 [[ -z "$1" ]] && exit 1
 
 echo
-echo "This will flatten the following:"
+echo -e "\e[1mThis will flatten the following PDFs:\e[0m"
 echo
 for p in "$@"; do echo "$p"; done
 echo
-echo "Press [Enter] to continue... [Ctrl+C to cancel]"
+echo -e "\e[1m\e[32mPress [Enter] to continue... \e[31m[Ctrl+C to cancel]\e[0m"
 read
 printf "Flattening... "
 
@@ -16,9 +16,14 @@ for a in "$@"; do mv "$a" "$a".orig; done
 
 for b in *.pdf.orig; do gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=/LeaveColorUnchanged -dAutoFilterColorImages=true -dAutoFilterGrayImages=true -dDownsampleMonoImages=true -dDownsampleGrayImages=true -dDownsampleColorImages=true -sOutputFile="${b%.orig}" "$b"; done
 
-temp=`mktemp -d`
-mv *.orig $temp
+# temp=`mktemp -d`
+# mv *.orig $temp
+# gvfs-trash *.orig
+[[ -d ./orig ]] || mkdir orig
+mv *.orig orig/
 echo "done."
 echo
-echo "Originals moved to $temp"
+# echo "Originals moved to $temp"
+# echo "Originals moved to Trash"
+echo "Originals moved to orig folder"
 echo
