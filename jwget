@@ -15,7 +15,7 @@ maguribase='https://www.jw.org/apps/'
 option='TRGCHlZRQVNYVrXF'
 
 # wget options
-LOGFILE="$DIRBASE/jwget.log"
+LOGFILE="$DIRBASE/jwget.log" # Can be set to /dev/null
 opts="-bcN -a \"$LOGFILE\" --progress=dot:mega --content-disposition"
 
 # Date generate
