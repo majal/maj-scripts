@@ -20,7 +20,7 @@ option='TRGCHlZRQVNYVrXF'
 
 # wget options
 LOGFILE="$DIRBASE/jwget.log" # Can be set to /dev/null
-opts="-bcN -a "$LOGFILE" --progress=dot:mega --content-disposition"
+opts="-bcN -a $LOGFILE --progress=dot:mega --content-disposition"
 
 # Date generate
 yearmonthb4=`date -u +%Y%m --date='last month'`
