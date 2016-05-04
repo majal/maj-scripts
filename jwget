@@ -1,9 +1,13 @@
 #!/bin/sh
 
 # Automatically check and download jw.org: wp w g ws mwb
-# Needed programs: bash wget gzip pgrep (these are normally preinstalled in most Linux distros)
+# Needed programs: bash wget gzip pgrep nm-online (these are normally preinstalled in most Linux distros)
 
 #sleep 3m
+nm-online || sleep 10m
+nm-online || sleep 20m
+nm-online || sleep 30m
+nm-online || exit 1
 
 # User options
 DIRBASE='$HOME/Desktop/JWGet'
@@ -16,7 +20,7 @@ option='TRGCHlZRQVNYVrXF'
 
 # wget options
 LOGFILE="$DIRBASE/jwget.log" # Can be set to /dev/null
-opts="-bcN -a \'$LOGFILE\' --progress=dot:mega --content-disposition"
+opts="-bcN -a "$LOGFILE" --progress=dot:mega --content-disposition"
 
 # Date generate
 yearmonthb4=`date -u +%Y%m --date='last month'`
