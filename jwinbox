@@ -1,6 +1,7 @@
 #!/bin/bash
 # Automatically check jw.org inbox for new messages
 # In popular Linux distros (e.g. Ubuntu) all of the programs here come pre-installed. (Except maybe your favorite browser.) 
+# These may include: wget, notify-send, gpg, mplayer|aplay, firefox|google-chrome|?
 # You may check stderr if one of those programs aren't installed
 
 # Check for multiple sessions of script
@@ -10,8 +11,21 @@
 cd "`dirname $0`"
 
 # jw.org account details
+# (Option 1 - plaintext passwords)
 username=''
 password=''
+
+# Authentication (modification optional, see below)
+auth="txtUserName=$username&txtPassword=$password"
+
+# (Option 2 - encrypted username and password)
+# If you prefer a password in an encrypted file, encrypt username and password in this format:
+# txtUserName=$username&txtPassword=$password
+# i.e. `echo "txtUserName=$username&txtPassword=$password" | gpg -c - > .encrypted-file`
+# You may wish to store this file separated from the script directory and do a `chmod 600`
+# Store auth as below:
+
+# auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
 
 # Unique account number
 # This is the unique alphanumeric code for your account. It is REQUIRED that you fill this in correctly.
@@ -19,11 +33,6 @@ password=''
 # For example, you may see in the address bar immediately after you logged in: https://www.jw.org/apps/E_1234567890_ADMIN
 # Then your txtAcct would be: 1234567890
 txtAcct=''
-
-# Authentication (modification optional)
-auth="txtUserName=$username&txtPassword=$password"
-# If you prefer a password in an encrypted file separate from the script, for example: (the encrypted-file format should be the same above)
-# auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
 
 # Time to check jw.org inbox, could be: second, minute, hour, day: s m h d
 checkevery=3h
