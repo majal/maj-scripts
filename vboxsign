@@ -8,6 +8,10 @@
 dir=/home/directory/of/keys
 cd $dir
 
+# (Optional) Setting env KBUILD_SIGN_PIN for encrypted keys
+#printf "Please enter key passphrase (leave blank if not needed): "; read
+#export KBUILD_SIGN_PIN="$REPLY"
+
 # (Optional) Decrypt private key. To initially encrypt, run `gpg -c MOK.priv` then shred MOK.priv
 echo
 #gpg -d --passphrase-file /owned/by/root/.pass MOK.priv.gpg > MOK.priv
