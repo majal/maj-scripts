@@ -28,14 +28,14 @@ auth="txtUserName=$username&txtPassword=$password"
 
 # auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
 
-# Unique account number
-# This is the unique alphanumeric code for your account. It is REQUIRED that you fill this in correctly.
+# Unique account number. Optional.
+# This is the unique alphanumeric code for your account.
 # First login to your account in a browser and see the URL in the format: https://www.jw.org/apps/<LANG>_<txtAcct>_<PAGE>
 # For example, you may see in the address bar immediately after you logged in: https://www.jw.org/apps/E_1234567890_ADMIN
 # Then your txtAcct would be: 1234567890
 txtAcct=''
 
-# Time to check jw.org inbox, could be: second, minute, hour, day: s m h d
+# Time interval when checking jw.org account, could be: second, minute, hour, day: s m h d
 checkevery=3h
 
 # For sound notifications
@@ -49,7 +49,7 @@ browser=google-chrome
 # URL transforms
 login="https://www.jw.org/apps/E_LOGIN1"
 post="https://www.jw.org/apps/E_LOGIN2"
-lout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
+logout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
 # docs="https://www.jw.org/apps/E_$((txtAcct))_DOCUMENTS" # Depreciated since late 2015
 inbox="https://www.jw.org/apps/E_$((txtAcct))_INBOX"
 changed="https://www.jw.org/apps/E_$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
