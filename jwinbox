@@ -28,41 +28,44 @@ auth="txtUserName=$username&txtPassword=$password"
 
 # auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
 
-# Unique account number. Optional.
-# This is the unique alphanumeric code for your account.
+# Optional. Domain code - only for those with multiple domains. Leave blank for those with single domains.
+# This is the unique numeric/alphanumeric code for your domain.
 # First login to your account in a browser and see the URL in the format: https://www.jw.org/apps/<LANG>_<txtAcct>_<PAGE>
 # For example, you may see in the address bar immediately after you logged in: https://www.jw.org/apps/E_1234567890_ADMIN
 # Then your txtAcct would be: 1234567890
 txtAcct=''
+
+# Add an underscore to txtAcct if present
+[ ! -z "$txtAcct" ] && txtAcct=_$txtAcct
 
 # Time interval when checking jw.org account, could be: second, minute, hour, day: s m h d
 checkevery=3h
 
 # For sound notifications
 # I personally use "aplay -q" since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
-player="mplayer --quiet"
+player="mplayer"
 sound="/path/to/sound"
 
 # Browser to use, e.g. firefox
-browser=google-chrome
+browser="google-chrome"
 
 # URL transforms
 login="https://www.jw.org/apps/E_LOGIN1"
 post="https://www.jw.org/apps/E_LOGIN2"
-logout="https://www.jw.org/apps/E_$((txtAcct))_LOGOUT"
-# docs="https://www.jw.org/apps/E_$((txtAcct))_DOCUMENTS" # Depreciated since late 2015
-inbox="https://www.jw.org/apps/E_$((txtAcct))_INBOX"
-changed="https://www.jw.org/apps/E_$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+logout="https://www.jw.org/apps/E$((txtAcct))_LOGOUT"
 
-letters="https://www.jw.org/apps/E_$((COacct))_VIEWLETTER"
-forms="https://www.jw.org/apps/E_$((COacct))_VIEWFORM"
-media="https://www.jw.org/apps/E_$((COacct))_VIEWEVENTMEDIA"
+inbox="https://www.jw.org/apps/E$((txtAcct))_INBOX"
+changed="https://www.jw.org/apps/E$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+letters="https://www.jw.org/apps/E$((txtAcct))_VIEWLETTER"
+forms="https://www.jw.org/apps/E$((txtAcct))_VIEWFORM"
+media="https://www.jw.org/apps/E$((txtAcct))_VIEWEVENTMEDIA"
 
 # Main script
 
 while true; do
 	while true; do
-		`nm-online` && break
+		# maj-online && break # May optionally use my online connectivity checker
+		nm-online && break
 		sleep 1h
 	done
 
@@ -89,33 +92,21 @@ wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/n
 	
 	[[ $unread -eq 1 ]] && notify-send -u normal "You have a new message in your jw.org inbox."
 	[[ $unread -gt 1 ]] && notify-send -u normal "You have ($unread) new messages in your jw.org inbox."
-	[[ $unread -gt 0 ]] && for a in 1 2 3; do aplay -q "$sound"; done &
-	[[ $unread -gt 0 ]] && google-chrome "$login" &>/dev/null &
-
-#	[[ $lettersCount -eq 1 ]] && notify-send -u normal "There is a new Letter in jw.org."
-#	[[ $lettersCount -gt 1 ]] && notify-send -u normal "There are ($lettersCount) new Letters in jw.org."
-#	[[ $lettersCount -gt 0 ]] && for a in 1 2; do aplay -q "$sound"; done &
+	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player $sound &>/dev/null; done &
+	[[ $unread -gt 0 ]] && $browser $login &>/dev/null &
 
 	[[ $lettersCount -gt 0 ]] && notify-send -u normal "New letters ($lettersCount):" "$lettersContent"
-	[[ $lettersCount -gt 0 ]] && for a in 1 2; do aplay -q "$sound"; done &
-
-#	[[ $mediaCount -eq 1 ]] && notify-send -u normal "There is a new Event Media in jw.org."
-#	[[ $mediaCount -gt 1 ]] && notify-send -u normal "There are ($mediaCount) new Event Media in jw.org."
-#	[[ $mediaCount -gt 0 ]] && for a in 1 2; do aplay -q "$sound"; done &
+	[[ $lettersCount -gt 0 ]] && for a in 1 2; do $player $sound &>/dev/null; done
 
 	[[ $mediaCount -gt 0 ]] && notify-send -u normal "New media ($mediaCount):" "$mediaContent"
-	[[ $mediaCount -gt 0 ]] && for a in 1; do aplay -q "$sound"; done &
-
-#	[[ $formsCount -eq 1 ]] && notify-send -u normal "There is a new Form in jw.org."
-#	[[ $formsCount -gt 1 ]] && notify-send -u normal "There are ($formsCount) new Forms in jw.org."
-#	[[ $formsCount -gt 0 ]] && aplay -q "$sound" &
+	[[ $mediaCount -gt 0 ]] && for a in 1; do $player $sound &>/dev/null; done
 
 	[[ $formsCount -gt 0 ]] && notify-send -u normal "New forms ($formsCount):" "$formsContent"
-	[[ $formsCount -gt 0 ]] && for a in 1; do aplay -q "$sound"; done &
+	[[ $formsCount -gt 0 ]] && for a in 1; do $player $sound &>/dev/null; done
 	
 	[[ $newsl -eq 1 ]] && notify-send -u low "There is a new Sign Language document in jw.org."
 	[[ $newsl -gt 1 ]] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
-	[[ $newsl -gt 0 ]] && $player "$sound" &
+	[[ $newsl -gt 0 ]] && $player $sound &>/dev/null
 
 	sleep "$checkevery"
 done
