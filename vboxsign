@@ -13,7 +13,7 @@ cd $dir
 #export KBUILD_SIGN_PIN="$REPLY"
 
 # (Optional) Decrypt private key. To initially encrypt, run `gpg -c MOK.priv` then shred MOK.priv
-#gpg -d --passphrase-file /owned/by/root/.pass MOK.priv.gpg > MOK.priv
+#gpg -d --batch --passphrase-file /owned/by/root/.pass MOK.priv.gpg > MOK.priv
 echo
 
 # Sign and load modules
