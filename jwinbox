@@ -3,10 +3,18 @@
 # In popular Linux distros (e.g. Ubuntu) all of the programs here come pre-installed. (Except maybe your favorite browser.) 
 # These may include: wget, notify-send, gpg, mplayer|aplay, firefox|google-chrome|?
 # You may check stderr if one of those programs aren't installed
-# v3
+# v3.5 October 2016 - reformat for use of test [] functions, online checker, tabs
+# v3 July 2016 edit, Emeth3, CO, human readable links in jw.org, new docs and letters format, Doc titles shown
 
 # Check for multiple sessions of script
 [[ "`ps -e | grep -c $(basename $0)`" -gt "2" ]] && echo -e "`basename $0`: Mutiple instances found. Terminating this process." && exit 1
+
+# Online checker
+maj-online () {
+  ipaddr='8.8.8.8'
+  [[ -z `ping -c1 $ipaddr |& grep -o 'Network is unreachable'` ]] || exit 1
+  [[ -z `ping -c3 $ipaddr |& grep -o '100% packet loss'` ]] && exit 0 || exit 2
+}
 
 # Change to current directory of the script (optional)
 cd "`dirname $0`"
@@ -26,7 +34,7 @@ auth="txtUserName=$username&txtPassword=$password"
 # You may wish to store this file separated from the script directory and do a `chmod 600`
 # Store auth as below:
 
-# auth=`gpg --batch -q --no-use-agent --passphrase-file /path/to/passphrase -d ./encrypted-file`
+# auth=`gpg --batch -q --passphrase-file /path/to/passphrase -d ./encrypted-file`
 
 # Optional. Domain code - only for those with multiple domains. Leave blank for those with single domains.
 # This is the unique numeric/alphanumeric code for your domain.
@@ -39,11 +47,11 @@ txtAcct=''
 [ ! -z "$txtAcct" ] && txtAcct=_$txtAcct
 
 # Time interval when checking jw.org account, could be: second, minute, hour, day: s m h d
-checkevery=3h
+checkevery=4h
 
 # For sound notifications
 # I personally use "aplay -q" since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
-player="mplayer"
+player="mplayer -quiet"
 sound="/path/to/sound"
 
 # Browser to use, e.g. firefox
@@ -60,53 +68,56 @@ letters="https://www.jw.org/apps/E$((txtAcct))_VIEWLETTER"
 forms="https://www.jw.org/apps/E$((txtAcct))_VIEWFORM"
 media="https://www.jw.org/apps/E$((txtAcct))_VIEWEVENTMEDIA"
 
-# Main script
+
+### Main script ###
 
 while true; do
-	while true; do
-		# maj-online && break # May optionally use my online connectivity checker
-		nm-online && break
-		sleep 1h
-	done
 
-wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
-	wget --load-cookies ./.a -qO .i "$inbox"
-	wget --load-cookies ./.a -qO .c "$changed"
-	wget --load-cookies ./.a -qO .l "$letters"
-	wget --load-cookies ./.a -qO .f "$forms"
-	wget --load-cookies ./.a -qO .m "$media"
-	wget --load-cookies ./.a -qO /dev/null "$logout" &
+  while ! maj-online; do sleep 15m; done
 
-	unread=`cat ./.i | grep -o "Inbox ([0-9]*)" | sed 's/[^0-9]*//g'`
+  wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
+  wget --load-cookies ./.a -qO .i "$inbox"
+  wget --load-cookies ./.a -qO .c "$changed"
+  wget --load-cookies ./.a -qO .l "$letters"
+  wget --load-cookies ./.a -qO .f "$forms"
+  wget --load-cookies ./.a -qO .m "$media"
+  wget --load-cookies ./.a -qO /dev/null "$logout" &
 
-	lettersCount=`cat ./.c | grep -o 'Letters[^}]*' | sed 's/[^0-9]*//g'`
-	mediaCount=`cat ./.c | grep -o 'Event Media[^}]*' | sed 's/[^0-9]*//g'`
-	formsCount=`cat ./.c | grep -o 'Forms[^}]*' | sed 's/[^0-9]*//g'`
-	newsl=`cat ./.c | grep -o 'Sign Language[^}]*' | sed 's/[^0-9]*//g'`
+  unread=`cat ./.i | grep -o "Inbox ([0-9]*)" | sed 's/[^0-9]*//g'`
 
-	[[ $lettersCount -gt 0 ]] && lettersContent="`cat ./.l | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
-	[[ $formsCount -gt 0 ]] && formsContent="`cat ./.f | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
-	[[ $mediaCount -gt 0 ]] && mediaContent="`cat ./.m | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"	
-	
-	shred -fuz .a .i .c .l .f .m
-	
-	[[ $unread -eq 1 ]] && notify-send -u normal "You have a new message in your jw.org inbox."
-	[[ $unread -gt 1 ]] && notify-send -u normal "You have ($unread) new messages in your jw.org inbox."
-	[[ $unread -gt 0 ]] && for a in 1 2 3; do $player $sound &>/dev/null; done &
-	[[ $unread -gt 0 ]] && $browser $login &>/dev/null &
+  lettersCount=`cat ./.c | grep -o 'Letters[^}]*' | sed 's/[^0-9]*//g'`
+  mediaCount=`cat ./.c | grep -o 'Event Media[^}]*' | sed 's/[^0-9]*//g'`
+  formsCount=`cat ./.c | grep -o 'Forms[^}]*' | sed 's/[^0-9]*//g'`
+  newsl=`cat ./.c | grep -o 'Sign Language[^}]*' | sed 's/[^0-9]*//g'`
 
-	[[ $lettersCount -gt 0 ]] && notify-send -u normal "New letters ($lettersCount):" "$lettersContent"
-	[[ $lettersCount -gt 0 ]] && for a in 1 2; do $player $sound &>/dev/null; done
+  [ -z $lettersCount ] && lettersCount=0
+  [ $lettersCount -gt 0 ] && lettersContent="`cat ./.l | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
+  [ -z $formsCount ] && formsCount=0
+  [ $formsCount -gt 0 ] && formsContent="`cat ./.f | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
+  [ -z $mediaCount ] && mediaCount=0
+  [ $mediaCount -gt 0 ] && mediaContent="`cat ./.m | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
 
-	[[ $mediaCount -gt 0 ]] && notify-send -u normal "New media ($mediaCount):" "$mediaContent"
-	[[ $mediaCount -gt 0 ]] && for a in 1; do $player $sound &>/dev/null; done
+  shred -fuz .a .i .c .l .f .m
 
-	[[ $formsCount -gt 0 ]] && notify-send -u normal "New forms ($formsCount):" "$formsContent"
-	[[ $formsCount -gt 0 ]] && for a in 1; do $player $sound &>/dev/null; done
-	
-	[[ $newsl -eq 1 ]] && notify-send -u low "There is a new Sign Language document in jw.org."
-	[[ $newsl -gt 1 ]] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
-	[[ $newsl -gt 0 ]] && $player $sound &>/dev/null
+  [ -z $unread ] && unread=0
+  [ $unread -eq 1 ] && notify-send -u normal "You have a new message in your jw.org inbox."
+  [ $unread -gt 1 ] && notify-send -u normal "You have ($unread) new messages in your jw.org inbox."
+  [ $unread -gt 0 ] && for a in 1 2 3; do $player "$sound"; done &
+  [ $unread -gt 0 ] && $browser $login &>/dev/null &
 
-	sleep "$checkevery"
+  [ $lettersCount -gt 0 ] && notify-send -u normal "New letters ($lettersCount):" "$lettersContent"
+  [ $lettersCount -gt 0 ] && for a in 1 2; do $player "$sound"; done &
+
+  [ $mediaCount -gt 0 ] && notify-send -u normal "New media ($mediaCount):" "$mediaContent"
+  [ $mediaCount -gt 0 ] && for a in 1; do $player "$sound"; done &
+
+  [ $formsCount -gt 0 ] && notify-send -u normal "New forms ($formsCount):" "$formsContent"
+  [ $formsCount -gt 0 ] && for a in 1; do $player "$sound"; done &
+
+  [ -z $newsl ] && newsl=0
+  [ $newsl -eq 1 ] && notify-send -u low "There is a new Sign Language document in jw.org."
+  [ $newsl -gt 1 ] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
+  [ $newsl -gt 0 ] && $player "$sound" &
+
+  sleep "$checkevery"
 done
