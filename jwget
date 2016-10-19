@@ -1,13 +1,18 @@
 #!/bin/sh
 
 # Automatically check and download jw.org: wp w g ws mwb
-# Needed programs: bash wget gzip pgrep nm-online (these are normally preinstalled in most Linux distros)
+# Needed programs: bash wget gzip pgrep maj-online (these are normally preinstalled in most Linux distros except maj-online)
+# v2.1 - Multiple instances checker, using maj-online function, setting default logfile to /dev/null
 
-#sleep 3m
-nm-online || sleep 10m
-nm-online || sleep 20m
-nm-online || sleep 30m
-nm-online || exit 1
+# Check for multiple instances
+[ $(pgrep -c "`basename $0`") -gt 1 ] && { echo; echo -e "\e[1m\e[93m`basename $0`: \e[0mMutiple script instances found! \e[91mExiting..."; echo; exit 1; }
+
+# Online checker
+maj-online () {
+  ipaddr='8.8.8.8'
+  [[ -z `ping -c1 $ipaddr |& grep -o 'Network is unreachable'` ]] || exit 1
+  [[ -z `ping -c3 $ipaddr |& grep -o '100% packet loss'` ]] && exit 0 || exit 2
+}
 
 # User options
 DIRBASE='$HOME/Desktop/JWGet'
@@ -19,7 +24,7 @@ maguribase='https://www.jw.org/apps/'
 option='TRGCHlZRQVNYVrXF'
 
 # wget options
-LOGFILE="$DIRBASE/jwget.log" # Can be set to /dev/null
+LOGFILE="/dev/null" # Can be set to "$DIRBASE/jwget.log"
 opts="-bcN -a $LOGFILE --progress=dot:mega --content-disposition"
 
 # Date generate
@@ -38,11 +43,15 @@ yearmonth4=`date -u +%Y%m --date='4 months'`
 [ -d "$DIRBASE/ws" ] || mkdir -p "$DIRBASE/ws"
 [ -d "$DIRBASE/mwb" ] || mkdir -p "$DIRBASE/mwb"
 
-# Initialize logfile
+# Initialize directory and (optionally) logfile
 cd "$DIRBASE"
-[ -f "$LOGFILE.gz" ] && gzip -dqkf "$LOGFILE.gz"
+# [ -f "$LOGFILE.gz" ] && gzip -dqkf "$LOGFILE.gz"
 
-# Start the downloader
+### Start of downloader
+
+# Sleep while offline
+while ! maj-online; do sleep 15m; done
+
 echo "\n`date`\n" >> "$LOGFILE"
 echo "\n******************************START OF SCRIPT RUN*******************************" >> "$LOGFILE"
 
@@ -119,5 +128,5 @@ cd "$DIRBASE/$magtype"
 echo "\n                           ::::: End of script run :::::\n`date`\n" >> $LOGFILE
 
 # Compress logfile
-cd "$DIRBASE"
-gzip -f "$LOGFILE"
+# cd "$DIRBASE"
+# gzip -f "$LOGFILE"
