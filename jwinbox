@@ -67,18 +67,18 @@ browser="google-chrome"
 
 
 # Add an underscore to txtAcct if present
-[ ! -z "$txtAcct" ] && txtAcct=_$txtAcct
+[ ! -z "$txtAcct" ] && txtAcct=_${txtAcct}
 
 # URL transforms
 login="https://apps.jw.org/E_LOGIN1"
 post="https://apps.jw.org/E_LOGIN2"
-logout="https://apps.jw.org/E$((txtAcct))_LOGOUT"
+logout="https://apps.jw.org/E${txtAcct}_LOGOUT"
 
-inbox="https://apps.jw.org/E$((txtAcct))_INBOX"
-changed="https://apps.jw.org/E$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
-letters="https://apps.jw.org/E$((txtAcct))_VIEWLETTER"
-forms="https://apps.jw.org/E$((txtAcct))_VIEWFORM"
-media="https://apps.jw.org/E$((txtAcct))_VIEWEVENTMEDIA"
+inbox="https://apps.jw.org/E${txtAcct}_INBOX"
+changed="https://apps.jw.org/E${txtAcct}_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+letters="https://apps.jw.org/E${txtAcct}_VIEWLETTER"
+forms="https://apps.jw.org/E${txtAcct}_VIEWFORM"
+media="https://apps.jw.org/E${txtAcct}_VIEWEVENTMEDIA"
 
 
 ### Main script ###
