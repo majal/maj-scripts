@@ -67,7 +67,7 @@ browser="google-chrome"
 
 
 # Add an underscore to txtAcct if present
-[ ! -z "$txtAcct" ] && txtAcct=_${txtAcct}
+[ ! -z "$txtAcct" ] && txtAcct="_${txtAcct}"
 
 # URL transforms
 login="https://apps.jw.org/E_LOGIN1"
