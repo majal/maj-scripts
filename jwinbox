@@ -1,23 +1,29 @@
 #!/bin/bash
 # Automatically check jw.org inbox for new messages
 # In popular Linux distros (e.g. Ubuntu) all of the programs here come pre-installed. (Except maybe your favorite browser.) 
-# These may include: wget, notify-send, gpg, mplayer|aplay, firefox|google-chrome|?
+# These may include: wget, notify-send, gpg, mplayer|aplay, firefox|google-chrome|...
 # You may check stderr if one of those programs aren't installed
+# v3.6 November 2016 - https://www.jw.org/apps moved to https://apps.jw.org, site-wide use of HSTS
 # v3.5 October 2016 - reformat for use of test [] functions, online checker, tabs
 # v3 July 2016 edit, Emeth3, CO, human readable links in jw.org, new docs and letters format, Doc titles shown
 
+### INITIALIZATION LINES (NO NEED TO EDIT THIS SECTION) ###
 # Check for multiple sessions of script
-[[ "`ps -e | grep -c $(basename $0)`" -gt "2" ]] && echo -e "`basename $0`: Mutiple instances found. Terminating this process." && exit 1
+[ $(pgrep -c "`basename $0`") -gt 1 ] && { echo; echo -e "\e[1m\e[93m`basename $0`: \e[0mMultiple script instances found! \e[91mExiting..."; echo; exit 1; }
 
 # Online checker
 maj-online () {
   ipaddr='8.8.8.8'
-  [[ -z `ping -c1 $ipaddr |& grep -o 'Network is unreachable'` ]] || exit 1
-  [[ -z `ping -c3 $ipaddr |& grep -o '100% packet loss'` ]] && exit 0 || exit 2
+  [ -z `ping -c1 $ipaddr |& grep -o 'Network is unreachable'` ] || exit 1
+  [ -z `ping -c3 $ipaddr |& grep -o '100% packet loss'` ] && exit 0 || exit 2
 }
 
 # Change to current directory of the script (optional)
 cd "`dirname $0`"
+
+### ***************************************************************************** ###
+### ***** PREFERENCES (MAKE EDITS AND FILL OUT VALUES IN THIS SECTION ONLY) ***** ###
+### ***************************************************************************** ###
 
 # jw.org account details
 # (Option 1 - plaintext passwords)
@@ -43,30 +49,36 @@ auth="txtUserName=$username&txtPassword=$password"
 # Then your txtAcct would be: 1234567890
 txtAcct=''
 
-# Add an underscore to txtAcct if present
-[ ! -z "$txtAcct" ] && txtAcct=_$txtAcct
-
 # Time interval when checking jw.org account, could be: second, minute, hour, day: s m h d
 checkevery=4h
 
 # For sound notifications
 # I personally use "aplay -q" since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
 player="mplayer -quiet"
-sound="/path/to/sound"
+# sound="/path/to/sound"
+sound="/usr/share/sounds/freedesktop/stereo/service-login.oga"
 
 # Browser to use, e.g. firefox
 browser="google-chrome"
 
-# URL transforms
-login="https://www.jw.org/apps/E_LOGIN1"
-post="https://www.jw.org/apps/E_LOGIN2"
-logout="https://www.jw.org/apps/E$((txtAcct))_LOGOUT"
+### ****************************************************************** ###
+### ***** END OF PREFERENCES (NO NEED TO EDIT LINES THAT FOLLOW) ***** ###
+### ****************************************************************** ###
 
-inbox="https://www.jw.org/apps/E$((txtAcct))_INBOX"
-changed="https://www.jw.org/apps/E$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
-letters="https://www.jw.org/apps/E$((txtAcct))_VIEWLETTER"
-forms="https://www.jw.org/apps/E$((txtAcct))_VIEWFORM"
-media="https://www.jw.org/apps/E$((txtAcct))_VIEWEVENTMEDIA"
+
+# Add an underscore to txtAcct if present
+[ ! -z "$txtAcct" ] && txtAcct=_$txtAcct
+
+# URL transforms
+login="https://apps.jw.org/E_LOGIN1"
+post="https://apps.jw.org/E_LOGIN2"
+logout="https://apps.jw.org/E$((txtAcct))_LOGOUT"
+
+inbox="https://apps.jw.org/E$((txtAcct))_INBOX"
+changed="https://apps.jw.org/E$((txtAcct))_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+letters="https://apps.jw.org/E$((txtAcct))_VIEWLETTER"
+forms="https://apps.jw.org/E$((txtAcct))_VIEWFORM"
+media="https://apps.jw.org/E$((txtAcct))_VIEWEVENTMEDIA"
 
 
 ### Main script ###
