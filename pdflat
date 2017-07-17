@@ -14,12 +14,12 @@ echo -e "\e[1m\e[32mPress [Enter] to continue... \e[31m[Ctrl+C to cancel]\e[0m"
 read
 printf "Flattening... "
 
-for a in "$@"; do mv "$a" "$a".orig; done
+for a in "$@"; do mv "$a" "${a%.pdf}.orig.pdf"; done
 
-for b in *.pdf.orig; do cc=$((cc+1)); printf "\rFlattening... $cc of $c"; gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=/LeaveColorUnchanged -dAutoFilterColorImages=true -dAutoFilterGrayImages=true -dDownsampleMonoImages=true -dDownsampleGrayImages=true -dDownsampleColorImages=true -sOutputFile="${b%.orig}" "$b"; done
+for b in *.orig.pdf; do cc=$((cc+1)); printf "\rFlattening... $cc of $c"; gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -sColorConversionStrategy=/LeaveColorUnchanged -dAutoFilterColorImages=true -dAutoFilterGrayImages=true -dDownsampleMonoImages=true -dDownsampleGrayImages=true -dDownsampleColorImages=true -sOutputFile="${b%.orig.pdf}.pdf" "$b"; done
 
 [[ -d ./orig ]] || mkdir orig
-mv *.orig orig/
+mv *.orig.pdf orig/
 echo ". Done."
 echo
 echo "Originals moved to orig folder"
