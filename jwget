@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # Automatically check and download jw.org: wp w g ws mwb
-# Needed programs: bash wget gzip pgrep maj-online (these are normally preinstalled in most Linux distros except maj-online)
-# v2.1 - Multiple instances checker, using maj-online function, setting default logfile to /dev/null
+# Needed programs: bash wget gzip pgrep (these are normally preinstalled in most Linux distros)
+# v2.3 - Updated download link and options of 'g' as large print came out
 
 # Check for multiple instances
 [ $(pgrep -c "`basename $0`") -gt 1 ] && { echo; echo -e "\e[1m\e[93m`basename $0`: \e[0mMutiple script instances found! \e[91mExiting..."; echo; exit 1; }
