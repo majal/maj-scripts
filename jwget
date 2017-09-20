@@ -89,6 +89,9 @@ magtype='g'
 cd "$DIRBASE/$magtype"
   echo "\n\n" >> "$LOGFILE"
 
+  [ $format = "PDF" ] && gopts="-Hr -nd -Ag_E_*.pdf" # Other existing filetypes in the directory will be deleted
+  [ $format = "RTF" ] && gopts="-Hr -nd -Ag_E_*.zip" # Other existing filetypes in the directory will be deleted
+
   if [ $(($yearmonth0%2)) -eq 1 ]; then
   	issue0=$yearmonthb4
   	issue1=$yearmonth1
@@ -99,9 +102,9 @@ cd "$DIRBASE/$magtype"
   	issue2=$yearmonth4
   fi
 
-  wget $opts "$maguribase$option?issue=$issue0&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
-  wget $opts "$maguribase$option?issue=$issue1&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
-  wget $opts "$maguribase$option?issue=$issue2&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
+  wget $gopts $opts "$maguribase$option?issue=$issue0&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
+  wget $gopts $opts "$maguribase$option?issue=$issue1&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
+  wget $gopts $opts "$maguribase$option?issue=$issue2&output=html&pub=$magtype&fileformat=$format&langwritten=$LANG" && sleep 1
 
 magtype='ws'
 cd "$DIRBASE/$magtype"
