@@ -844,21 +844,32 @@ def probe_duration_seconds(media_path: Path) -> float | None:
 
 
 class EstimatedProgressReporter:
-    def __init__(self, media_path: Path, backend: str) -> None:
+    def __init__(self, media_path: Path, backend: str, *, inline: bool) -> None:
         self.media_path = media_path
         self.backend = backend
+        self.inline = inline and sys.stderr.isatty()
         self.duration = probe_duration_seconds(media_path)
         self.last_percent = -1
         self.last_reported_at = 0.0
         self.unknown_duration_noted = False
+        self.inline_rendered = False
+        self.last_render_len = 0
         if self.duration is None:
             self.note_unknown_duration()
         else:
             print(f"⏱ Estimated duration: {self.duration:.1f}s for {media_path.name}", file=sys.stderr)
 
+    def clear_inline(self) -> None:
+        if not self.inline_rendered:
+            return
+        print(f"\r{' ' * self.last_render_len}\r", end="", file=sys.stderr, flush=True)
+        self.inline_rendered = False
+        self.last_render_len = 0
+
     def note_unknown_duration(self) -> None:
         if self.unknown_duration_noted:
             return
+        self.clear_inline()
         self.unknown_duration_noted = True
         print(f"⏱ Duration unknown for {self.media_path.name}; estimated % progress unavailable.", file=sys.stderr)
 
@@ -873,14 +884,29 @@ class EstimatedProgressReporter:
             return
         self.last_percent = percent
         self.last_reported_at = now
-        print(f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%", file=sys.stderr)
+        message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
+        if self.inline:
+            self.last_render_len = len(message)
+            self.inline_rendered = True
+            print(f"\r{message}", end="", file=sys.stderr, flush=True)
+        else:
+            print(message, file=sys.stderr)
 
     def finish(self) -> None:
         if self.duration is None:
             return
         if self.last_percent < 100:
             self.last_percent = 100
-            print(f"⏳ {self.media_path.name} [{self.backend}] ~100%", file=sys.stderr)
+            message = f"⏳ {self.media_path.name} [{self.backend}] ~100%"
+            if self.inline:
+                self.last_render_len = len(message)
+                self.inline_rendered = True
+                print(f"\r{message}", end="", file=sys.stderr, flush=True)
+            else:
+                print(message, file=sys.stderr)
+
+    def before_stage_message(self) -> None:
+        self.clear_inline()
 
 
 def subtitle_filter_arg(path: Path) -> str:
@@ -1001,11 +1027,11 @@ def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress
     return normalize_mlx_segments(result, report_progress)
 
 
-def process_file(media_path: Path, env: dict[str, str], backend: str) -> str:
+def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_progress: bool) -> str:
     started_at = time.time()
     print(f"▶ Starting transcription: {media_path.name} [{backend}]", file=sys.stderr)
     wait_spinner = Spinner(f"Waiting for {backend} on {media_path.name}", enabled=True, delay_seconds=3.0)
-    progress = EstimatedProgressReporter(media_path, backend)
+    progress = EstimatedProgressReporter(media_path, backend, inline=inline_progress)
     spinner_state = {"stopped": False}
 
     def stop_wait_spinner() -> None:
@@ -1031,6 +1057,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str) -> str:
         finally:
             stop_wait_spinner()
     progress.finish()
+    progress.before_stage_message()
     print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
     output_root = Path(env["WHISPER_OUTDIR"]).expanduser() if env["WHISPER_OUTDIR"] else media_path.parent
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1054,20 +1081,32 @@ def summarize_backend_error(backend: str, exc: Exception, env: dict[str, str]) -
         print("💡 Try again with --device=cpu if CUDA is unavailable on this machine.", file=sys.stderr)
 
 
+def format_elapsed_summary(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
+    inline_progress = len(files) == 1 and jobs == 1 and not use_progress_bar
     progress = importlib.import_module("tqdm").tqdm(total=len(files), desc="📦 Files") if use_progress_bar else None
     try:
         if jobs > 1:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = [executor.submit(process_file, media_path, env, backend) for media_path in files]
+                futures = [executor.submit(process_file, media_path, env, backend, inline_progress=False) for media_path in files]
                 for future in as_completed(futures):
                     print(f"✅ {future.result()}")
                     if progress:
                         progress.update(1)
         else:
             for media_path in files:
-                print(f"✅ {process_file(media_path, env, backend)}")
+                print(f"✅ {process_file(media_path, env, backend, inline_progress=inline_progress)}")
                 if progress:
                     progress.update(1)
     finally:
@@ -1081,11 +1120,13 @@ def install_backend_into_managed_runtime(backend: str) -> None:
 
 
 def managed_main() -> int:
+    started_at = time.time()
     env = os.environ
     target = Path(env["WHISPER_TARGET"]).expanduser()
     files = discover_files(target, env["WHISPER_RECURSIVE"] == "1")
     if not files:
         print("❌ No supported media files found.", file=sys.stderr)
+        print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
         return 1
     backend = env["WHISPER_BACKEND"]
     fallback = env["WHISPER_FALLBACK_BACKEND"]
@@ -1098,10 +1139,12 @@ def managed_main() -> int:
     print(f"🧠 Backend ready: {backend}. Processing {len(files)} file(s).", file=sys.stderr)
     try:
         process_files(files, env, backend, jobs)
+        print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
         return 0
     except Exception as primary_exc:
         summarize_backend_error(backend, primary_exc, env)
         if not auto_backend or fallback == "none":
+            print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
         print(f"⚠ Auto mode will retry once with fallback backend '{fallback}'.", file=sys.stderr)
         try:
@@ -1113,9 +1156,11 @@ def managed_main() -> int:
             if backend == "mlx" and prompt_remove_failed_backend("mlx"):
                 uninstall_packages(Path(sys.executable), "mlx-whisper")
                 success("Removed MLX Python packages from the managed runtime.")
+            print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 0
         except Exception as fallback_exc:
             print(f"❌ Fallback backend '{fallback}' also failed: {fallback_exc}", file=sys.stderr)
+            print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
 
 
