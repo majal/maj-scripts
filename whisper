@@ -1,282 +1,1246 @@
-#!/usr/bin/env bash
-# https://www.majlovesreg.one/tag/code/
+#!/usr/bin/env python3
+"""whisper: self-bootstrapping subtitle + transcription CLI."""
 
-# [ -r "${HOME}/bin/maj-source" ] && source "${HOME}/bin/maj-source"
+from __future__ import annotations
 
-################################################################################
-# Requirements
+import argparse
+import importlib
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import venv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
 
-check_requirements() {
-  local deps=(  )
-  for dep in "${deps[@]}"; do
-    command -v "${dep}" >/dev/null 2>&1 || { echo "Required program not found: ${dep}"; exit 1; }
-  done
+
+APP_NAME = "whisper-cli"
+MANAGED_ENV_FLAG = "WHISPER_MANAGED_RUNTIME"
+MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov"}
+SHARED_RUNTIME_PACKAGES = ("tqdm>=4.66.0",)
+PIP_BOOTSTRAP_PACKAGES = ("pip>=26.0", "setuptools<82", "wheel>=0.46.0")
+BACKEND_PACKAGES = {
+    "mlx": ("mlx-whisper>=0.4.2",),
+    "faster-whisper": ("faster-whisper>=1.1.0",),
+}
+BACKEND_MODULES = {
+    "mlx": "mlx_whisper",
+    "faster-whisper": "faster_whisper",
 }
 
-# check_requirements
 
-################################################################################
-# Variables
-
+def use_color() -> bool:
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") != "1"
 
 
-################################################################################
-# Processed variables
+COLOR = use_color()
+RESET = "\033[0m" if COLOR else ""
+BOLD = "\033[1m" if COLOR else ""
+DIM = "\033[2m" if COLOR else ""
+RED = "\033[31m" if COLOR else ""
+GREEN = "\033[32m" if COLOR else ""
+YELLOW = "\033[33m" if COLOR else ""
+BLUE = "\033[34m" if COLOR else ""
+MAGENTA = "\033[35m" if COLOR else ""
+CYAN = "\033[36m" if COLOR else ""
 
 
+@dataclass(frozen=True)
+class HardwareProfile:
+    os_name: str
+    arch_name: str
+    wsl: bool
+    nvidia: bool
+    memory_bytes: int | None
+    memory_gb: float | None
+    physical_cpu: int | None
+    logical_cpu: int | None
+    confidence: str
+    notes: tuple[str, ...]
 
-################################################################################
-# Functions
 
-# fn () {}
+@dataclass(frozen=True)
+class RuntimePlan:
+    script_path: Path
+    os_name: str
+    arch_name: str
+    pkg_manager: str
+    state_dir: Path
+    venv_dir: Path
+    venv_python: Path
+    packages_dir: Path
+    backend_requested: str
+    auto_backend: bool
+    selected_backend: str
+    selected_device: str
+    selected_compute: str
+    selected_model: str
+    model_reason: str
+    fallback_backend: str
+    fallback_device: str
+    fallback_compute: str
+    profile: HardwareProfile
+    installed_packages: tuple[str, ...]
+    installed_backends: tuple[str, ...]
 
-################################################################################
-# Main
 
-DEFAULT_DIR="$HOME/dig/faster-whisper"
-WORK_DIR="$DEFAULT_DIR"
+def say(message: str, *, err: bool = False) -> None:
+    print(message, file=sys.stderr if err else sys.stdout, flush=True)
 
-UPDATE=0
-HELP=0
-LANG="en"
-MODEL="small"
-OUTDIR=""
-JOBS=1
-BURN=0
-STYLE="default"
-FONT="default"
-KARAOKE=0
-ASS=0
-TARGET=""
 
-CMD_NAME="$(basename "$0")"
+def info(message: str) -> None:
+    say(f"{CYAN}ℹ{RESET} {message}")
 
-# === PARSE ARGS ===
-for arg in "$@"; do
-  case $arg in
-    -h|--help) HELP=1 ;;
-    --update) UPDATE=1 ;;
-    --lang=*) LANG="${arg#*=}" ;;
-    --dir=*) WORK_DIR="${arg#*=}" ;;
-    --model=*) MODEL="${arg#*=}" ;;
-    --outdir=*) OUTDIR="${arg#*=}" ;;
-    --jobs=*) JOBS="${arg#*=}" ;;
-    --burn) BURN=1 ;;
-    --style=*) STYLE="${arg#*=}" ;;
-    --font=*) FONT="${arg#*=}" ;;
-    --karaoke) KARAOKE=1 ;;
-    --ass) ASS=1 ;;
-    *) TARGET="$arg" ;;
-  esac
-done
 
-# === HELP ===
-if [ $HELP -eq 1 ]; then
-cat << EOF
-$CMD_NAME — GPU subtitle + transcription CLI
+def success(message: str) -> None:
+    say(f"{GREEN}✅{RESET} {message}")
 
-USAGE:
-  $CMD_NAME <file_or_folder> [OPTIONS]
 
-CORE:
-  --lang=en|auto
-  --model=tiny|base|small|medium|large
-  --jobs=N
+def warn(message: str) -> None:
+    say(f"{YELLOW}⚠{RESET} {message}", err=True)
 
-OUTPUT:
-  --outdir=PATH
-  --ass
-  --burn
 
-STYLE:
-  --style=pretty
-  --font=mpv
-  --karaoke
+def error(message: str) -> None:
+    say(f"{RED}❌{RESET} {message}", err=True)
 
-SYSTEM:
-  --dir=PATH
-  --update
 
-EXAMPLES:
-  $CMD_NAME video.mp4
-  $CMD_NAME ./videos --jobs=2
-  $CMD_NAME video.mp4 --ass --burn --karaoke
+def die(message: str, code: int = 1) -> "None":
+    error(message)
+    raise SystemExit(code)
 
-EOF
-exit 0
-fi
 
-VENV_PATH="$WORK_DIR/venv"
-PYTHON="$VENV_PATH/bin/python"
+def run_quiet(command: list[str]) -> str | None:
+    try:
+        return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return None
 
-if [ ! -f "$PYTHON" ]; then
-  echo "❌ venv not found: $VENV_PATH"
-  exit 1
-fi
 
-source "$VENV_PATH/bin/activate"
+class Spinner:
+    def __init__(self, message: str, *, enabled: bool, delay_seconds: float = 0.0) -> None:
+        self.message = message
+        self.enabled = enabled and sys.stderr.isatty()
+        self.delay_seconds = delay_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
-# === UPDATE ===
-if [ $UPDATE -eq 1 ]; then
-  $PYTHON -m pip install --upgrade pip faster-whisper ctranslate2 tqdm
-  [ -z "$TARGET" ] && exit 0
-fi
+    def start(self) -> None:
+        if not self.enabled:
+            return
 
-[ -z "$TARGET" ] && echo "Run --help" && exit 1
+        def spin() -> None:
+            frames = ["|", "/", "-", "\\"]
+            index = 0
+            if self._stop.wait(self.delay_seconds):
+                return
+            while not self._stop.wait(0.1):
+                print(f"\r{CYAN}{frames[index % len(frames)]}{RESET} {self.message}", end="", file=sys.stderr, flush=True)
+                index += 1
+            print(f"\r{' ' * (len(self.message) + 4)}\r", end="", file=sys.stderr, flush=True)
 
-# === PYTHON ===
-$PYTHON - << EOF
-import os, sys, subprocess, re, time
-from faster_whisper import WhisperModel
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
+        self._thread = threading.Thread(target=spin, daemon=True)
+        self._thread.start()
 
-LANG="$LANG"
-MODEL="$MODEL"
-OUTDIR="$OUTDIR"
-JOBS=int("$JOBS")
-BURN=int("$BURN")
-STYLE="$STYLE"
-FONT="$FONT"
-KARAOKE=int("$KARAOKE")
-ASS=int("$ASS")
-TARGET="$TARGET"
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
 
-# --- simple sentence splitter (no nltk) ---
-def split_sentences(text):
-    return re.split(r'(?<=[.!?]) +', text)
 
-def split_lines(text):
-    w = text.split()
-    if len(w) <= 8:
-        return [text]
-    mid = len(w) // 2
-    return [" ".join(w[:mid]), " ".join(w[mid:])]
+def run_command_with_spinner(
+    command: list[str],
+    *,
+    description: str,
+    stdout=None,
+    stderr=None,
+    quiet_success: bool = True,
+    spinner_delay_seconds: float = 3.0,
+) -> subprocess.CompletedProcess:
+    spinner = Spinner(description, enabled=True, delay_seconds=spinner_delay_seconds)
+    spinner.start()
+    try:
+        return subprocess.run(command, stdout=stdout, stderr=stderr, check=False, text=isinstance(stdout, int) or stdout == subprocess.PIPE)
+    finally:
+        spinner.stop()
+        if not quiet_success and sys.stderr.isatty():
+            info(description)
 
-def format_time(t):
-    return f"{int(t//3600):02}:{int((t%3600)//60):02}:{int(t%60):02},{int((t%1)*1000):03}"
 
-def get_files(p):
-    if os.path.isfile(p):
-        return [p]
+def detect_os() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "unknown"
+
+
+def detect_arch() -> str:
+    machine = (platform.machine() or "").strip().lower()
+    aliases = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+    return aliases.get(machine, machine or "unknown")
+
+
+def detect_wsl(os_name: str) -> bool:
+    if os_name != "linux":
+        return False
+    try:
+        version_text = Path("/proc/version").read_text(encoding="utf-8", errors="ignore").lower()
+    except Exception:
+        return False
+    return "microsoft" in version_text or "wsl" in version_text
+
+
+def detect_pkg_manager() -> str:
+    for candidate in ("brew", "apt-get", "dnf", "yum", "pacman", "zypper", "apk"):
+        if shutil.which(candidate):
+            return candidate
+    return "unknown"
+
+
+def detect_nvidia() -> bool:
+    return shutil.which("nvidia-smi") is not None
+
+
+def detect_total_memory_bytes(os_name: str) -> tuple[int | None, tuple[str, ...]]:
+    notes: list[str] = []
+    try:
+        if os_name == "macos":
+            value = run_quiet(["sysctl", "-n", "hw.memsize"])
+            if value:
+                return int(value), ()
+            if hasattr(os, "sysconf"):
+                pages = os.sysconf("SC_PHYS_PAGES")
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                if isinstance(pages, int) and isinstance(page_size, int) and pages > 0 and page_size > 0:
+                    return int(pages * page_size), ("macOS RAM estimated via sysconf",)
+            notes.append("macOS RAM probe unavailable")
+        elif os_name == "linux":
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    return int(parts[1]) * 1024, ()
+            if hasattr(os, "sysconf"):
+                pages = os.sysconf("SC_PHYS_PAGES")
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                if isinstance(pages, int) and isinstance(page_size, int) and pages > 0 and page_size > 0:
+                    return int(pages * page_size), ("Linux RAM estimated via sysconf",)
+            notes.append("Linux RAM probe unavailable")
+        elif os_name == "windows":
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys), ()
+            notes.append("Windows RAM probe unavailable")
+    except Exception:
+        notes.append("memory probe failed")
+    return None, tuple(notes)
+
+
+def detect_linux_physical_cores() -> int | None:
+    try:
+        physical_pairs: set[tuple[str, str]] = set()
+        current_physical_id: str | None = None
+        current_core_id: str | None = None
+        for raw_line in Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not raw_line.strip():
+                if current_physical_id is not None and current_core_id is not None:
+                    physical_pairs.add((current_physical_id, current_core_id))
+                current_physical_id = None
+                current_core_id = None
+                continue
+            key, _, value = raw_line.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if key == "physical id":
+                current_physical_id = value
+            elif key == "core id":
+                current_core_id = value
+        if current_physical_id is not None and current_core_id is not None:
+            physical_pairs.add((current_physical_id, current_core_id))
+        return len(physical_pairs) or None
+    except Exception:
+        return None
+
+
+def detect_cpu_counts(os_name: str) -> tuple[int | None, int | None, tuple[str, ...]]:
+    notes: list[str] = []
+    logical = os.cpu_count()
+    physical = None
+    try:
+        if os_name == "macos":
+            phys = run_quiet(["sysctl", "-n", "hw.physicalcpu"])
+            log = run_quiet(["sysctl", "-n", "hw.logicalcpu"])
+            physical = int(phys) if phys else None
+            logical = int(log) if log else logical
+            if physical is None:
+                notes.append("macOS physical CPU probe unavailable")
+        elif os_name == "linux":
+            physical = detect_linux_physical_cores()
+            if physical is None:
+                notes.append("Linux physical CPU probe unavailable")
+        elif os_name == "windows":
+            notes.append("Windows physical CPU probe unavailable")
+    except Exception:
+        notes.append("CPU probe failed")
+    return physical, logical, tuple(notes)
+
+
+def hardware_profile(os_name: str, arch_name: str) -> HardwareProfile:
+    memory_bytes, memory_notes = detect_total_memory_bytes(os_name)
+    physical_cpu, logical_cpu, cpu_notes = detect_cpu_counts(os_name)
+    notes = list(memory_notes + cpu_notes)
+    high_confidence = memory_bytes is not None and logical_cpu is not None and (physical_cpu is not None or os_name == "windows")
+    return HardwareProfile(
+        os_name=os_name,
+        arch_name=arch_name,
+        wsl=detect_wsl(os_name),
+        nvidia=detect_nvidia(),
+        memory_bytes=memory_bytes,
+        memory_gb=round(memory_bytes / (1024**3), 1) if memory_bytes else None,
+        physical_cpu=physical_cpu,
+        logical_cpu=logical_cpu,
+        confidence="high" if high_confidence else "partial",
+        notes=tuple(dict.fromkeys(notes)),
+    )
+
+
+def default_state_dir(os_name: str) -> Path:
+    if os.environ.get("WHISPER_HOME"):
+        return Path(os.environ["WHISPER_HOME"]).expanduser()
+    if os_name == "macos":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    if os_name == "windows":
+        return Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))) / APP_NAME
+    if os.environ.get("XDG_DATA_HOME"):
+        return Path(os.environ["XDG_DATA_HOME"]).expanduser() / APP_NAME
+    return Path.home() / ".local" / "share" / APP_NAME
+
+
+def is_apple_silicon(os_name: str, arch_name: str) -> bool:
+    return os_name == "macos" and arch_name == "arm64"
+
+
+def normalize_backend_name(name: str) -> str:
+    if name == "faster_whisper":
+        return "faster-whisper"
+    if name not in {"auto", "mlx", "faster-whisper"}:
+        die("--backend must be auto, mlx, or faster-whisper")
+    return name
+
+
+def backend_supported_on_host(backend: str, os_name: str, arch_name: str) -> bool:
+    if backend == "mlx":
+        return is_apple_silicon(os_name, arch_name)
+    return backend == "faster-whisper"
+
+
+def choose_default_backend(profile: HardwareProfile) -> str:
+    if is_apple_silicon(profile.os_name, profile.arch_name):
+        return "mlx"
+    return "faster-whisper"
+
+
+def choose_fallback_backend(primary: str, profile: HardwareProfile, auto_backend: bool) -> str:
+    if auto_backend and primary == "mlx" and is_apple_silicon(profile.os_name, profile.arch_name):
+        return "faster-whisper"
+    return "none"
+
+
+def choose_default_device(backend: str, profile: HardwareProfile) -> str:
+    if backend == "mlx":
+        return "apple"
+    if profile.os_name in {"linux", "windows"} and profile.nvidia:
+        return "cuda"
+    return "cpu"
+
+
+def choose_default_compute_type(backend: str, device: str) -> str:
+    if backend == "mlx":
+        return "mlx"
+    return "int8_float16" if device == "cuda" else "int8"
+
+
+def choose_default_model(backend: str, device: str, profile: HardwareProfile) -> tuple[str, str]:
+    memory_gb = profile.memory_gb
+    logical_cpu = profile.logical_cpu
+    if backend == "mlx":
+        if memory_gb is None:
+            return "small", "Apple Silicon MLX defaulted conservatively because RAM was not readable."
+        if memory_gb < 8:
+            return "base", "Apple Silicon lower-memory tier; defaulting to base."
+        if memory_gb < 16:
+            return "small", "Apple Silicon mid-memory tier; defaulting to small."
+        return "medium", "Apple Silicon higher-memory tier; defaulting to medium."
+    if device == "cuda":
+        if profile.confidence != "high":
+            return "small", "NVIDIA CUDA detected, but hardware details were partial; defaulting to small."
+        if memory_gb and memory_gb >= 16 and logical_cpu and logical_cpu >= 8:
+            return "medium", "CUDA available on stronger hardware; defaulting to medium."
+        return "small", "CUDA available; defaulting to small for balanced speed and accuracy."
+    if memory_gb is None or logical_cpu is None:
+        return "base", "Hardware detection was partial; defaulting conservatively to base."
+    if memory_gb >= 16 and logical_cpu >= 8:
+        return "small", "CPU path on stronger hardware; defaulting to small."
+    return "base", "CPU path on modest hardware; defaulting to base."
+
+
+def print_install_help(os_name: str, pkg_mgr: str) -> None:
+    say("")
+    say(f"{BOLD}Install the missing system tools, then run {Path(sys.argv[0]).name} again.{RESET}")
+    commands = {
+        ("macos", "brew"): "brew install python ffmpeg",
+        ("windows", "unknown"): "winget install Python.Python.3.14 Gyan.FFmpeg",
+        ("linux", "apt-get"): "sudo apt-get update && sudo apt-get install -y python3 python3-venv ffmpeg",
+        ("linux", "dnf"): "sudo dnf install -y python3 python3-pip python3-virtualenv ffmpeg",
+        ("linux", "yum"): "sudo yum install -y python3 python3-pip ffmpeg",
+        ("linux", "pacman"): "sudo pacman -S --needed python ffmpeg",
+        ("linux", "zypper"): "sudo zypper install -y python311 python311-virtualenv ffmpeg",
+        ("linux", "apk"): "sudo apk add python3 py3-pip ffmpeg",
+    }
+    command = commands.get((os_name, pkg_mgr))
+    if command:
+        say(f"  {MAGENTA}{command}{RESET}")
+    elif os_name == "macos":
+        say(f"  Install {BOLD}Homebrew{RESET}, then run:")
+        say(f"  {MAGENTA}brew install python ffmpeg{RESET}")
+    else:
+        say(f"  Install {BOLD}Python 3{RESET} and {BOLD}ffmpeg{RESET} with your package manager.")
+
+
+def confirm(prompt: str, *, default_yes: bool = False, assume_yes: bool = False) -> bool:
+    if assume_yes:
+        return True
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    say(f"{BLUE}❓{RESET} {prompt} {suffix}: ", err=True)
+    answer = input().strip().lower() if sys.stdin.isatty() else ""
+    if default_yes:
+        return answer not in {"n", "no"}
+    return answer in {"y", "yes"}
+
+
+def prompt_install_action(assume_yes: bool) -> str:
+    if assume_yes:
+        return "yes"
+    while True:
+        say(f"{BLUE}❓{RESET} Install with these defaults? [Y]es / [M]odify / [E]xit: ", err=True)
+        answer = input().strip().lower() if sys.stdin.isatty() else "exit"
+        if answer in {"", "y", "yes"}:
+            return "yes"
+        if answer in {"m", "modify"}:
+            return "modify"
+        if answer in {"e", "exit", "n", "no"}:
+            return "exit"
+        warn("Please choose yes, modify, or exit.")
+
+
+def prompt_remove_failed_backend(failed_backend: str) -> bool:
+    return confirm(
+        f"Fallback succeeded. Remove '{failed_backend}' Python packages from the managed runtime? "
+        "This will not remove shared Hugging Face downloads.",
+        default_yes=False,
+    )
+
+
+def runtime_python(venv_dir: Path, os_name: str) -> Path:
+    if os_name == "windows":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def site_packages_dir(venv_dir: Path, os_name: str, python_bin: Path) -> Path:
+    version = subprocess.check_output(
+        [str(python_bin), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        text=True,
+    ).strip()
+    if os_name == "windows":
+        return venv_dir / "Lib" / "site-packages"
+    return venv_dir / "lib" / f"python{version}" / "site-packages"
+
+
+def runtime_has_module(python_bin: Path, module: str) -> bool:
+    if not python_bin.exists():
+        return False
+    return subprocess.run(
+        [str(python_bin), "-c", f"import importlib; importlib.import_module('{module}')"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def runtime_has_backend(python_bin: Path, backend: str) -> bool:
+    return runtime_has_module(python_bin, BACKEND_MODULES[backend])
+
+
+def installed_backends(python_bin: Path) -> tuple[str, ...]:
+    found = [backend for backend in ("mlx", "faster-whisper") if runtime_has_backend(python_bin, backend)]
+    return tuple(found)
+
+
+def installed_packages(python_bin: Path) -> tuple[str, ...]:
+    if not python_bin.exists():
+        return ("runtime-not-built",)
+    found: list[str] = []
+    if runtime_has_module(python_bin, "tqdm"):
+        found.append("tqdm")
+    for backend in ("mlx", "faster-whisper"):
+        if runtime_has_backend(python_bin, backend):
+            found.append("mlx-whisper" if backend == "mlx" else "faster-whisper")
+    return tuple(found) if found else ("venv-created-no-backends",)
+
+
+def backend_packages(backend: str) -> tuple[str, ...]:
+    return BACKEND_PACKAGES[backend]
+
+
+def install_packages(python_bin: Path, description: str, *packages: str) -> None:
+    if not packages:
+        return
+    info(description)
+    result = run_command_with_spinner(
+        [str(python_bin), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", *packages],
+        description=description,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed during: {description}")
+
+
+def uninstall_packages(python_bin: Path, *packages: str) -> None:
+    if not packages:
+        return
+    subprocess.run(
+        [str(python_bin), "-m", "pip", "uninstall", "-y", *packages],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def ensure_venv(plan: RuntimePlan) -> None:
+    plan.state_dir.mkdir(parents=True, exist_ok=True)
+    if not plan.venv_python.exists():
+        info(f"Creating isolated runtime in {plan.state_dir}")
+        venv.create(plan.venv_dir, with_pip=True, clear=False, symlinks=(plan.os_name != "windows"))
+
+
+def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> RuntimePlan:
+    ensure_venv(plan)
+    if update or not runtime_has_module(plan.venv_python, "tqdm"):
+        install_packages(plan.venv_python, "Preparing pip in the local runtime", *PIP_BOOTSTRAP_PACKAGES)
+        install_packages(plan.venv_python, "Installing shared Python packages", *SHARED_RUNTIME_PACKAGES)
+    current_backends = set(installed_backends(plan.venv_python))
+    backends_to_install = set()
+    if update:
+        backends_to_install |= current_backends
+    if selected_backend_required and plan.selected_backend not in current_backends:
+        backends_to_install.add(plan.selected_backend)
+    for backend in ("mlx", "faster-whisper"):
+        if backend in backends_to_install:
+            label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
+            install_packages(plan.venv_python, f"Installing {label}", *backend_packages(backend))
+    return rebuild_plan(plan)
+
+
+def packages_to_install_now(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> tuple[str, ...]:
+    packages: list[str] = []
+    if update or "tqdm" not in plan.installed_packages:
+        packages.extend(["pip", "setuptools", "wheel", "tqdm"])
+    if selected_backend_required and plan.selected_backend not in plan.installed_backends:
+        packages.extend(["mlx-whisper" if plan.selected_backend == "mlx" else "faster-whisper"])
+    return tuple(dict.fromkeys(packages))
+
+
+def packages_for_possible_fallback(plan: RuntimePlan) -> tuple[str, ...]:
+    if plan.fallback_backend == "none" or plan.fallback_backend in plan.installed_backends:
+        return ()
+    return ("mlx-whisper" if plan.fallback_backend == "mlx" else "faster-whisper",)
+
+
+def render_hardware_summary(profile: HardwareProfile) -> list[tuple[str, object]]:
+    notes = "; ".join(profile.notes) if profile.notes else "none"
     return [
-        os.path.join(p, f)
-        for f in os.listdir(p)
-        if f.lower().endswith((".mp4",".mkv",".avi",".mp3",".wav",".m4a",".flac"))
+        ("OS", profile.os_name),
+        ("Architecture", profile.arch_name),
+        ("WSL", "yes" if profile.wsl else "no"),
+        ("Memory (GB)", profile.memory_gb or "unknown"),
+        ("CPU (phys/log)", f"{profile.physical_cpu or 'unknown'}/{profile.logical_cpu or 'unknown'}"),
+        ("NVIDIA GPU", "detected" if profile.nvidia else "not detected"),
+        ("Detection", profile.confidence),
+        ("Detection notes", notes),
     ]
 
-def burn(video, sub, out):
-    vf = f"ass={sub}" if sub.endswith(".ass") else f"subtitles={sub}"
-    subprocess.run(
-        ["ffmpeg","-y","-i",video,"-vf",vf,"-c:a","copy",out],
+
+def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], package_later: tuple[str, ...]) -> None:
+    say(f"{BOLD}Install Summary{RESET}")
+    for label, value in [
+        ("State dir", plan.state_dir),
+        ("Runtime", plan.venv_python),
+        ("Packages dir", plan.packages_dir),
+        ("Primary backend", plan.selected_backend),
+        ("Primary device", plan.selected_device),
+        ("Primary compute", plan.selected_compute),
+        ("Fallback backend", plan.fallback_backend),
+        ("Fallback device", plan.fallback_device),
+        ("Fallback compute", plan.fallback_compute),
+        ("Model", plan.selected_model),
+        ("Model reason", plan.model_reason),
+    ]:
+        say(f"  {label + ':':18} {value}")
+    for label, value in render_hardware_summary(plan.profile):
+        say(f"  {label + ':':18} {value}")
+    say(f"  {'Install now:':18} {', '.join(package_now) if package_now else 'nothing new'}")
+    say(
+        f"  {'Install later:':18} "
+        f"{', '.join(package_later) if package_later else 'no fallback packages planned'}"
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False, prog=Path(sys.argv[0]).name)
+    parser.add_argument("target", nargs="?")
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--setup-only", action="store_true")
+    parser.add_argument("--update", action="store_true")
+    parser.add_argument("--reinstall", action="store_true")
+    parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("--lang", default="auto")
+    parser.add_argument("--model", default="")
+    parser.add_argument("--backend", default="auto")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--compute-type", default="auto")
+    parser.add_argument("--jobs", type=int, default=1)
+    parser.add_argument("--outdir", default="")
+    parser.add_argument("--state-dir", default="")
+    parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--ass", action="store_true")
+    parser.add_argument("--burn", action="store_true")
+    parser.add_argument("--font", default="Arial")
+    parser.add_argument("--karaoke", action="store_true")
+    return parser
+
+
+def print_help() -> None:
+    name = Path(sys.argv[0]).name
+    say(
+        f"""{name} {DIM}— self-bootstrapping subtitle + transcription CLI{RESET}
+
+{BOLD}Usage{RESET}
+  {name} <file-or-folder> [options]
+  python {name} <file-or-folder> [options]
+  py {name} <file-or-folder> [options]   {DIM}(Windows){RESET}
+  {name} --doctor
+  {name} --setup-only
+
+{BOLD}Common options{RESET}
+  --lang=CODE
+  --model=NAME
+  --backend=auto|mlx|faster-whisper
+  --device=auto|cpu|cuda
+  --compute-type=auto|int8|float16|int8_float16
+  --jobs=N
+  --outdir=PATH
+  --recursive
+
+{BOLD}Runtime management{RESET}
+  First run shows an install summary and asks before downloading packages.
+  Defaults are chosen from detected hardware and OS capabilities.
+  Per-file progress percentages are estimated from media duration.
+  --setup-only
+  --update
+  --reinstall
+  --clean
+  --doctor
+  --yes
+  --state-dir=PATH
+  -h, --help
+"""
+    )
+
+
+def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) -> None:
+    if os_name == "unknown":
+        die(f"unsupported OS: {sys.platform}")
+    if not shutil.which("ffmpeg") and args.burn:
+        print_install_help(os_name, pkg_mgr)
+        die("ffmpeg is required for --burn.")
+
+
+def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
+    os_name = detect_os()
+    arch_name = detect_arch()
+    pkg_manager = detect_pkg_manager()
+    ensure_system_prereqs(args, os_name, pkg_manager)
+    profile = hardware_profile(os_name, arch_name)
+    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir(os_name)
+    venv_dir = state_dir / "venv"
+    venv_python = runtime_python(venv_dir, os_name)
+    packages_dir = site_packages_dir(venv_dir, os_name, Path(sys.executable))
+    backend_requested = normalize_backend_name(args.backend)
+    auto_backend = backend_requested == "auto"
+    selected_backend = choose_default_backend(profile) if auto_backend else backend_requested
+    if not backend_supported_on_host(selected_backend, os_name, arch_name):
+        die(f"backend '{selected_backend}' is not supported on {os_name}/{arch_name}")
+    selected_device = choose_default_device(selected_backend, profile) if args.device == "auto" else args.device
+    selected_compute = choose_default_compute_type(selected_backend, selected_device) if args.compute_type == "auto" else args.compute_type
+    recommended_model, model_reason = choose_default_model(selected_backend, selected_device, profile)
+    selected_model = args.model or recommended_model
+    if args.model:
+        model_reason = f"Explicit --model override: {args.model}"
+    fallback_backend = choose_fallback_backend(selected_backend, profile, auto_backend)
+    fallback_device = choose_default_device(fallback_backend, profile) if fallback_backend != "none" else "none"
+    fallback_compute = choose_default_compute_type(fallback_backend, fallback_device) if fallback_backend != "none" else "none"
+    installed_pkg_tuple = installed_packages(venv_python)
+    installed_backend_tuple = installed_backends(venv_python)
+    return RuntimePlan(
+        script_path=Path(__file__).resolve(),
+        os_name=os_name,
+        arch_name=arch_name,
+        pkg_manager=pkg_manager,
+        state_dir=state_dir,
+        venv_dir=venv_dir,
+        venv_python=venv_python,
+        packages_dir=packages_dir,
+        backend_requested=backend_requested,
+        auto_backend=auto_backend,
+        selected_backend=selected_backend,
+        selected_device=selected_device,
+        selected_compute=selected_compute,
+        selected_model=selected_model,
+        model_reason=model_reason,
+        fallback_backend=fallback_backend,
+        fallback_device=fallback_device,
+        fallback_compute=fallback_compute,
+        profile=profile,
+        installed_packages=installed_pkg_tuple,
+        installed_backends=installed_backend_tuple,
+    )
+
+
+def rebuild_plan(plan: RuntimePlan) -> RuntimePlan:
+    parser = build_parser()
+    args = parser.parse_args()
+    return build_runtime_plan(args)
+
+
+def print_doctor(plan: RuntimePlan) -> None:
+    say(f"{BOLD}Whisper Doctor{RESET}")
+    rows = [
+        ("Script", plan.script_path),
+        ("Package mgr", plan.pkg_manager),
+        ("Python", sys.executable),
+        ("State dir", plan.state_dir),
+        ("Runtime", plan.venv_python if plan.venv_python.exists() else "not built yet"),
+        ("Packages dir", plan.packages_dir),
+        ("Selected backend", plan.selected_backend),
+        ("Selected device", plan.selected_device),
+        ("Selected compute", plan.selected_compute),
+        ("Fallback backend", plan.fallback_backend),
+        ("Fallback device", plan.fallback_device),
+        ("Fallback compute", plan.fallback_compute),
+        ("Model", plan.selected_model),
+        ("Model reason", plan.model_reason),
+        ("Installed backends", ", ".join(plan.installed_backends) if plan.installed_backends else "none"),
+        ("Installed pkgs", ", ".join(plan.installed_packages)),
+        ("ffmpeg", shutil.which("ffmpeg") or "not found"),
+    ]
+    rows.extend(render_hardware_summary(plan.profile))
+    for label, value in rows:
+        say(f"  {label + ':':18} {value}")
+
+
+def split_sentences(text: str) -> list[str]:
+    return [part for part in re.split(r"(?<=[.!?])\s+", text) if part]
+
+
+def split_lines(text: str) -> list[str]:
+    words = text.split()
+    if len(words) <= 8:
+        return [text]
+    midpoint = len(words) // 2
+    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+
+def format_srt_time(value: float) -> str:
+    hours = int(value // 3600)
+    minutes = int((value % 3600) // 60)
+    seconds = int(value % 60)
+    milliseconds = int(round((value % 1) * 1000))
+    if milliseconds == 1000:
+        milliseconds = 0
+        seconds += 1
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
+
+
+def format_ass_time(value: float) -> str:
+    hours = int(value // 3600)
+    minutes = int((value % 3600) // 60)
+    seconds = int(value % 60)
+    centiseconds = int(round((value % 1) * 100))
+    if centiseconds == 100:
+        centiseconds = 0
+        seconds += 1
+    return f"{hours:d}:{minutes:02}:{seconds:02}.{centiseconds:02}"
+
+
+def normalized_text(text: str) -> str:
+    return " ".join(text.strip().split())
+
+
+def discover_files(target: Path, recursive: bool) -> list[Path]:
+    if target.is_file():
+        return [target]
+    if not target.is_dir():
+        return []
+    iterator = target.rglob("*") if recursive else target.iterdir()
+    return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS)
+
+
+def probe_duration_seconds(media_path: Path) -> float | None:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(media_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        value = proc.stdout.strip()
+        duration = float(value) if value else None
+        return duration if duration and duration > 0 else None
+    except Exception:
+        return None
+
+
+class EstimatedProgressReporter:
+    def __init__(self, media_path: Path, backend: str) -> None:
+        self.media_path = media_path
+        self.backend = backend
+        self.duration = probe_duration_seconds(media_path)
+        self.last_percent = -1
+        self.last_reported_at = 0.0
+        self.unknown_duration_noted = False
+        if self.duration is None:
+            self.note_unknown_duration()
+        else:
+            print(f"⏱ Estimated duration: {self.duration:.1f}s for {media_path.name}", file=sys.stderr)
+
+    def note_unknown_duration(self) -> None:
+        if self.unknown_duration_noted:
+            return
+        self.unknown_duration_noted = True
+        print(f"⏱ Duration unknown for {self.media_path.name}; estimated % progress unavailable.", file=sys.stderr)
+
+    def report(self, current_end: float) -> None:
+        if self.duration is None:
+            return
+        now = time.time()
+        percent = int(min(100, max(0, round((current_end / self.duration) * 100))))
+        if percent <= self.last_percent:
+            return
+        if percent < 100 and now - self.last_reported_at < 1.0:
+            return
+        self.last_percent = percent
+        self.last_reported_at = now
+        print(f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%", file=sys.stderr)
+
+    def finish(self) -> None:
+        if self.duration is None:
+            return
+        if self.last_percent < 100:
+            self.last_percent = 100
+            print(f"⏳ {self.media_path.name} [{self.backend}] ~100%", file=sys.stderr)
+
+
+def subtitle_filter_arg(path: Path) -> str:
+    escaped = str(path.resolve()).replace("\\", "\\\\").replace(":", "\\:").replace(",", "\\,").replace("'", "\\'")
+    return f"ass={escaped}" if path.suffix.lower() == ".ass" else f"subtitles={escaped}"
+
+
+def burn_subtitles(video_path: Path, subtitle_path: Path, output_path: Path) -> None:
+    result = run_command_with_spinner(
+        ["ffmpeg", "-y", "-i", str(video_path), "-vf", subtitle_filter_arg(subtitle_path), "-c:a", "copy", str(output_path)],
+        description=f"Burning subtitles into {video_path.name}",
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
     )
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, result.args)
 
-def write_ass(path, segs):
-    font = "DejaVu Sans" if FONT == "mpv" else "Arial"
-    with open(path, "w") as f:
-        f.write("[Script Info]\\nScriptType: v4.00+\\n\\n")
-        f.write("[V4+ Styles]\\n")
-        f.write("Format: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV\\n")
-        f.write(f"Style: Default,{font},28,&H00FFFFFF,&H00000000,1,2,1,2,20,20,40\\n\\n")
-        f.write("[Events]\\nFormat: Layer,Start,End,Style,Text\\n")
 
-        for seg in segs:
-            if not hasattr(seg, "words") or not seg.words:
+def write_ass(path: Path, segments, font_name: str, karaoke: bool) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n")
+        handle.write("[V4+ Styles]\n")
+        handle.write("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n")
+        handle.write(f"Style: Default,{font_name},30,&H00FFFFFF,&H0000FFFF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1\n\n")
+        handle.write("[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
+        for segment in segments:
+            words = segment.get("words")
+            if not words:
+                text = normalized_text(segment.get("text", ""))
+                if text:
+                    handle.write(f"Dialogue: 0,{format_ass_time(segment['start'])},{format_ass_time(segment['end'])},Default,,0,0,0,,{text}\n")
                 continue
-
-            words = seg.words
-            line = ""
-
-            for w in words:
-                d = int((w.end - w.start) * 100)
-                if KARAOKE:
-                    tag = f"\\\\k{d}"
-                    line += f"{{{tag}}}{w.word.strip()} "
+            chunks = []
+            for word in words:
+                word_text = normalized_text(word["word"])
+                if not word_text:
+                    continue
+                if karaoke:
+                    duration = max(1, int(round((word["end"] - word["start"]) * 100)))
+                    chunks.append(f"{{\\k{duration}}}{word_text}")
                 else:
-                    line += w.word + " "
+                    chunks.append(word_text)
+            if chunks:
+                handle.write(f"Dialogue: 0,{format_ass_time(words[0]['start'])},{format_ass_time(words[-1]['end'])},Default,,0,0,0,,{' '.join(chunks)}\n")
 
-            start = format_time(words[0].start).replace(",", ".")
-            end = format_time(words[-1].end).replace(",", ".")
 
-            f.write(f"Dialogue: 0,{start},{end},Default,{line.strip()}\\n")
+def write_srt(path: Path, segments) -> None:
+    index = 1
+    with path.open("w", encoding="utf-8") as handle:
+        for segment in segments:
+            text = normalized_text(segment.get("text", ""))
+            if not text:
+                continue
+            sentences = split_sentences(text) or [text]
+            duration = max((segment["end"] - segment["start"]) / max(len(sentences), 1), 0.01)
+            for offset, sentence in enumerate(sentences):
+                start = segment["start"] + offset * duration
+                end = min(segment["end"], start + duration)
+                handle.write(f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n")
+                for line in split_lines(sentence):
+                    handle.write(f"{line}\n")
+                handle.write("\n")
+                index += 1
 
-# --- main ---
-files = get_files(TARGET)
-if not files:
-    print("❌ No files found")
-    sys.exit(1)
 
-if OUTDIR:
-    os.makedirs(OUTDIR, exist_ok=True)
+def normalize_faster_segments(segments_iter, report_progress):
+    normalized = []
+    for segment in segments_iter:
+        words = []
+        for word in getattr(segment, "words", []) or []:
+            text = normalized_text(getattr(word, "word", ""))
+            if text:
+                words.append({"start": float(word.start), "end": float(word.end), "word": text})
+        normalized.append({"start": float(segment.start), "end": float(segment.end), "text": normalized_text(getattr(segment, "text", "")), "words": words})
+        report_progress(float(segment.end))
+    return normalized
 
-print("🚀 Loading model...")
-model = WhisperModel(MODEL, device="cuda", compute_type="int8_float16")
 
-def process(file):
-    start_time = time.time()
+def normalize_mlx_segments(result: dict, report_progress):
+    normalized = []
+    for segment in result.get("segments", []) or []:
+        words = []
+        for word in segment.get("words", []) or []:
+            text = normalized_text(word.get("word", ""))
+            if text:
+                words.append({"start": float(word["start"]), "end": float(word["end"]), "word": text})
+        normalized.append({"start": float(segment["start"]), "end": float(segment["end"]), "text": normalized_text(segment.get("text", "")), "words": words})
+        report_progress(float(segment["end"]))
+    return normalized
 
-    segs, _ = model.transcribe(
-        file,
-        language=None if LANG == "auto" else LANG,
-        vad_filter=True,
-        word_timestamps=True
+
+def resolve_mlx_model_name(model_name: str) -> str:
+    mapping = {
+        "tiny": "mlx-community/whisper-tiny-mlx",
+        "base": "mlx-community/whisper-base-mlx",
+        "small": "mlx-community/whisper-small-mlx",
+        "medium": "mlx-community/whisper-medium-mlx",
+        "large": "mlx-community/whisper-large-v3-mlx",
+        "large-v2": "mlx-community/whisper-large-v2-mlx",
+        "large-v3": "mlx-community/whisper-large-v3-mlx",
+        "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+    }
+    return model_name if "/" in model_name else mapping.get(model_name, model_name)
+
+
+def run_faster_whisper(media_path: Path, model: str, language: str, device: str, compute_type: str, report_progress):
+    from faster_whisper import WhisperModel
+
+    whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
+    segments_iter, _info = whisper_model.transcribe(str(media_path), language=None if language == "auto" else language, vad_filter=True, word_timestamps=True)
+    return normalize_faster_segments(segments_iter, report_progress)
+
+
+def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress):
+    import mlx_whisper
+
+    result = mlx_whisper.transcribe(str(media_path), path_or_hf_repo=resolve_mlx_model_name(model), language=None if language == "auto" else language, word_timestamps=True)
+    return normalize_mlx_segments(result, report_progress)
+
+
+def process_file(media_path: Path, env: dict[str, str], backend: str) -> str:
+    started_at = time.time()
+    print(f"▶ Starting transcription: {media_path.name} [{backend}]", file=sys.stderr)
+    wait_spinner = Spinner(f"Waiting for {backend} on {media_path.name}", enabled=True, delay_seconds=3.0)
+    progress = EstimatedProgressReporter(media_path, backend)
+    spinner_state = {"stopped": False}
+
+    def stop_wait_spinner() -> None:
+        if not spinner_state["stopped"]:
+            wait_spinner.stop()
+            spinner_state["stopped"] = True
+
+    def report_with_spinner(current_end: float) -> None:
+        stop_wait_spinner()
+        progress.report(current_end)
+
+    wait_spinner.start()
+    if backend == "mlx":
+        try:
+            segments = run_mlx_whisper(media_path, env["WHISPER_MODEL"], env["WHISPER_LANG"], report_with_spinner)
+        finally:
+            stop_wait_spinner()
+    else:
+        device = env["WHISPER_DEVICE"] if backend == env["WHISPER_BACKEND"] else env["WHISPER_FALLBACK_DEVICE"]
+        compute = env["WHISPER_COMPUTE_TYPE"] if backend == env["WHISPER_BACKEND"] else env["WHISPER_FALLBACK_COMPUTE_TYPE"]
+        try:
+            segments = run_faster_whisper(media_path, env["WHISPER_MODEL"], env["WHISPER_LANG"], device, compute, report_with_spinner)
+        finally:
+            stop_wait_spinner()
+    progress.finish()
+    print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
+    output_root = Path(env["WHISPER_OUTDIR"]).expanduser() if env["WHISPER_OUTDIR"] else media_path.parent
+    output_root.mkdir(parents=True, exist_ok=True)
+    subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
+    if env["WHISPER_ASS"] == "1":
+        write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
+    else:
+        write_srt(subtitle_path, segments)
+    if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
+        burn_subtitles(media_path, subtitle_path, output_root / f"{media_path.stem}_subbed.mp4")
+    elapsed = time.time() - started_at
+    return f"{media_path.name} [{backend}] ({elapsed:.1f}s)"
+
+
+def summarize_backend_error(backend: str, exc: Exception, env: dict[str, str]) -> None:
+    message = str(exc)
+    print(f"❌ Backend '{backend}' failed: {message}", file=sys.stderr)
+    if backend == "mlx" and ("401" in message or "Repository Not Found" in message or "Invalid username or password" in message):
+        print("💡 MLX model download failed through Hugging Face. If you have a bad HF_TOKEN set, unset it and try again.", file=sys.stderr)
+    if backend == "faster-whisper" and env.get("WHISPER_DEVICE") == "cuda":
+        print("💡 Try again with --device=cpu if CUDA is unavailable on this machine.", file=sys.stderr)
+
+
+def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
+    use_progress_bar = len(files) > 1 and sys.stderr.isatty()
+    progress = importlib.import_module("tqdm").tqdm(total=len(files), desc="📦 Files") if use_progress_bar else None
+    try:
+        if jobs > 1:
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                futures = [executor.submit(process_file, media_path, env, backend) for media_path in files]
+                for future in as_completed(futures):
+                    print(f"✅ {future.result()}")
+                    if progress:
+                        progress.update(1)
+        else:
+            for media_path in files:
+                print(f"✅ {process_file(media_path, env, backend)}")
+                if progress:
+                    progress.update(1)
+    finally:
+        if progress:
+            progress.close()
+
+
+def install_backend_into_managed_runtime(backend: str) -> None:
+    label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
+    install_packages(Path(sys.executable), f"Installing {label}", *backend_packages(backend))
+
+
+def managed_main() -> int:
+    env = os.environ
+    target = Path(env["WHISPER_TARGET"]).expanduser()
+    files = discover_files(target, env["WHISPER_RECURSIVE"] == "1")
+    if not files:
+        print("❌ No supported media files found.", file=sys.stderr)
+        return 1
+    backend = env["WHISPER_BACKEND"]
+    fallback = env["WHISPER_FALLBACK_BACKEND"]
+    auto_backend = env.get("WHISPER_AUTO_BACKEND") == "1"
+    jobs = int(env["WHISPER_JOBS"])
+    if backend == "mlx" and jobs > 1:
+        print("⚠ MLX runs sequentially for now; ignoring --jobs > 1.", file=sys.stderr)
+        jobs = 1
+    print(f"🚀 Loading backend '{backend}' for model '{env['WHISPER_MODEL']}'", file=sys.stderr)
+    print(f"🧠 Backend ready: {backend}. Processing {len(files)} file(s).", file=sys.stderr)
+    try:
+        process_files(files, env, backend, jobs)
+        return 0
+    except Exception as primary_exc:
+        summarize_backend_error(backend, primary_exc, env)
+        if not auto_backend or fallback == "none":
+            return 1
+        print(f"⚠ Auto mode will retry once with fallback backend '{fallback}'.", file=sys.stderr)
+        try:
+            if not runtime_has_backend(Path(sys.executable), fallback):
+                print(f"📦 Installing fallback backend '{fallback}' before retry.", file=sys.stderr)
+                install_backend_into_managed_runtime(fallback)
+            print(f"🚀 Loading fallback backend '{fallback}'", file=sys.stderr)
+            process_files(files, env, fallback, jobs)
+            if backend == "mlx" and prompt_remove_failed_backend("mlx"):
+                uninstall_packages(Path(sys.executable), "mlx-whisper")
+                success("Removed MLX Python packages from the managed runtime.")
+            return 0
+        except Exception as fallback_exc:
+            print(f"❌ Fallback backend '{fallback}' also failed: {fallback_exc}", file=sys.stderr)
+            return 1
+
+
+def maybe_remove_runtime(plan: RuntimePlan, *, assume_yes: bool) -> None:
+    if not confirm(f"Remove the managed runtime in {plan.state_dir}?", assume_yes=assume_yes):
+        die("clean cancelled")
+    shutil.rmtree(plan.state_dir)
+    success(f"Removed managed runtime: {plan.state_dir}")
+
+
+def print_modify_examples() -> None:
+    say("")
+    say("No changes made. Rerun with different flags like:")
+    say(f"  {MAGENTA}--backend=mlx|faster-whisper{RESET}")
+    say(f"  {MAGENTA}--model=small|medium|large-v3{RESET}")
+    say(f"  {MAGENTA}--device=cpu|cuda{RESET}")
+    say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
+
+
+def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
+    env = os.environ.copy()
+    env.update(
+        {
+            MANAGED_ENV_FLAG: "1",
+            "WHISPER_TARGET": str(args.target),
+            "WHISPER_LANG": args.lang,
+            "WHISPER_MODEL": plan.selected_model,
+            "WHISPER_BACKEND": plan.selected_backend,
+            "WHISPER_FALLBACK_BACKEND": plan.fallback_backend,
+            "WHISPER_DEVICE": plan.selected_device,
+            "WHISPER_COMPUTE_TYPE": plan.selected_compute,
+            "WHISPER_FALLBACK_DEVICE": plan.fallback_device,
+            "WHISPER_FALLBACK_COMPUTE_TYPE": plan.fallback_compute,
+            "WHISPER_STATE_DIR": str(plan.state_dir),
+            "WHISPER_JOBS": str(args.jobs),
+            "WHISPER_OUTDIR": args.outdir,
+            "WHISPER_RECURSIVE": "1" if args.recursive else "0",
+            "WHISPER_ASS": "1" if args.ass else "0",
+            "WHISPER_BURN": "1" if args.burn else "0",
+            "WHISPER_FONT": args.font,
+            "WHISPER_KARAOKE": "1" if args.karaoke else "0",
+            "WHISPER_AUTO_BACKEND": "1" if plan.auto_backend else "0",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        }
     )
+    info(f"OS: {plan.os_name} | arch: {plan.arch_name} | backend: {plan.selected_backend} | model: {plan.selected_model}")
+    info(f"Fallback backend: {plan.fallback_backend} | device: {plan.fallback_device}")
+    info(f"Using runtime: {plan.state_dir}")
+    result = subprocess.run([str(plan.venv_python), str(plan.script_path)], env=env, check=False)
+    return result.returncode
 
-    segs = list(segs)
 
-    base = os.path.splitext(os.path.basename(file))[0]
-    out_base = OUTDIR if OUTDIR else os.path.dirname(file)
+def outer_main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.help:
+        print_help()
+        return 0
+    if args.jobs < 1:
+        die("--jobs must be at least 1")
+    plan = build_runtime_plan(args)
+    if args.doctor:
+        print_doctor(plan)
+        return 0
+    if args.clean:
+        if not plan.state_dir.exists():
+            success(f"Nothing to clean. State dir does not exist: {plan.state_dir}")
+            return 0
+        maybe_remove_runtime(plan, assume_yes=args.yes)
+        return 0
+    if args.reinstall and plan.venv_dir.exists():
+        if not confirm(f"Remove and rebuild the runtime in {plan.state_dir}?", assume_yes=args.yes):
+            die("reinstall cancelled")
+        shutil.rmtree(plan.venv_dir)
+        success("Removed old runtime.")
+        plan = build_runtime_plan(args)
+    selected_backend_required = bool(args.target or args.setup_only or args.update or not plan.venv_python.exists())
+    install_needed = (
+        not plan.venv_python.exists()
+        or "tqdm" not in plan.installed_packages
+        or (selected_backend_required and plan.selected_backend not in plan.installed_backends)
+        or args.update
+    )
+    install_now = packages_to_install_now(plan, update=args.update, selected_backend_required=selected_backend_required)
+    install_later = packages_for_possible_fallback(plan)
+    if install_needed and not os.environ.get(MANAGED_ENV_FLAG):
+        print_install_summary(plan, install_now, install_later)
+        say("")
+        say("You can accept the defaults, modify flags and rerun, or exit without changes.")
+        say("Helpful commands:")
+        say(f"  {MAGENTA}{Path(sys.argv[0]).name} --doctor{RESET}")
+        say(f"  {MAGENTA}{Path(sys.argv[0]).name} --setup-only{RESET}")
+        say("")
+        action = prompt_install_action(args.yes)
+        if action == "modify":
+            print_modify_examples()
+            return 0
+        if action == "exit":
+            say("")
+            say("No changes made.")
+            return 0
+    if install_needed:
+        plan = ensure_runtime(plan, update=args.update, selected_backend_required=selected_backend_required)
+    if args.setup_only:
+        success(f"Runtime is ready in {plan.state_dir}")
+        success(f"Backend plan: primary={plan.selected_backend}, fallback={plan.fallback_backend}")
+        return 0
+    if args.update and not args.target:
+        success(f"Runtime updated in {plan.state_dir}")
+        success(f"Installed packages: {', '.join(plan.installed_packages)}")
+        return 0
+    if not args.target:
+        if install_needed:
+            success(f"Runtime is ready in {plan.state_dir}")
+            success(f"Installed packages: {', '.join(plan.installed_packages)}")
+            say("")
+            say(f"Run {MAGENTA}{Path(sys.argv[0]).name} /path/to/file.mp4{RESET} to start transcribing.")
+            say(f"Windows also works with {MAGENTA}py {Path(sys.argv[0]).name} /path/to/file.mp4{RESET}.")
+            return 0
+        print_help()
+        return 1
+    return launch_managed_runtime(args, plan)
 
-    bar = tqdm(total=len(segs), desc=f"🧠 {base}", leave=False)
 
-    if ASS:
-        out = os.path.join(out_base, base + ".ass")
-        write_ass(out, segs)
-        bar.update(len(segs))
-    else:
-        out = os.path.join(out_base, base + ".srt")
-        i = 1
-        with open(out, "w") as f:
-            for seg in segs:
-                sents = split_sentences(seg.text.strip())
-                dur = (seg.end - seg.start) / max(len(sents), 1)
-
-                for j, s in enumerate(sents):
-                    start = seg.start + j * dur
-                    end = start + dur
-
-                    f.write(f"{i}\\n{format_time(start)} --> {format_time(end)}\\n")
-                    for line in split_lines(s.strip()):
-                        f.write(line + "\\n")
-                    f.write("\\n")
-                    i += 1
-
-                bar.update(1)
-
-    bar.close()
-
-    if BURN and file.lower().endswith((".mp4",".mkv",".avi")):
-        vid = os.path.join(out_base, base + "_subbed.mp4")
-        burn(file, out, vid)
-
-    elapsed = time.time() - start_time
-    return f"{base} ({elapsed:.1f}s)"
-
-# --- progress ---
-with tqdm(total=len(files), desc="📦 Files") as pbar:
-    if JOBS > 1:
-        with ThreadPoolExecutor(max_workers=JOBS) as ex:
-            futures = [ex.submit(process, f) for f in files]
-            for fut in as_completed(futures):
-                tqdm.write(f"✅ {fut.result()}")
-                pbar.update(1)
-    else:
-        for f in files:
-            res = process(f)
-            tqdm.write(f"✅ {res}")
-            pbar.update(1)
-
-print("🎉 Done")
-EOF
+if __name__ == "__main__":
+    if os.environ.get(MANAGED_ENV_FLAG) == "1":
+        raise SystemExit(managed_main())
+    raise SystemExit(outer_main())
