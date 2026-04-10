@@ -203,7 +203,6 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
 - MLX behavior can vary by machine, Python version, and model choice.
-- Shared setup belongs in the [Platform Setup](#platform-setup) section; avoid duplicating it when future scripts are added.
 
 [↑ TOC](#table-of-contents)
 
