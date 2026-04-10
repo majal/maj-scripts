@@ -17,12 +17,8 @@ The root README is the main navigation page:
 - [Overview](#overview)
 - [Scripts](#scripts)
   - [`whisper`](#whisper)
-- [Bootstrap / Platform Setup](#bootstrap--platform-setup)
+- [Platform Setup](#platform-setup)
   - [Python](#python)
-  - [macOS](#macos)
-  - [Homebrew (macOS)](#homebrew-macos)
-  - [Linux](#linux)
-  - [Windows](#windows)
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
@@ -52,7 +48,7 @@ MLX support is for Apple Silicon on macOS. Other environments use `faster-whispe
 Shared prerequisites:
 
 - [Python](#python)
-- platform setup from [macOS](#macos), [Linux](#linux), or [Windows](#windows)
+- platform setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
 
 Useful system dependency:
 
@@ -123,11 +119,11 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
 - MLX behavior can vary by machine, Python version, and model choice.
-- Shared setup belongs in the [Bootstrap / Platform Setup](#bootstrap--platform-setup) section; avoid duplicating it when future scripts are added.
+- Shared setup belongs in the [Platform Setup](#platform-setup) section; avoid duplicating it when future scripts are added.
 
 [↑ TOC](#table-of-contents)
 
-## Bootstrap / Platform Setup
+## Platform Setup
 
 Use this section for shared prerequisites. Script-specific notes should link back here instead of duplicating common setup instructions.
 
@@ -145,9 +141,15 @@ If that command works, you may already have enough to get started. If it does no
 
 For this repo, a modern Python 3 release is the safe default. `whisper` can also choose a stable managed-runtime Python automatically for MLX on Apple Silicon.
 
+Python setup by platform:
+
+- [macOS](#python-on-macos)
+- [Linux](#python-on-linux)
+- [Windows](#python-on-windows)
+
 [↑ TOC](#table-of-contents)
 
-### macOS
+#### Python on macOS
 
 Do not assume a usable `python3` is already present. Check first:
 
@@ -168,9 +170,7 @@ xcode-select --install
 
 `whisper` also benefits from `ffmpeg` being installed.
 
-[↑ TOC](#table-of-contents)
-
-### Homebrew (macOS)
+##### Homebrew on macOS
 
 Install Homebrew by following the official instructions:
 
@@ -197,7 +197,7 @@ ffmpeg -version
 
 [↑ TOC](#table-of-contents)
 
-### Linux
+#### Python on Linux
 
 Python 3 is often available already, but still verify first:
 
@@ -216,7 +216,7 @@ Other distros should use their normal package manager equivalents.
 
 [↑ TOC](#table-of-contents)
 
-### Windows
+#### Python on Windows
 
 On Windows, it is best to treat Python installation as explicit setup rather than assuming it is already present.
 

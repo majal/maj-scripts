@@ -20,7 +20,7 @@ Recommended top-level README order:
 3. Overview
 4. Table of Contents
 5. Scripts
-6. Bootstrap / Platform Setup
+6. Platform Setup
 7. Contributing Docs
 
 ## README Rules
@@ -30,7 +30,7 @@ When adding a new top-level script to the repo:
 1. Add or update the script file.
 2. Add the script to the README table of contents.
 3. Add a dedicated script subsection under `## Scripts` using the standard template.
-4. Keep the `## Scripts` section above the shared Bootstrap section.
+4. Keep the `## Scripts` section above the shared Platform Setup section.
 5. End each major section after the table of contents with `↑ TOC`.
 
 Do not add a new script without updating the README.
@@ -52,9 +52,11 @@ Each script subsection under `## Scripts` in `README.md` should include:
 
 Keep examples short, practical, and copy-pasteable.
 
-## Bootstrap Rules
+## Platform Setup Rules
 
-Shared bootstrap/setup instructions belong in the shared Bootstrap section of `README.md`, not duplicated in every script section.
+Shared setup instructions belong in the shared Platform Setup section of `README.md`, not duplicated in every script section.
+
+Prefer a hierarchy where the main setup topic is the visible README section and platform-specific variants live underneath it.
 
 Examples of shared topics:
 
@@ -62,7 +64,7 @@ Examples of shared topics:
 - Homebrew installation
 - platform-level setup like `ffmpeg`
 
-Script-specific setup may be documented in the script section, but it should link back to shared bootstrap sections when possible instead of repeating the same instructions.
+Script-specific setup may be documented in the script section, but it should link back to shared setup sections when possible instead of repeating the same instructions.
 
 ## Tone Rules
 
@@ -88,7 +90,9 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - Keep the Overview above the table of contents.
 - Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
-- The `## Scripts` section should appear before Bootstrap.
+- Prefer `## Platform Setup` over `Bootstrap / Platform Setup`.
+- In the main README TOC, prefer top-level setup topics like `Python`, with platform-specific entries discoverable inside that section instead of crowding the main TOC.
+- The `## Scripts` section should appear before Platform Setup.
 - Every major section after the table of contents should end with `↑ TOC`.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
 
@@ -109,9 +113,9 @@ If the repo grows large later:
 - add the script subsection under `## Scripts`
 - link the script subsection heading to the actual script file when possible
 - use the standard script template inside that subsection
-- keep `## Scripts` above Bootstrap
+- keep `## Scripts` above Platform Setup
 - keep the Overview above the table of contents
-- add/update bootstrap docs only if there is a new shared prerequisite
+- add/update shared setup docs only if there is a new shared prerequisite
 - use `↑ TOC` consistently
 - keep examples concise and copy-pasteable
 - keep links and headings stable
