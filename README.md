@@ -61,7 +61,7 @@ Basic first run:
 wh send file.zip
 ```
 
-If `wormhole` is not installed yet, `wh` can detect a likely install route and offer to run it for you.
+If `wormhole` is missing, `wh` can suggest a likely install route and offer to run it for you.
 
 #### Common Usage Examples
 
@@ -99,7 +99,7 @@ wh help
 
 #### Notes / Caveats
 
-- Package-manager availability varies by system, so the suggested install route is best-effort.
+- Package-manager support varies by system, so `wh` suggests the best install route it can find.
 
 [↑ TOC](#table-of-contents)
 
@@ -153,7 +153,7 @@ whisper --doctor
 whisper --setup-only
 ```
 
-The script will:
+On first run, `whisper` will:
 
 - inspect the host
 - choose a managed runtime
@@ -220,7 +220,7 @@ Check whether Python 3 is already available:
 python3 --version
 ```
 
-If that command works, you may already have enough to get started. If not, the platform guidance below will help you get set up.
+If that command works, you're probably already most of the way there. If not, the platform guidance below will help you get set up.
 
 For this repo, a modern Python 3 release is the safe default.
 
