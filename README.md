@@ -1,6 +1,6 @@
-# Maj Scripts, vibe version
+# maj-scripts-vibe
 
-LLMs have changed the way the programming world works. Welcome to the machine-made code era.
+Standalone scripts for the `maj-scripts-vibe` repo.
 
 ## Table of Contents
 

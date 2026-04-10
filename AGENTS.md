@@ -2,9 +2,11 @@
 
 Guidance for future contributors and AI agents working in this repo.
 
+Repo name: `maj-scripts-vibe`
+
 ## Purpose
 
-This repo is expected to grow into a collection of unrelated or loosely related scripts.
+`maj-scripts-vibe` is expected to grow into a collection of unrelated or loosely related scripts.
 
 The documentation model is:
 
