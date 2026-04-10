@@ -208,7 +208,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 ## Platform Setup
 
-Use this section for shared prerequisites. Script-specific notes should link back here instead of duplicating common setup instructions.
+Use this section for shared prerequisites. Script-specific notes can link back here instead of repeating the same setup steps everywhere.
 
 ### [Python](https://www.python.org/downloads/)
 
@@ -220,7 +220,7 @@ Check whether Python 3 is already available:
 python3 --version
 ```
 
-If that command works, you may already have enough to get started. If it does not, install Python using the platform guidance below.
+If that command works, you may already have enough to get started. If not, the platform guidance below will help you get set up.
 
 For this repo, a modern Python 3 release is the safe default.
 
@@ -232,7 +232,7 @@ Python setup by platform:
 
 #### [Python on macOS](https://www.python.org/downloads/macos/)
 
-Do not assume a usable `python3` is already present. Check first:
+Do not assume a usable `python3` is already present. A quick check first can save time:
 
 ```bash
 python3 --version
@@ -251,7 +251,7 @@ xcode-select --install
 
 #### [Python on Linux](https://docs.python.org/3/using/unix.html)
 
-Python 3 is often available already, but still verify first:
+Python 3 is often available already, but it is still worth checking first:
 
 ```bash
 python3 --version
@@ -268,7 +268,7 @@ Other distros should use their normal package manager equivalents.
 
 #### [Python on Windows](https://www.python.org/downloads/windows/)
 
-On Windows, it is best to treat Python installation as explicit setup rather than assuming it is already present.
+On Windows, it is best to treat Python installation as an explicit setup step rather than assuming it is already present.
 
 When running Python scripts from this repo on Windows, the safest default is:
 
@@ -340,7 +340,7 @@ git --version
 
 #### [winget](https://learn.microsoft.com/windows/package-manager/winget/) and [Chocolatey](https://chocolatey.org/) (Windows)
 
-For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions. Chocolatey is also common if you already use it.
+For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions. Chocolatey is also a solid option if you already use it.
 
 Verify `winget` if available:
 
@@ -379,7 +379,7 @@ python --version
 
 ## Contributing Docs
 
-When future scripts are added, keep this README as the main navigation page and update it alongside the script.
+When future scripts are added, keep this README as the main navigation page and update it alongside the script so new tools stay easy to discover.
 
 Keep `Platform Setup` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
 

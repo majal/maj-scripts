@@ -82,6 +82,13 @@ The README should be lightly playful, not chaotic:
 
 Do not let “fun” make setup instructions vague.
 
+User-facing script output should also feel warm, calm, and reassuring:
+
+- prefer friendly and supportive wording for normal status messages
+- for interruptions and recoverable errors, avoid cold or alarming phrasing
+- make it clear when the user can safely try again
+- a small amount of personality is welcome if it stays readable
+
 Human-written copy in the README intro should be treated as protected by default:
 
 - do not rewrite the README title unless explicitly asked
