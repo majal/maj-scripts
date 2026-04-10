@@ -152,8 +152,6 @@ Python setup by platform:
 - [Linux](#python-on-linux)
 - [Windows](#python-on-windows)
 
-[↑ TOC](#table-of-contents)
-
 #### Python on macOS
 
 Do not assume a usable `python3` is already present. Check first:
@@ -213,6 +211,8 @@ py --version
 python --version
 ```
 
+[↑ TOC](#table-of-contents)
+
 ### Package Managers
 
 Package managers are the easiest way for many users to install Python and common tools without manual downloads.
@@ -221,8 +221,6 @@ Package manager setup by platform:
 
 - [Homebrew (macOS)](#homebrew-macos)
 - [winget and Chocolatey (Windows)](#winget-and-chocolatey-windows)
-
-[↑ TOC](#table-of-contents)
 
 #### Homebrew (macOS)
 
@@ -271,6 +269,8 @@ Verify Python from a normal terminal session after installation:
 py --version
 python --version
 ```
+
+[↑ TOC](#table-of-contents)
 
 ## Contributing Docs
 

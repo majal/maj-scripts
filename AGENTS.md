@@ -96,6 +96,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - In the main README TOC, prefer top-level setup topics like `Python` and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.
 - The `## Scripts` section should appear before Platform Setup.
 - Use `↑ TOC` for major sections and primary subsections, not every nested platform subsection.
+- When a primary subsection contains nested subsections, place its `↑ TOC` at the end of the last nested subsection, not before the nested content starts.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
 
 ## Growth Rule
