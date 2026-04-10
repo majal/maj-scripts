@@ -1,4 +1,4 @@
-# maj-scripts-vibe
+# Maj Scripts, vibe version
 
 LLMs have changed the way the programming world works. Welcome to the machine-made code era! 🤖
 
