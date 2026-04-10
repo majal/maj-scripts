@@ -86,7 +86,7 @@ wh receive --allocate
 Pass through other `wormhole` commands:
 
 ```bash
-wh --help
+wh help
 ```
 
 #### Important Behavior / Defaults
