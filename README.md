@@ -1,6 +1,6 @@
 # maj-scripts-vibe
 
-Standalone scripts for the `maj-scripts-vibe` repo.
+LLMs have changed the way the programming world works. Welcome to the machine-made code era! 🤖
 
 ## Table of Contents
 
@@ -18,7 +18,7 @@ Standalone scripts for the `maj-scripts-vibe` repo.
 
 ## Overview
 
-`maj-scripts-vibe` is a home for utility scripts that may not be related to each other.
+`maj-scripts-vibe` is a home for utility scripts, all vibe-coded. 😎
 
 The root README is the main navigation page:
 
