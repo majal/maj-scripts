@@ -173,8 +173,6 @@ For scripts that need compiled dependencies or multimedia tools, Xcode Command L
 xcode-select --install
 ```
 
-[↑ TOC](#table-of-contents)
-
 #### Python on Linux
 
 Python 3 is often available already, but still verify first:
@@ -191,8 +189,6 @@ sudo apt-get install -y python3 python3-venv ffmpeg
 ```
 
 Other distros should use their normal package manager equivalents.
-
-[↑ TOC](#table-of-contents)
 
 #### Python on Windows
 
@@ -216,8 +212,6 @@ After installation, verify:
 py --version
 python --version
 ```
-
-[↑ TOC](#table-of-contents)
 
 ### Package Managers
 
@@ -255,8 +249,6 @@ python3 --version
 ffmpeg -version
 ```
 
-[↑ TOC](#table-of-contents)
-
 #### winget and Chocolatey (Windows)
 
 For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions.
@@ -279,8 +271,6 @@ Verify Python from a normal terminal session after installation:
 py --version
 python --version
 ```
-
-[↑ TOC](#table-of-contents)
 
 ## Contributing Docs
 
