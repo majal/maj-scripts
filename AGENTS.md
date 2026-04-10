@@ -79,6 +79,7 @@ The README should be lightly playful, not chaotic:
 - a small number of useful emojis is fine
 - headings and navigation can be friendlier than plain boilerplate
 - body text should still stay practical, readable, and skimmable
+- prefer active sentence structures over passive ones when the wording stays natural
 
 Do not let “fun” make setup instructions vague.
 
