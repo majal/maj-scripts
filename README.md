@@ -99,9 +99,7 @@ wh --help
 
 ### Notes / Caveats
 
-- `wh` is a thin wrapper, not a managed runtime like `whisper`.
 - Package-manager availability varies by system, so the suggested install route is best-effort.
-- Shared setup belongs in the [Platform Setup](#platform-setup) section; keep `wormhole`-specific behavior in this script section.
 
 [↑ TOC](#table-of-contents)
 
