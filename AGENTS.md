@@ -61,7 +61,7 @@ Prefer a hierarchy where the main setup topic is the visible README section and 
 Examples of shared topics:
 
 - Python installation
-- Homebrew installation
+- package managers such as Homebrew, `winget`, and Chocolatey
 - platform-level setup like `ffmpeg`
 
 Script-specific setup may be documented in the script section, but it should link back to shared setup sections when possible instead of repeating the same instructions.
@@ -91,7 +91,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - Prefer `## Platform Setup` over `Bootstrap / Platform Setup`.
-- In the main README TOC, prefer top-level setup topics like `Python`, with platform-specific entries discoverable inside that section instead of crowding the main TOC.
+- In the main README TOC, prefer top-level setup topics like `Python` and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.
 - The `## Scripts` section should appear before Platform Setup.
 - Every major section after the table of contents should end with `↑ TOC`.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.

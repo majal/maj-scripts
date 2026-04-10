@@ -19,6 +19,7 @@ The root README is the main navigation page:
   - [`whisper`](#whisper)
 - [Platform Setup](#platform-setup)
   - [Python](#python)
+  - [Package Managers](#package-managers)
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
@@ -159,7 +160,7 @@ python3 --version
 
 If `python3` is missing:
 
-1. Install Homebrew if needed.
+1. Install [Homebrew](#homebrew-macos) if needed.
 2. Install Python with Homebrew.
 
 For scripts that need compiled dependencies or multimedia tools, Xcode Command Line Tools may also be useful:
@@ -169,31 +170,6 @@ xcode-select --install
 ```
 
 `whisper` also benefits from `ffmpeg` being installed.
-
-##### Homebrew on macOS
-
-Install Homebrew by following the official instructions:
-
-- <https://brew.sh/>
-
-Then install Python:
-
-```bash
-brew install python
-```
-
-Optional but recommended for `whisper`:
-
-```bash
-brew install ffmpeg
-```
-
-Verify:
-
-```bash
-python3 --version
-ffmpeg -version
-```
 
 [↑ TOC](#table-of-contents)
 
@@ -230,11 +206,7 @@ python --version
 If Python is missing, install it using one of these routes:
 
 - Official Python installer: <https://www.python.org/downloads/windows/>
-- `winget`:
-
-```powershell
-winget install Python.Python.3
-```
+- a package manager such as [`winget` or Chocolatey](#winget-and-chocolatey-windows)
 
 After installation, verify:
 
@@ -244,6 +216,69 @@ python --version
 ```
 
 For `whisper`, make sure Python is available in a normal terminal session before running the script.
+
+[↑ TOC](#table-of-contents)
+
+### Package Managers
+
+Package managers are the easiest way for many users to install Python and common tools without manual downloads.
+
+Package manager setup by platform:
+
+- [Homebrew (macOS)](#homebrew-macos)
+- [winget and Chocolatey (Windows)](#winget-and-chocolatey-windows)
+
+[↑ TOC](#table-of-contents)
+
+#### Homebrew (macOS)
+
+Install Homebrew by following the official instructions:
+
+- <https://brew.sh/>
+
+Then install Python:
+
+```bash
+brew install python
+```
+
+Optional but recommended for `whisper`:
+
+```bash
+brew install ffmpeg
+```
+
+Verify:
+
+```bash
+python3 --version
+ffmpeg -version
+```
+
+[↑ TOC](#table-of-contents)
+
+#### winget and Chocolatey (Windows)
+
+For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions.
+
+Install Python with `winget`:
+
+```powershell
+winget install Python.Python.3
+```
+
+If you already use Chocolatey, this is the equivalent:
+
+```powershell
+choco install python
+```
+
+For `whisper`, verify Python from a normal terminal session after installation:
+
+```powershell
+py --version
+python --version
+```
 
 [↑ TOC](#table-of-contents)
 
