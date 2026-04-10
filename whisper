@@ -582,7 +582,7 @@ def choose_default_model(backend: str, device: str, profile: HardwareProfile) ->
 
 def print_install_help(os_name: str, pkg_mgr: str) -> None:
     say("")
-    say(f"{BOLD}Install the missing system tools, then run {Path(sys.argv[0]).name} again.{RESET}")
+    say(f"{BOLD}A couple of system tools are still missing. Install them, then run {Path(sys.argv[0]).name} again.{RESET}")
     commands = {
         ("macos", "brew"): "brew install python ffmpeg",
         ("windows", "unknown"): "winget install Python.Python.3.14 Gyan.FFmpeg",
@@ -597,10 +597,10 @@ def print_install_help(os_name: str, pkg_mgr: str) -> None:
     if command:
         say(f"  {MAGENTA}{command}{RESET}")
     elif os_name == "macos":
-        say(f"  Install {BOLD}Homebrew{RESET}, then run:")
+        say(f"  Start by installing {BOLD}Homebrew{RESET}, then run:")
         say(f"  {MAGENTA}brew install python ffmpeg{RESET}")
     else:
-        say(f"  Install {BOLD}Python 3{RESET} and {BOLD}ffmpeg{RESET} with your package manager.")
+        say(f"  Install {BOLD}Python 3{RESET} and {BOLD}ffmpeg{RESET} with your package manager, then try again.")
 
 
 def confirm(prompt: str, *, default_yes: bool = False, assume_yes: bool = False) -> bool:
@@ -626,7 +626,7 @@ def prompt_install_action(assume_yes: bool) -> str:
             return "modify"
         if answer in {"e", "exit", "n", "no"}:
             return "exit"
-        warn("Please choose yes, modify, or exit.")
+        warn("Please choose yes, modify, or exit so we know how you'd like to continue.")
 
 
 def prompt_remove_failed_backend(failed_backend: str) -> bool:
@@ -1329,11 +1329,11 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
 
 def summarize_backend_error(backend: str, exc: Exception, env: dict[str, str]) -> None:
     message = str(exc)
-    print(f"❌ Backend '{backend}' failed: {message}", file=sys.stderr)
+    print(f"❌ Backend '{backend}' ran into a problem: {message}", file=sys.stderr)
     if backend == "mlx" and ("401" in message or "Repository Not Found" in message or "Invalid username or password" in message):
-        print("💡 MLX model download failed through Hugging Face. If you have a bad HF_TOKEN set, unset it and try again.", file=sys.stderr)
+        print("💡 MLX couldn't download the model from Hugging Face. If you have a bad HF_TOKEN set, unset it and try again.", file=sys.stderr)
     if backend == "faster-whisper" and env.get("WHISPER_DEVICE") == "cuda":
-        print("💡 Try again with --device=cpu if CUDA is unavailable on this machine.", file=sys.stderr)
+        print("💡 If CUDA is unavailable on this machine, try again with --device=cpu.", file=sys.stderr)
 
 
 def format_elapsed_summary(seconds: float) -> str:
@@ -1401,10 +1401,10 @@ def managed_main() -> int:
         if not auto_backend or fallback == "none":
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
-        print(f"⚠ Auto mode will retry once with fallback backend '{fallback}'.", file=sys.stderr)
+        print(f"⚠ Auto mode will try one more time with fallback backend '{fallback}'.", file=sys.stderr)
         try:
             if not runtime_has_backend(Path(sys.executable), fallback):
-                print(f"📦 Installing fallback backend '{fallback}' before retry.", file=sys.stderr)
+                print(f"📦 Getting fallback backend '{fallback}' ready before retrying.", file=sys.stderr)
                 install_backend_into_managed_runtime(fallback)
             print(f"🚀 Loading fallback backend '{fallback}'", file=sys.stderr)
             process_files(files, env, fallback, jobs)
@@ -1414,21 +1414,21 @@ def managed_main() -> int:
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 0
         except Exception as fallback_exc:
-            print(f"❌ Fallback backend '{fallback}' also failed: {fallback_exc}", file=sys.stderr)
+            print(f"❌ Fallback backend '{fallback}' ran into a problem too: {fallback_exc}", file=sys.stderr)
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
 
 
 def maybe_remove_runtime(plan: RuntimePlan, *, assume_yes: bool) -> None:
     if not confirm(f"Remove the managed runtime in {plan.state_dir}?", assume_yes=assume_yes):
-        die("clean cancelled")
+        die("Clean canceled. Everything is still in place.")
     shutil.rmtree(plan.state_dir)
     success(f"Removed managed runtime: {plan.state_dir}")
 
 
 def print_modify_examples() -> None:
     say("")
-    say("No changes made. Rerun with different flags like:")
+    say("No changes made yet. If you'd like, rerun with flags like:")
     say(f"  {MAGENTA}--backend=mlx|faster-whisper{RESET}")
     say(f"  {MAGENTA}--model=small|medium|large-v3{RESET}")
     say(f"  {MAGENTA}--device=cpu|cuda{RESET}")
@@ -1528,7 +1528,7 @@ def outer_main() -> int:
             return 0
         if action == "exit":
             say("")
-            say("No changes made.")
+            say("No changes made. You're all set to come back to this later.")
             return 0
     if install_needed:
         plan = ensure_runtime(plan, update=args.update, selected_backend_required=selected_backend_required)
@@ -1545,8 +1545,8 @@ def outer_main() -> int:
             success(f"Runtime is ready in {plan.state_dir}")
             success(f"Installed packages: {', '.join(plan.installed_packages)}")
             say("")
-            say(f"Run {MAGENTA}{Path(sys.argv[0]).name} /path/to/file.mp4{RESET} to start transcribing.")
-            say(f"Windows also works with {MAGENTA}py {Path(sys.argv[0]).name} /path/to/file.mp4{RESET}.")
+            say(f"You're ready to go. Run {MAGENTA}{Path(sys.argv[0]).name} /path/to/file.mp4{RESET} to start transcribing.")
+            say(f"On Windows, you can also run {MAGENTA}py {Path(sys.argv[0]).name} /path/to/file.mp4{RESET}.")
             return 0
         print_help()
         return 1
