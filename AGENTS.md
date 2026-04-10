@@ -64,6 +64,14 @@ The README should be lightly playful, not chaotic:
 
 Do not let “fun” make setup instructions vague.
 
+Human-written copy in the README intro should be treated as protected by default:
+
+- do not rewrite the README title unless explicitly asked
+- do not rewrite the short description directly under the title unless explicitly asked
+- do not rewrite the Overview description paragraph unless explicitly asked
+
+Assume these are intentionally human-authored voice and branding choices. AI should preserve them rather than “improving” them.
+
 ## Heading And TOC Rules
 
 - Keep README headings stable and predictable so future anchors remain valid.
