@@ -21,7 +21,8 @@ When adding a new top-level script to the repo:
 2. Add the script to the README table of contents.
 3. Add the script to the README Scripts index.
 4. Add a dedicated script section to the README using the standard template.
-5. End the script section with a `Back to TOC` link.
+5. Place script sections above the shared Bootstrap section.
+6. End each major section with `↑ TOC`.
 
 Do not add a new script without updating the README.
 
@@ -37,7 +38,7 @@ Each script section in `README.md` should include:
 6. Common usage examples
 7. Important behavior / defaults
 8. Notes / caveats
-9. Back to TOC link
+9. `↑ TOC`
 
 Keep examples short, practical, and copy-pasteable.
 
@@ -53,12 +54,23 @@ Examples of shared topics:
 
 Script-specific setup may be documented in the script section, but it should link back to shared bootstrap sections when possible instead of repeating the same instructions.
 
+## Tone Rules
+
+The README should be lightly playful, not chaotic:
+
+- a small number of useful emojis is fine
+- headings and navigation can be friendlier than plain boilerplate
+- body text should still stay practical, readable, and skimmable
+
+Do not let “fun” make setup instructions vague.
+
 ## Heading And TOC Rules
 
 - Keep README headings stable and predictable so future anchors remain valid.
 - Prefer simple headings like `Script: <name>` and `Bootstrap / Platform Setup`.
-- Every major script or setup section should end with a `Back to TOC` link.
-- If a new shared subsection is added, it must also be added to the README TOC.
+- Script sections should appear before Bootstrap.
+- Every major section should end with `↑ TOC`.
+- If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
 
 ## Growth Rule
 
@@ -76,6 +88,8 @@ If the repo grows large later:
 - update the README table of contents
 - update the README Scripts index
 - add the script section using the standard template
+- place the script section above Bootstrap
 - add/update bootstrap docs only if there is a new shared prerequisite
+- use `↑ TOC` consistently
 - keep examples concise and copy-pasteable
 - keep links and headings stable
