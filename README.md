@@ -18,7 +18,7 @@ LLMs have changed the way the programming world works. Welcome to the machine-ma
 
 ## Overview
 
-`bin-vibe` is a home for utility scripts that may not be related to each other.
+`maj-scripts-vibe` is a home for utility scripts that may not be related to each other.
 
 The root README is the main navigation page:
 
