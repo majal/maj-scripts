@@ -167,7 +167,12 @@ def main() -> int:
         return 0
     wormhole = ensure_wormhole()
     command = [wormhole, *build_wormhole_args(args)]
-    return subprocess.run(command, check=False).returncode
+    try:
+        return subprocess.run(command, check=False).returncode
+    except KeyboardInterrupt:
+        print()
+        print("Interrupted. Your transfer was stopped before completion.")
+        return 130
 
 
 if __name__ == "__main__":
