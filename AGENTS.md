@@ -68,6 +68,8 @@ Script-specific setup may be documented in the script section, but it should lin
 
 Keep Platform Setup generic and reusable across scripts. If a note only applies to one script, it belongs in that script's subsection, not in Platform Setup.
 
+Package-manager subsections should describe the package manager itself and show broad reusable examples, not read like setup notes for one script or one dependency.
+
 ## Tone Rules
 
 The README should be lightly playful, not chaotic:

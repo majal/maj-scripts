@@ -215,7 +215,7 @@ python --version
 
 ### Package Managers
 
-Package managers are the easiest way for many users to install Python and common tools without manual downloads.
+Package managers help you install and update command-line tools without chasing individual downloads by hand.
 
 Package manager setup by platform:
 
@@ -228,45 +228,64 @@ Install Homebrew by following the official instructions:
 
 - <https://brew.sh/>
 
-Then install Python:
+Verify Homebrew:
+
+```bash
+brew --version
+```
+
+Common examples:
 
 ```bash
 brew install python
-```
-
-Optional but often useful for media-related scripts:
-
-```bash
 brew install ffmpeg
+brew install git
 ```
 
-Verify:
+You can use the same pattern for other command-line tools as new scripts are added to this repo.
+
+Verify installed tools as needed:
 
 ```bash
 python3 --version
 ffmpeg -version
+git --version
 ```
 
 #### winget and Chocolatey (Windows)
 
-For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions.
+For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions. Chocolatey is also common if you already use it.
 
-Install Python with `winget`:
+Verify `winget` if available:
+
+```powershell
+winget --version
+```
+
+Common examples with `winget`:
 
 ```powershell
 winget install Python.Python.3
+winget install Gyan.FFmpeg
+winget install Git.Git
 ```
 
-If you already use Chocolatey, this is the equivalent:
+Equivalent examples with Chocolatey:
 
 ```powershell
 choco install python
+choco install ffmpeg
+choco install git
 ```
 
-Verify Python from a normal terminal session after installation:
+You can use the same pattern for other command-line tools as new scripts are added to this repo.
+
+Verify installed tools as needed:
 
 ```powershell
 py --version
+ffmpeg -version
+git --version
 python --version
 ```
 
