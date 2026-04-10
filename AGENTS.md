@@ -70,6 +70,8 @@ Keep Platform Setup generic and reusable across scripts. If a note only applies 
 
 Package-manager subsections should describe the package manager itself and show broad reusable examples, not read like setup notes for one script or one dependency.
 
+When a Platform Setup heading refers to a concrete tool or install target, prefer linking that heading to the official docs, homepage, or official repository.
+
 ## Tone Rules
 
 The README should be lightly playful, not chaotic:

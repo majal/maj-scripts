@@ -132,7 +132,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 Use this section for shared prerequisites. Script-specific notes should link back here instead of duplicating common setup instructions.
 
-### Python
+### [Python](https://www.python.org/downloads/)
 
 Most scripts in this repo are expected to use Python 3.
 
@@ -152,7 +152,7 @@ Python setup by platform:
 - [Linux](#python-on-linux)
 - [Windows](#python-on-windows)
 
-#### Python on macOS
+#### [Python on macOS](https://www.python.org/downloads/macos/)
 
 Do not assume a usable `python3` is already present. Check first:
 
@@ -171,7 +171,7 @@ For scripts that need compiled dependencies or multimedia tools, Xcode Command L
 xcode-select --install
 ```
 
-#### Python on Linux
+#### [Python on Linux](https://docs.python.org/3/using/unix.html)
 
 Python 3 is often available already, but still verify first:
 
@@ -188,7 +188,7 @@ sudo apt-get install -y python3 python3-venv ffmpeg
 
 Other distros should use their normal package manager equivalents.
 
-#### Python on Windows
+#### [Python on Windows](https://www.python.org/downloads/windows/)
 
 On Windows, it is best to treat Python installation as explicit setup rather than assuming it is already present.
 
@@ -222,7 +222,7 @@ Package manager setup by platform:
 - [Homebrew (macOS)](#homebrew-macos)
 - [winget and Chocolatey (Windows)](#winget-and-chocolatey-windows)
 
-#### Homebrew (macOS)
+#### [Homebrew](https://brew.sh/) (macOS)
 
 Install Homebrew by following the official instructions:
 
@@ -252,7 +252,7 @@ ffmpeg -version
 git --version
 ```
 
-#### winget and Chocolatey (Windows)
+#### [winget](https://learn.microsoft.com/windows/package-manager/winget/) and [Chocolatey](https://chocolatey.org/) (Windows)
 
 For most Windows users, `winget` is the simpler default choice because it is built into modern Windows versions. Chocolatey is also common if you already use it.
 
