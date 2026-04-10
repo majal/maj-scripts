@@ -1,8 +1,6 @@
-# bin-vibe
+# Maj Scripts, vibe version
 
-Small standalone scripts that can grow independently over time.
-
-This repo currently starts with `whisper`, and the documentation is organized so future scripts can be added without reorganizing the whole repo.
+LLMs have changed the way the programming world works. Welcome to the machine-made code era.
 
 ## Table of Contents
 
