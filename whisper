@@ -826,6 +826,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--python", default="")
     parser.add_argument("--stable-mlx-python", action="store_true")
+    parser.add_argument("--mlx-word-timestamps", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--mlx-output-format", choices=("auto", "subtitle", "text"), default="auto")
+    parser.add_argument("--mlx-model-default", choices=("wrapper", "official"), default="wrapper")
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--ass", action="store_true")
     parser.add_argument("--burn", action="store_true")
@@ -855,6 +858,9 @@ def print_help() -> None:
   --jobs=N
   --outdir=PATH
   --python=/path/to/python
+  --mlx-word-timestamps=auto|on|off
+  --mlx-output-format=auto|subtitle|text
+  --mlx-model-default=wrapper|official
   --recursive
 
 {BOLD}Runtime management{RESET}
@@ -870,6 +876,9 @@ def print_help() -> None:
   --state-dir=PATH
   --python=/path/to/python   {DIM}(manual managed-runtime interpreter override){RESET}
   --stable-mlx-python   {DIM}(compat alias; MLX now auto-prefers a validated Python on Apple Silicon){RESET}
+  --mlx-word-timestamps {DIM}(MLX diagnostic control; auto keeps current wrapper behavior){RESET}
+  --mlx-output-format   {DIM}(MLX diagnostic control; text isolates subtitle-writing overhead){RESET}
+  --mlx-model-default   {DIM}(MLX diagnostic control; official uses tiny when --model is omitted){RESET}
   -h, --help
 """
     )
@@ -881,6 +890,12 @@ def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) 
     if not shutil.which("ffmpeg") and args.burn:
         print_install_help(os_name, pkg_mgr)
         die("ffmpeg is required for --burn.")
+    if args.backend == "faster-whisper":
+        mlx_flags_used = (
+            args.mlx_word_timestamps != "auto" or args.mlx_output_format != "auto" or args.mlx_model_default != "wrapper"
+        )
+        if mlx_flags_used:
+            warn("MLX comparison flags are ignored when --backend=faster-whisper.")
 
 
 def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
@@ -912,6 +927,9 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
     selected_compute = choose_default_compute_type(selected_backend, selected_device) if args.compute_type == "auto" else args.compute_type
     recommended_model, model_reason = choose_default_model(selected_backend, selected_device, profile)
     selected_model = args.model or recommended_model
+    if args.mlx_model_default == "official" and selected_backend == "mlx" and not args.model:
+        selected_model = "tiny"
+        model_reason = "MLX diagnostic mode; using official-style tiny default because --model was omitted."
     if args.model:
         model_reason = f"Explicit --model override: {args.model}"
     fallback_backend = choose_fallback_backend(selected_backend, profile, auto_backend)
@@ -1177,6 +1195,12 @@ def write_srt(path: Path, segments) -> None:
                 index += 1
 
 
+def write_txt(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(text.rstrip())
+        handle.write("\n")
+
+
 def normalize_faster_segments(segments_iter, report_progress):
     normalized = []
     for segment in segments_iter:
@@ -1225,11 +1249,18 @@ def run_faster_whisper(media_path: Path, model: str, language: str, device: str,
     return normalize_faster_segments(segments_iter, report_progress)
 
 
-def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress):
+def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress, *, word_timestamps: bool):
     import mlx_whisper
 
-    result = mlx_whisper.transcribe(str(media_path), path_or_hf_repo=resolve_mlx_model_name(model), language=None if language == "auto" else language, word_timestamps=True)
-    return normalize_mlx_segments(result, report_progress)
+    result = mlx_whisper.transcribe(
+        str(media_path),
+        path_or_hf_repo=resolve_mlx_model_name(model),
+        language=None if language == "auto" else language,
+        word_timestamps=word_timestamps,
+    )
+    for segment in result.get("segments", []) or []:
+        report_progress(float(segment["end"]))
+    return result
 
 
 def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_progress: bool) -> str:
@@ -1238,6 +1269,12 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     wait_spinner = Spinner(f"Waiting for {backend} on {media_path.name}", enabled=True, delay_seconds=3.0)
     progress = EstimatedProgressReporter(media_path, backend, inline=inline_progress)
     spinner_state = {"stopped": False}
+    mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
+    mlx_output_format = env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto")
+    output_txt = backend == "mlx" and mlx_output_format == "text" and env["WHISPER_ASS"] != "1" and env["WHISPER_BURN"] != "1"
+    mlx_word_timestamps_enabled = mlx_word_timestamps != "off"
+    if mlx_word_timestamps == "on":
+        mlx_word_timestamps_enabled = True
 
     def stop_wait_spinner() -> None:
         if not spinner_state["stopped"]:
@@ -1251,7 +1288,13 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     wait_spinner.start()
     if backend == "mlx":
         try:
-            segments = run_mlx_whisper(media_path, env["WHISPER_MODEL"], env["WHISPER_LANG"], report_with_spinner)
+            mlx_result = run_mlx_whisper(
+                media_path,
+                env["WHISPER_MODEL"],
+                env["WHISPER_LANG"],
+                report_with_spinner,
+                word_timestamps=mlx_word_timestamps_enabled,
+            )
         finally:
             stop_wait_spinner()
     else:
@@ -1263,16 +1306,23 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             stop_wait_spinner()
     progress.finish()
     progress.before_stage_message()
-    print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
     output_root = Path(env["WHISPER_OUTDIR"]).expanduser() if env["WHISPER_OUTDIR"] else media_path.parent
     output_root.mkdir(parents=True, exist_ok=True)
-    subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
-    if env["WHISPER_ASS"] == "1":
-        write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
+    if backend == "mlx":
+        segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
+    if output_txt:
+        print(f"📝 Writing text: {media_path.name}", file=sys.stderr)
+        text_path = output_root / f"{media_path.stem}.txt"
+        write_txt(text_path, mlx_result.get("text", ""))
     else:
-        write_srt(subtitle_path, segments)
-    if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
-        burn_subtitles(media_path, subtitle_path, output_root / f"{media_path.stem}_subbed.mp4")
+        print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
+        subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
+        if env["WHISPER_ASS"] == "1":
+            write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
+        else:
+            write_srt(subtitle_path, segments)
+        if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
+            burn_subtitles(media_path, subtitle_path, output_root / f"{media_path.stem}_subbed.mp4")
     elapsed = time.time() - started_at
     return f"{media_path.name} [{backend}] ({elapsed:.1f}s)"
 
@@ -1383,6 +1433,9 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--model=small|medium|large-v3{RESET}")
     say(f"  {MAGENTA}--device=cpu|cuda{RESET}")
     say(f"  {MAGENTA}--python=/path/to/python{RESET}")
+    say(f"  {MAGENTA}--mlx-word-timestamps=off{RESET}")
+    say(f"  {MAGENTA}--mlx-output-format=text{RESET}")
+    say(f"  {MAGENTA}--mlx-model-default=official{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
@@ -1411,6 +1464,9 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
             "WHISPER_KARAOKE": "1" if args.karaoke else "0",
             "WHISPER_AUTO_BACKEND": "1" if plan.auto_backend else "0",
             "WHISPER_STABLE_MLX_PYTHON": "1" if plan.stable_mlx_python else "0",
+            "WHISPER_MLX_WORD_TIMESTAMPS": args.mlx_word_timestamps,
+            "WHISPER_MLX_OUTPUT_FORMAT": args.mlx_output_format,
+            "WHISPER_MLX_MODEL_DEFAULT": args.mlx_model_default,
             "WHISPER_RUNTIME_SELECTION_SOURCE": plan.runtime_selection_source,
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }
