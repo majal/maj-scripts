@@ -13,6 +13,16 @@ The documentation model is:
 - `README.md` is the user-facing index and navigation hub
 - `AGENTS.md` defines how scripts and docs should be added in the future
 
+Recommended top-level README order:
+
+1. Title
+2. Short description
+3. Overview
+4. Table of Contents
+5. Scripts
+6. Bootstrap / Platform Setup
+7. Contributing Docs
+
 ## README Rules
 
 When adding a new top-level script to the repo:
@@ -21,7 +31,7 @@ When adding a new top-level script to the repo:
 2. Add the script to the README table of contents.
 3. Add a dedicated script subsection under `## Scripts` using the standard template.
 4. Keep the `## Scripts` section above the shared Bootstrap section.
-5. End each major section with `↑ TOC`.
+5. End each major section after the table of contents with `↑ TOC`.
 
 Do not add a new script without updating the README.
 
@@ -75,10 +85,11 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 ## Heading And TOC Rules
 
 - Keep README headings stable and predictable so future anchors remain valid.
+- Keep the Overview above the table of contents.
 - Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - The `## Scripts` section should appear before Bootstrap.
-- Every major section should end with `↑ TOC`.
+- Every major section after the table of contents should end with `↑ TOC`.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
 
 ## Growth Rule
@@ -99,6 +110,7 @@ If the repo grows large later:
 - link the script subsection heading to the actual script file when possible
 - use the standard script template inside that subsection
 - keep `## Scripts` above Bootstrap
+- keep the Overview above the table of contents
 - add/update bootstrap docs only if there is a new shared prerequisite
 - use `↑ TOC` consistently
 - keep examples concise and copy-pasteable

@@ -2,6 +2,16 @@
 
 LLMs have changed the way the programming world works. Welcome to the machine-made code era! 🤖
 
+## Overview
+
+`maj-scripts-vibe` is a home for utility scripts, all vibe-coded. 😎
+
+The root README is the main navigation page:
+
+- shared setup guidance lives here
+- each script gets its own section here
+- future contributor and AI-agent documentation rules live in [`AGENTS.md`](./AGENTS.md)
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -14,18 +24,6 @@ LLMs have changed the way the programming world works. Welcome to the machine-ma
   - [Linux](#linux)
   - [Windows](#windows)
 - [Contributing Docs](#contributing-docs)
-
-## Overview
-
-`maj-scripts-vibe` is a home for utility scripts, all vibe-coded. 😎
-
-The root README is the main navigation page:
-
-- shared setup guidance lives here
-- each script gets its own section here
-- future contributor and AI-agent documentation rules live in [`AGENTS.md`](./AGENTS.md)
-
-[↑ TOC](#table-of-contents)
 
 ## Scripts
 
