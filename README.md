@@ -55,6 +55,10 @@ Useful system dependency:
 
 - `ffmpeg` for media workflows, especially subtitle burn-in
 
+Script-specific note:
+
+- On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
+
 ### Install / First Run Summary
 
 Basic first run:
@@ -140,7 +144,7 @@ python3 --version
 
 If that command works, you may already have enough to get started. If it does not, install Python using the platform guidance below.
 
-For this repo, a modern Python 3 release is the safe default. `whisper` can also choose a stable managed-runtime Python automatically for MLX on Apple Silicon.
+For this repo, a modern Python 3 release is the safe default.
 
 Python setup by platform:
 
@@ -168,8 +172,6 @@ For scripts that need compiled dependencies or multimedia tools, Xcode Command L
 ```bash
 xcode-select --install
 ```
-
-`whisper` also benefits from `ffmpeg` being installed.
 
 [↑ TOC](#table-of-contents)
 
@@ -215,8 +217,6 @@ py --version
 python --version
 ```
 
-For `whisper`, make sure Python is available in a normal terminal session before running the script.
-
 [↑ TOC](#table-of-contents)
 
 ### Package Managers
@@ -242,7 +242,7 @@ Then install Python:
 brew install python
 ```
 
-Optional but recommended for `whisper`:
+Optional but often useful for media-related scripts:
 
 ```bash
 brew install ffmpeg
@@ -273,7 +273,7 @@ If you already use Chocolatey, this is the equivalent:
 choco install python
 ```
 
-For `whisper`, verify Python from a normal terminal session after installation:
+Verify Python from a normal terminal session after installation:
 
 ```powershell
 py --version
@@ -285,6 +285,8 @@ python --version
 ## Contributing Docs
 
 When future scripts are added, keep this README as the main navigation page and update it alongside the script.
+
+Keep `Platform Setup` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
 
 Detailed contributor and AI-agent rules live in [`AGENTS.md`](./AGENTS.md).
 

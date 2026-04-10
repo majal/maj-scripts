@@ -66,6 +66,8 @@ Examples of shared topics:
 
 Script-specific setup may be documented in the script section, but it should link back to shared setup sections when possible instead of repeating the same instructions.
 
+Keep Platform Setup generic and reusable across scripts. If a note only applies to one script, it belongs in that script's subsection, not in Platform Setup.
+
 ## Tone Rules
 
 The README should be lightly playful, not chaotic:
@@ -116,6 +118,7 @@ If the repo grows large later:
 - keep `## Scripts` above Platform Setup
 - keep the Overview above the table of contents
 - add/update shared setup docs only if there is a new shared prerequisite
+- keep Platform Setup generic; move script-specific notes into the script subsection
 - use `↑ TOC` consistently
 - keep examples concise and copy-pasteable
 - keep links and headings stable
