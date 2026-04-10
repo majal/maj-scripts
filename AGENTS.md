@@ -41,13 +41,13 @@ Each script subsection under `## Scripts` in `README.md` should include:
 
 1. Script name
    The subsection heading itself should link directly to the script file when the script lives in the repo root.
-2. What it does
-3. Supported platforms
-4. Dependencies
-5. Install / first-run summary
-6. Common usage examples
-7. Important behavior / defaults
-8. Notes / caveats
+2. `#### What It Does`
+3. `#### Supported Platforms`
+4. `#### Dependencies`
+5. `#### Install / first-run summary`
+6. `#### Common usage examples`
+7. `#### Important behavior / defaults`
+8. `#### Notes / caveats`
 9. `↑ TOC`
 
 Keep examples short, practical, and copy-pasteable.
@@ -95,6 +95,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - Keep README headings stable and predictable so future anchors remain valid.
 - Keep the Overview above the table of contents.
 - Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
+- Within each script subsection, use `####` headings for the internal template sections.
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - Prefer `## Platform Setup` over `Bootstrap / Platform Setup`.
 - In the main README TOC, prefer top-level setup topics like `Python` and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.

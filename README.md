@@ -29,20 +29,20 @@ The root README is the main navigation page:
 
 `wh` is a convenience wrapper for `magic-wormhole`.
 
-### What It Does
+#### What It Does
 
 - wraps the `wormhole` CLI
 - auto-adds `--code-length=4` for code-generating flows
 - passes all other commands through normally
 - can help install `wormhole` when it is missing
 
-### Supported Platforms
+#### Supported Platforms
 
 - macOS
 - Linux
 - Windows
 
-### Dependencies
+#### Dependencies
 
 Shared prerequisites:
 
@@ -53,7 +53,7 @@ Primary external tool:
 
 - `wormhole`
 
-### Install / First Run Summary
+#### Install / First Run Summary
 
 Basic first run:
 
@@ -63,7 +63,7 @@ wh send file.zip
 
 If `wormhole` is not installed yet, `wh` can detect a likely install route and offer to run it for you.
 
-### Common Usage Examples
+#### Common Usage Examples
 
 Send a file with a shorter generated code:
 
@@ -89,7 +89,7 @@ Pass through other `wormhole` commands:
 wh --help
 ```
 
-### Important Behavior / Defaults
+#### Important Behavior / Defaults
 
 - `wh` injects `--code-length=4` for `send` and `tx`.
 - `wh` also injects `--code-length=4` for `receive --allocate` and receive aliases such as `rx`, `recv`, and `recieve`.
@@ -97,7 +97,7 @@ wh --help
 - `wh` leaves ordinary `receive` unchanged because the sender normally generates the code.
 - Missing-`wormhole` install prompts use `Y/n`, where Enter means yes.
 
-### Notes / Caveats
+#### Notes / Caveats
 
 - Package-manager availability varies by system, so the suggested install route is best-effort.
 
@@ -107,7 +107,7 @@ wh --help
 
 `whisper` is a self-bootstrapping subtitle and transcription CLI.
 
-### What It Does
+#### What It Does
 
 - accepts a media file or folder
 - discovers supported audio/video files
@@ -115,7 +115,7 @@ wh --help
 - selects a backend based on the host, including MLX on Apple Silicon
 - writes subtitles by default and can also write text output for MLX diagnostics
 
-### Supported Platforms
+#### Supported Platforms
 
 - macOS
 - Linux
@@ -123,7 +123,7 @@ wh --help
 
 MLX support is for Apple Silicon on macOS. Other environments use `faster-whisper`.
 
-### Dependencies
+#### Dependencies
 
 Shared prerequisites:
 
@@ -138,7 +138,7 @@ Script-specific note:
 
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 
-### Install / First Run Summary
+#### Install / First Run Summary
 
 Basic first run:
 
@@ -160,7 +160,7 @@ The script will:
 - install required Python packages into that runtime
 - prompt before downloading packages unless `--yes` is used
 
-### Common Usage Examples
+#### Common Usage Examples
 
 Transcribe one file:
 
@@ -188,7 +188,7 @@ whisper /path/to/file.mp4 --mlx-output-format=text
 whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-format=text
 ```
 
-### Important Behavior / Defaults
+#### Important Behavior / Defaults
 
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
@@ -199,7 +199,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
   - `--mlx-model-default=wrapper|official`
 - The normal wrapper behavior stays subtitle-oriented unless you explicitly ask for a different comparison mode.
 
-### Notes / Caveats
+#### Notes / Caveats
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
 - MLX behavior can vary by machine, Python version, and model choice.
