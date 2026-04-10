@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-import venv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ BACKEND_MODULES = {
     "mlx": "mlx_whisper",
     "faster-whisper": "faster_whisper",
 }
+MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
+MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
 
 
 def use_color() -> bool:
@@ -71,9 +74,14 @@ class RuntimePlan:
     os_name: str
     arch_name: str
     pkg_manager: str
+    launcher_python: Path
+    base_state_dir: Path
     state_dir: Path
     venv_dir: Path
     venv_python: Path
+    runtime_builder_python: Path
+    runtime_builder_version: str
+    runtime_selection_source: str
     packages_dir: Path
     backend_requested: str
     auto_backend: bool
@@ -85,6 +93,7 @@ class RuntimePlan:
     fallback_backend: str
     fallback_device: str
     fallback_compute: str
+    stable_mlx_python: bool
     profile: HardwareProfile
     installed_packages: tuple[str, ...]
     installed_backends: tuple[str, ...]
@@ -347,6 +356,162 @@ def default_state_dir(os_name: str) -> Path:
     return Path.home() / ".local" / "share" / APP_NAME
 
 
+def python_version(python_bin: Path) -> str:
+    return subprocess.check_output(
+        [str(python_bin), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"],
+        text=True,
+    ).strip()
+
+
+def python_major_minor(version: str) -> str:
+    return ".".join(version.split(".")[:2])
+
+
+def validate_python_path(python_value: str) -> Path:
+    candidate = Path(python_value).expanduser()
+    if not candidate.is_absolute():
+        resolved = shutil.which(python_value)
+        if not resolved:
+            die(f"Unable to find requested Python interpreter: {python_value}")
+        candidate = Path(resolved)
+    candidate = candidate.resolve()
+    if not candidate.exists() or not os.access(candidate, os.X_OK):
+        die(f"Requested Python interpreter is not executable: {candidate}")
+    return candidate
+
+
+def mlx_runtime_selection_cache_path(base_state_dir: Path) -> Path:
+    return base_state_dir / MLX_RUNTIME_SELECTION_FILE
+
+
+def load_mlx_runtime_selection(base_state_dir: Path) -> dict[str, str] | None:
+    cache_path = mlx_runtime_selection_cache_path(base_state_dir)
+    if not cache_path.exists():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    python_path = data.get("python_path")
+    python_version_value = data.get("python_version")
+    if not python_path or not python_version_value:
+        return None
+    candidate = Path(python_path).expanduser()
+    if not candidate.exists():
+        return None
+    try:
+        if python_version(candidate.resolve()) != python_version_value:
+            return None
+    except Exception:
+        return None
+    return {"python_path": str(candidate.resolve()), "python_version": python_version_value}
+
+
+def save_mlx_runtime_selection(base_state_dir: Path, python_bin: Path, version: str) -> None:
+    cache_path = mlx_runtime_selection_cache_path(base_state_dir)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"python_path": str(python_bin.resolve()), "python_version": version}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def clear_mlx_runtime_selection(base_state_dir: Path) -> None:
+    cache_path = mlx_runtime_selection_cache_path(base_state_dir)
+    try:
+        cache_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def discover_mlx_python_candidates(launcher_python: Path) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for version in MLX_PREFERRED_PYTHONS:
+        resolved = shutil.which(f"python{version}")
+        if resolved:
+            path = Path(resolved).resolve()
+            if path not in seen:
+                seen.add(path)
+                candidates.append(path)
+    launcher_resolved = launcher_python.resolve()
+    if launcher_resolved not in seen:
+        candidates.append(launcher_resolved)
+    return candidates
+
+
+def probe_mlx_python_candidate(python_bin: Path) -> bool:
+    try:
+        with tempfile.TemporaryDirectory(prefix="whisper-mlx-probe-") as tmp_dir:
+            venv_dir = Path(tmp_dir) / "venv"
+            if subprocess.run([str(python_bin), "-m", "venv", str(venv_dir)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
+                return False
+            probe_python = runtime_python(venv_dir, detect_os())
+            commands = [
+                [str(probe_python), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", *PIP_BOOTSTRAP_PACKAGES],
+                [str(probe_python), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade", *backend_packages("mlx")],
+                [str(probe_python), "-c", "import mlx_whisper"],
+            ]
+            for command in commands:
+                if subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
+                    return False
+            return True
+    except Exception:
+        return False
+
+
+def choose_runtime_builder_python(
+    args: argparse.Namespace,
+    os_name: str,
+    arch_name: str,
+    selected_backend: str,
+    pkg_manager: str,
+    base_state_dir: Path,
+) -> tuple[Path, str, bool, str]:
+    explicit_python = args.python or os.environ.get("WHISPER_RUNTIME_PYTHON", "")
+    if explicit_python:
+        builder_python = validate_python_path(explicit_python)
+        return builder_python, python_version(builder_python), selected_backend == "mlx" and is_apple_silicon(os_name, arch_name), "explicit"
+    stable_policy_active = selected_backend == "mlx" and is_apple_silicon(os_name, arch_name)
+    if not stable_policy_active:
+        launcher_python = Path(sys.executable).resolve()
+        return launcher_python, python_version(launcher_python), False, "launcher"
+    cached = None if args.update else load_mlx_runtime_selection(base_state_dir)
+    if cached:
+        cached_python = Path(cached["python_path"]).resolve()
+        return cached_python, cached["python_version"], True, "cached"
+    launcher_python = Path(sys.executable).resolve()
+    candidates = discover_mlx_python_candidates(launcher_python)
+    should_probe = not args.doctor and bool(args.target or args.setup_only or args.update or args.stable_mlx_python)
+    if should_probe:
+        for candidate in candidates:
+            if probe_mlx_python_candidate(candidate):
+                version = python_version(candidate)
+                save_mlx_runtime_selection(base_state_dir, candidate, version)
+                return candidate, version, True, "probed"
+    if candidates:
+        preferred_python = candidates[0]
+        return preferred_python, python_version(preferred_python), True, "preferred"
+    help_suffix = "brew install python@3.12" if pkg_manager == "brew" else "install Python 3.12 or Python 3.13"
+    die(
+        "No suitable MLX runtime Python could be found. "
+        f"Install one and rerun. Suggested command: {help_suffix}"
+    )
+
+
+def runtime_state_dir(
+    base_state_dir: Path, *, selected_backend: str, stable_mlx_python: bool, runtime_builder_version: str
+) -> Path:
+    if not stable_mlx_python or selected_backend != "mlx":
+        return base_state_dir
+    major_minor = python_major_minor(runtime_builder_version)
+    preferred = base_state_dir.parent / f"{base_state_dir.name}-mlx-py{major_minor}"
+    legacy = base_state_dir.parent / f"{base_state_dir.name}-mlx-stable-py{major_minor}"
+    if not preferred.exists() and legacy.exists():
+        return legacy
+    return preferred
+
+
 def is_apple_silicon(os_name: str, arch_name: str) -> bool:
     return os_name == "macos" and arch_name == "arm64"
 
@@ -479,10 +644,7 @@ def runtime_python(venv_dir: Path, os_name: str) -> Path:
 
 
 def site_packages_dir(venv_dir: Path, os_name: str, python_bin: Path) -> Path:
-    version = subprocess.check_output(
-        [str(python_bin), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
-        text=True,
-    ).strip()
+    version = python_major_minor(python_version(python_bin))
     if os_name == "windows":
         return venv_dir / "Lib" / "site-packages"
     return venv_dir / "lib" / f"python{version}" / "site-packages"
@@ -551,7 +713,12 @@ def ensure_venv(plan: RuntimePlan) -> None:
     plan.state_dir.mkdir(parents=True, exist_ok=True)
     if not plan.venv_python.exists():
         info(f"Creating isolated runtime in {plan.state_dir}")
-        venv.create(plan.venv_dir, with_pip=True, clear=False, symlinks=(plan.os_name != "windows"))
+        result = run_command_with_spinner(
+            [str(plan.runtime_builder_python), "-m", "venv", str(plan.venv_dir)],
+            description=f"Creating isolated runtime with Python {plan.runtime_builder_version}",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed creating virtualenv with {plan.runtime_builder_python}")
 
 
 def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> RuntimePlan:
@@ -569,6 +736,14 @@ def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required
         if backend in backends_to_install:
             label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
             install_packages(plan.venv_python, f"Installing {label}", *backend_packages(backend))
+    if plan.selected_backend == "mlx" and plan.stable_mlx_python:
+        if not runtime_has_backend(plan.venv_python, "mlx"):
+            if plan.runtime_selection_source != "explicit":
+                clear_mlx_runtime_selection(plan.base_state_dir)
+            raise RuntimeError(
+                f"MLX runtime validation failed for Python {plan.runtime_builder_version} at {plan.runtime_builder_python}"
+            )
+        save_mlx_runtime_selection(plan.base_state_dir, plan.runtime_builder_python, plan.runtime_builder_version)
     return rebuild_plan(plan)
 
 
@@ -604,6 +779,11 @@ def render_hardware_summary(profile: HardwareProfile) -> list[tuple[str, object]
 def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], package_later: tuple[str, ...]) -> None:
     say(f"{BOLD}Install Summary{RESET}")
     for label, value in [
+        ("Launcher Python", plan.launcher_python),
+        ("Runtime builder", f"{plan.runtime_builder_python} ({plan.runtime_builder_version})"),
+        ("Runtime selection", plan.runtime_selection_source),
+        ("Stable MLX runtime", "yes" if plan.stable_mlx_python else "no"),
+        ("Base state dir", plan.base_state_dir),
         ("State dir", plan.state_dir),
         ("Runtime", plan.venv_python),
         ("Packages dir", plan.packages_dir),
@@ -644,6 +824,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--outdir", default="")
     parser.add_argument("--state-dir", default="")
+    parser.add_argument("--python", default="")
+    parser.add_argument("--stable-mlx-python", action="store_true")
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--ass", action="store_true")
     parser.add_argument("--burn", action="store_true")
@@ -672,6 +854,7 @@ def print_help() -> None:
   --compute-type=auto|int8|float16|int8_float16
   --jobs=N
   --outdir=PATH
+  --python=/path/to/python
   --recursive
 
 {BOLD}Runtime management{RESET}
@@ -685,6 +868,8 @@ def print_help() -> None:
   --doctor
   --yes
   --state-dir=PATH
+  --python=/path/to/python   {DIM}(manual managed-runtime interpreter override){RESET}
+  --stable-mlx-python   {DIM}(compat alias; MLX now auto-prefers a validated Python on Apple Silicon){RESET}
   -h, --help
 """
     )
@@ -704,15 +889,25 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
     pkg_manager = detect_pkg_manager()
     ensure_system_prereqs(args, os_name, pkg_manager)
     profile = hardware_profile(os_name, arch_name)
-    state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir(os_name)
-    venv_dir = state_dir / "venv"
-    venv_python = runtime_python(venv_dir, os_name)
-    packages_dir = site_packages_dir(venv_dir, os_name, Path(sys.executable))
+    launcher_python = Path(sys.executable).resolve()
+    base_state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir(os_name)
     backend_requested = normalize_backend_name(args.backend)
     auto_backend = backend_requested == "auto"
     selected_backend = choose_default_backend(profile) if auto_backend else backend_requested
     if not backend_supported_on_host(selected_backend, os_name, arch_name):
         die(f"backend '{selected_backend}' is not supported on {os_name}/{arch_name}")
+    runtime_builder_python, runtime_builder_version, stable_mlx_python, runtime_selection_source = choose_runtime_builder_python(
+        args, os_name, arch_name, selected_backend, pkg_manager, base_state_dir
+    )
+    state_dir = runtime_state_dir(
+        base_state_dir,
+        selected_backend=selected_backend,
+        stable_mlx_python=stable_mlx_python,
+        runtime_builder_version=runtime_builder_version,
+    )
+    venv_dir = state_dir / "venv"
+    venv_python = runtime_python(venv_dir, os_name)
+    packages_dir = site_packages_dir(venv_dir, os_name, runtime_builder_python)
     selected_device = choose_default_device(selected_backend, profile) if args.device == "auto" else args.device
     selected_compute = choose_default_compute_type(selected_backend, selected_device) if args.compute_type == "auto" else args.compute_type
     recommended_model, model_reason = choose_default_model(selected_backend, selected_device, profile)
@@ -729,9 +924,14 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
         os_name=os_name,
         arch_name=arch_name,
         pkg_manager=pkg_manager,
+        launcher_python=launcher_python,
+        base_state_dir=base_state_dir,
         state_dir=state_dir,
         venv_dir=venv_dir,
         venv_python=venv_python,
+        runtime_builder_python=runtime_builder_python,
+        runtime_builder_version=runtime_builder_version,
+        runtime_selection_source=runtime_selection_source,
         packages_dir=packages_dir,
         backend_requested=backend_requested,
         auto_backend=auto_backend,
@@ -743,6 +943,7 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
         fallback_backend=fallback_backend,
         fallback_device=fallback_device,
         fallback_compute=fallback_compute,
+        stable_mlx_python=stable_mlx_python,
         profile=profile,
         installed_packages=installed_pkg_tuple,
         installed_backends=installed_backend_tuple,
@@ -760,7 +961,11 @@ def print_doctor(plan: RuntimePlan) -> None:
     rows = [
         ("Script", plan.script_path),
         ("Package mgr", plan.pkg_manager),
-        ("Python", sys.executable),
+        ("Launcher Python", plan.launcher_python),
+        ("Runtime builder", f"{plan.runtime_builder_python} ({plan.runtime_builder_version})"),
+        ("Runtime selection", plan.runtime_selection_source),
+        ("Stable MLX runtime", "yes" if plan.stable_mlx_python else "no"),
+        ("Base state dir", plan.base_state_dir),
         ("State dir", plan.state_dir),
         ("Runtime", plan.venv_python if plan.venv_python.exists() else "not built yet"),
         ("Packages dir", plan.packages_dir),
@@ -1177,7 +1382,9 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--backend=mlx|faster-whisper{RESET}")
     say(f"  {MAGENTA}--model=small|medium|large-v3{RESET}")
     say(f"  {MAGENTA}--device=cpu|cuda{RESET}")
+    say(f"  {MAGENTA}--python=/path/to/python{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
+    say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
 
 def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
@@ -1203,10 +1410,15 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
             "WHISPER_FONT": args.font,
             "WHISPER_KARAOKE": "1" if args.karaoke else "0",
             "WHISPER_AUTO_BACKEND": "1" if plan.auto_backend else "0",
+            "WHISPER_STABLE_MLX_PYTHON": "1" if plan.stable_mlx_python else "0",
+            "WHISPER_RUNTIME_SELECTION_SOURCE": plan.runtime_selection_source,
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }
     )
     info(f"OS: {plan.os_name} | arch: {plan.arch_name} | backend: {plan.selected_backend} | model: {plan.selected_model}")
+    info(f"Launcher Python: {plan.launcher_python}")
+    info(f"Runtime builder: {plan.runtime_builder_python} ({plan.runtime_builder_version})")
+    info(f"Runtime selection: {plan.runtime_selection_source}")
     info(f"Fallback backend: {plan.fallback_backend} | device: {plan.fallback_device}")
     info(f"Using runtime: {plan.state_dir}")
     result = subprocess.run([str(plan.venv_python), str(plan.script_path)], env=env, check=False)
