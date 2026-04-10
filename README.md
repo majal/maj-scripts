@@ -16,6 +16,7 @@ The root README is the main navigation page:
 
 - [Overview](#overview)
 - [Scripts](#scripts)
+  - [`wh`](#wh)
   - [`whisper`](#whisper)
 - [Platform Setup](#platform-setup)
   - [Python](#python)
@@ -23,6 +24,86 @@ The root README is the main navigation page:
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
+
+### [`wh`](./wh)
+
+`wh` is a convenience wrapper for `magic-wormhole`.
+
+### What It Does
+
+- wraps the `wormhole` CLI
+- auto-adds `--code-length=4` for code-generating flows
+- passes all other commands through normally
+- can help install `wormhole` when it is missing
+
+### Supported Platforms
+
+- macOS
+- Linux
+- Windows
+
+### Dependencies
+
+Shared prerequisites:
+
+- [Python](#python)
+- platform setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
+
+Primary external tool:
+
+- `wormhole`
+
+### Install / First Run Summary
+
+Basic first run:
+
+```bash
+wh send file.zip
+```
+
+If `wormhole` is not installed yet, `wh` can detect a likely install route and offer to run it for you.
+
+### Common Usage Examples
+
+Send a file with a shorter generated code:
+
+```bash
+wh send file.zip
+```
+
+Receive using the normal prompt flow:
+
+```bash
+wh receive
+```
+
+Receive while allocating the code on this side:
+
+```bash
+wh receive --allocate
+```
+
+Pass through other `wormhole` commands:
+
+```bash
+wh --help
+```
+
+### Important Behavior / Defaults
+
+- `wh` injects `--code-length=4` for `send` and `tx`.
+- `wh` also injects `--code-length=4` for `receive --allocate` and receive aliases such as `rx`, `recv`, and `recieve`.
+- `wh` does not inject another code-length flag if you already passed `--code-length`.
+- `wh` leaves ordinary `receive` unchanged because the sender normally generates the code.
+- Missing-`wormhole` install prompts use `Y/n`, where Enter means yes.
+
+### Notes / Caveats
+
+- `wh` is a thin wrapper, not a managed runtime like `whisper`.
+- Package-manager availability varies by system, so the suggested install route is best-effort.
+- Shared setup belongs in the [Platform Setup](#platform-setup) section; keep `wormhole`-specific behavior in this script section.
+
+[↑ TOC](#table-of-contents)
 
 ### [`whisper`](./whisper)
 

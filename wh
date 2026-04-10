@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""wh: magic-wormhole wrapper with shorter generated codes."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def detect_os() -> str:
+    if sys.platform == "darwin":
+        return "macos"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "unknown"
+
+
+def detect_pkg_manager(os_name: str) -> str:
+    if os_name == "macos" and shutil.which("brew"):
+        return "brew"
+    if os_name == "windows":
+        if shutil.which("winget"):
+            return "winget"
+        if shutil.which("choco"):
+            return "choco"
+        return "unknown"
+    for candidate in ("apt-get", "dnf", "yum", "pacman", "zypper", "apk", "snap"):
+        if shutil.which(candidate):
+            return candidate
+    return "unknown"
+
+
+def install_command(os_name: str, pkg_manager: str) -> str:
+    commands = {
+        ("macos", "brew"): "brew install magic-wormhole",
+        ("linux", "apt-get"): "sudo apt-get update && sudo apt-get install -y magic-wormhole",
+        ("linux", "dnf"): "sudo dnf install -y magic-wormhole",
+        ("linux", "yum"): "sudo yum install -y magic-wormhole",
+        ("linux", "pacman"): "sudo pacman -S --needed magic-wormhole",
+        ("linux", "zypper"): "sudo zypper install -y python-magic-wormhole",
+        ("linux", "apk"): "sudo apk add magic-wormhole",
+        ("linux", "snap"): "sudo snap install wormhole",
+        ("windows", "winget"): "winget install -e --id magic-wormhole.magic-wormhole --accept-package-agreements --accept-source-agreements",
+        ("windows", "choco"): "choco install magic-wormhole -y",
+    }
+    if (os_name, pkg_manager) in commands:
+        return commands[(os_name, pkg_manager)]
+    if os_name == "windows":
+        return "py -m pip install --user magic-wormhole"
+    return "python3 -m pip install --user magic-wormhole"
+
+
+def normalize_command(token: str) -> str:
+    aliases = {
+        "tx": "send",
+        "rx": "receive",
+        "recv": "receive",
+        "recieve": "receive",
+    }
+    return aliases.get(token, token)
+
+
+def command_index(args: list[str]) -> int | None:
+    for index, token in enumerate(args):
+        if token == "--":
+            return None
+        if token.startswith("-"):
+            continue
+        return index
+    return None
+
+
+def has_explicit_flag(args: list[str], flag: str) -> bool:
+    return any(token == flag or token.startswith(f"{flag}=") for token in args)
+
+
+def should_inject_code_length(args: list[str]) -> bool:
+    index = command_index(args)
+    if index is None:
+        return False
+    command = normalize_command(args[index])
+    if command not in {"send", "receive"}:
+        return False
+    if has_explicit_flag(args, "--code-length"):
+        return False
+    if has_explicit_flag(args, "--code"):
+        return False
+    if command == "send":
+        return True
+    return has_explicit_flag(args[index + 1 :], "--allocate")
+
+
+def build_wormhole_args(args: list[str]) -> list[str]:
+    if not args:
+        return []
+    index = command_index(args)
+    if index is None:
+        return args[:]
+    built = args[:]
+    built[index] = normalize_command(built[index])
+    if should_inject_code_length(built):
+        built.insert(index + 1, "--code-length=4")
+    return built
+
+
+def print_usage() -> None:
+    name = Path(sys.argv[0]).name
+    print(f"Usage: {name} <wormhole-command> [args]")
+    print()
+    print("Examples:")
+    print(f"  {name} send file.zip")
+    print(f"  {name} receive")
+    print(f"  {name} receive --allocate")
+
+
+def confirm(prompt: str) -> bool:
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        return False
+    return answer in {"", "y", "yes"}
+
+
+def ensure_wormhole() -> str:
+    wormhole = shutil.which("wormhole")
+    if wormhole:
+        return wormhole
+    os_name = detect_os()
+    pkg_manager = detect_pkg_manager(os_name)
+    command = install_command(os_name, pkg_manager)
+    print("`wormhole` was not found on PATH.")
+    print(f"Detected OS: {os_name}")
+    print(f"Detected package manager: {pkg_manager}")
+    print(f"Planned install command: {command}")
+    if not confirm("Run this install command now? [Y/n] "):
+        print("Install canceled.")
+        raise SystemExit(1)
+    shell = os.environ.get("COMSPEC", "cmd.exe") if os_name == "windows" else os.environ.get("SHELL", "/bin/sh")
+    if os_name == "windows":
+        result = subprocess.run([shell, "/c", command], check=False)
+    else:
+        result = subprocess.run([shell, "-lc", command], check=False)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+    wormhole = shutil.which("wormhole")
+    if not wormhole:
+        print("Install command finished, but `wormhole` is still not available on PATH.")
+        print("Open a new terminal or install it manually, then try again.")
+        raise SystemExit(1)
+    return wormhole
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        print_usage()
+        return 1
+    if args[0] == "help":
+        print_usage()
+        print()
+        print("All other arguments are passed through to `wormhole`.")
+        return 0
+    wormhole = ensure_wormhole()
+    command = [wormhole, *build_wormhole_args(args)]
+    return subprocess.run(command, check=False).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
