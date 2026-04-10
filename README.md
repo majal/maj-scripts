@@ -192,6 +192,14 @@ Other distros should use their normal package manager equivalents.
 
 On Windows, it is best to treat Python installation as explicit setup rather than assuming it is already present.
 
+When running Python scripts from this repo on Windows, the safest default is:
+
+```powershell
+py <scriptname> [args]
+```
+
+The `py` launcher passes arguments after the script name through to the script itself.
+
 First check:
 
 ```powershell
