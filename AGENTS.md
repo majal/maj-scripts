@@ -19,16 +19,15 @@ When adding a new top-level script to the repo:
 
 1. Add or update the script file.
 2. Add the script to the README table of contents.
-3. Add the script to the README Scripts index.
-4. Add a dedicated script section to the README using the standard template.
-5. Place script sections above the shared Bootstrap section.
-6. End each major section with `↑ TOC`.
+3. Add a dedicated script subsection under `## Scripts` using the standard template.
+4. Keep the `## Scripts` section above the shared Bootstrap section.
+5. End each major section with `↑ TOC`.
 
 Do not add a new script without updating the README.
 
 ## Script Section Template
 
-Each script section in `README.md` should include:
+Each script subsection under `## Scripts` in `README.md` should include:
 
 1. Script name
 2. What it does
@@ -75,8 +74,8 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 ## Heading And TOC Rules
 
 - Keep README headings stable and predictable so future anchors remain valid.
-- Prefer simple headings like `Script: <name>` and `Bootstrap / Platform Setup`.
-- Script sections should appear before Bootstrap.
+- Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
+- The `## Scripts` section should appear before Bootstrap.
 - Every major section should end with `↑ TOC`.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
 
@@ -94,9 +93,9 @@ If the repo grows large later:
 
 - add the script file
 - update the README table of contents
-- update the README Scripts index
-- add the script section using the standard template
-- place the script section above Bootstrap
+- add the script subsection under `## Scripts`
+- use the standard script template inside that subsection
+- keep `## Scripts` above Bootstrap
 - add/update bootstrap docs only if there is a new shared prerequisite
 - use `↑ TOC` consistently
 - keep examples concise and copy-pasteable

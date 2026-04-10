@@ -6,8 +6,7 @@ LLMs have changed the way the programming world works. Welcome to the machine-ma
 
 - [Overview](#overview)
 - [Scripts](#scripts)
-  - [`whisper`](#script-whisper)
-- [Script: `whisper`](#script-whisper)
+  - [`whisper`](#whisper)
 - [Bootstrap / Platform Setup](#bootstrap--platform-setup)
   - [Python](#python)
   - [macOS](#macos)
@@ -31,16 +30,6 @@ The root README is the main navigation page:
 ## Scripts
 
 ### `whisper`
-
-Self-bootstrapping subtitle and transcription CLI for media files. 🎙️
-
-- Script file: [`whisper`](./whisper)
-- Primary use: transcribe audio/video files and write subtitles or text output
-- Notable behavior: manages its own runtime, can use MLX on Apple Silicon, and includes diagnostic controls for comparing MLX settings
-
-[↑ TOC](#table-of-contents)
-
-## Script: `whisper`
 
 `whisper` is a self-bootstrapping subtitle and transcription CLI.
 
