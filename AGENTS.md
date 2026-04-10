@@ -30,6 +30,7 @@ Do not add a new script without updating the README.
 Each script subsection under `## Scripts` in `README.md` should include:
 
 1. Script name
+   The subsection heading itself should link directly to the script file when the script lives in the repo root.
 2. What it does
 3. Supported platforms
 4. Dependencies
@@ -75,6 +76,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 
 - Keep README headings stable and predictable so future anchors remain valid.
 - Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
+- Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - The `## Scripts` section should appear before Bootstrap.
 - Every major section should end with `↑ TOC`.
 - If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
@@ -94,6 +96,7 @@ If the repo grows large later:
 - add the script file
 - update the README table of contents
 - add the script subsection under `## Scripts`
+- link the script subsection heading to the actual script file when possible
 - use the standard script template inside that subsection
 - keep `## Scripts` above Bootstrap
 - add/update bootstrap docs only if there is a new shared prerequisite

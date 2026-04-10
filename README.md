@@ -29,7 +29,7 @@ The root README is the main navigation page:
 
 ## Scripts
 
-### `whisper`
+### [`whisper`](./whisper)
 
 `whisper` is a self-bootstrapping subtitle and transcription CLI.
 
