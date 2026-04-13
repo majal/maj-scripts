@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,17 @@ YELLOW = "\033[33m" if COLOR else ""
 BLUE = "\033[34m" if COLOR else ""
 MAGENTA = "\033[35m" if COLOR else ""
 CYAN = "\033[36m" if COLOR else ""
+
+
+def terminal_display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        if char in "\r\n":
+            continue
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
 
 
 @dataclass(frozen=True)
@@ -138,6 +150,7 @@ class Spinner:
         self.delay_seconds = delay_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._last_render_width = 0
 
     def start(self) -> None:
         if not self.enabled:
@@ -149,9 +162,12 @@ class Spinner:
             if self._stop.wait(self.delay_seconds):
                 return
             while not self._stop.wait(0.1):
-                print(f"\r{CYAN}{frames[index % len(frames)]}{RESET} {self.message}", end="", file=sys.stderr, flush=True)
+                frame = frames[index % len(frames)]
+                rendered = f"{frame} {self.message}"
+                self._last_render_width = terminal_display_width(rendered)
+                print(f"\r{CYAN}{frame}{RESET} {self.message}", end="", file=sys.stderr, flush=True)
                 index += 1
-            print(f"\r{' ' * (len(self.message) + 4)}\r", end="", file=sys.stderr, flush=True)
+            print(f"\r{' ' * self._last_render_width}\r", end="", file=sys.stderr, flush=True)
 
         self._thread = threading.Thread(target=spin, daemon=True)
         self._thread.start()
@@ -1076,7 +1092,7 @@ class EstimatedProgressReporter:
         self.last_reported_at = 0.0
         self.unknown_duration_noted = False
         self.inline_rendered = False
-        self.last_render_len = 0
+        self.last_render_width = 0
         if self.duration is None:
             self.note_unknown_duration()
         else:
@@ -1085,9 +1101,9 @@ class EstimatedProgressReporter:
     def clear_inline(self) -> None:
         if not self.inline_rendered:
             return
-        print(f"\r{' ' * self.last_render_len}\r", end="", file=sys.stderr, flush=True)
+        print(f"\r{' ' * self.last_render_width}\r", end="", file=sys.stderr, flush=True)
         self.inline_rendered = False
-        self.last_render_len = 0
+        self.last_render_width = 0
 
     def note_unknown_duration(self) -> None:
         if self.unknown_duration_noted:
@@ -1109,7 +1125,7 @@ class EstimatedProgressReporter:
         self.last_reported_at = now
         message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
         if self.inline:
-            self.last_render_len = len(message)
+            self.last_render_width = terminal_display_width(message)
             self.inline_rendered = True
             print(f"\r{message}", end="", file=sys.stderr, flush=True)
         else:
@@ -1122,7 +1138,7 @@ class EstimatedProgressReporter:
             self.last_percent = 100
             message = f"⏳ {self.media_path.name} [{self.backend}] ~100%"
             if self.inline:
-                self.last_render_len = len(message)
+                self.last_render_width = terminal_display_width(message)
                 self.inline_rendered = True
                 print(f"\r{message}", end="", file=sys.stderr, flush=True)
             else:
@@ -1314,6 +1330,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
         print(f"📝 Writing text: {media_path.name}", file=sys.stderr)
         text_path = output_root / f"{media_path.stem}.txt"
         write_txt(text_path, mlx_result.get("text", ""))
+        print(f"📝 Writing text: {media_path.name} ... done", file=sys.stderr)
     else:
         print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
@@ -1321,6 +1338,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
         else:
             write_srt(subtitle_path, segments)
+        print(f"📝 Writing subtitles: {media_path.name} ... done", file=sys.stderr)
         if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
             burn_subtitles(media_path, subtitle_path, output_root / f"{media_path.stem}_subbed.mp4")
     elapsed = time.time() - started_at
