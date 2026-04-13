@@ -1259,6 +1259,23 @@ def probe_subtitle_stream_count(media_path: Path) -> int:
         return 0
 
 
+def probe_audio_stream_language(media_path: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream_tags=language", "-of", "csv=p=0", str(media_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for line in proc.stdout.splitlines():
+            language = line.strip().lower()
+            if language and language != "und":
+                return language
+    except Exception:
+        return None
+    return None
+
+
 def subtitle_track_metadata(language: str) -> tuple[str, str]:
     token = (language or "").strip().lower().replace("_", "-")
     if not token or token == "auto":
@@ -1275,6 +1292,14 @@ def subtitle_track_metadata(language: str) -> tuple[str, str]:
             return iso3, title
     pretty = language.strip()
     return "und", pretty[:1].upper() + pretty[1:] if pretty else "Subtitles"
+
+
+def resolve_subtitle_language(media_path: Path, requested_language: str, detected_language: str | None = None) -> str:
+    if requested_language != "auto":
+        return requested_language
+    if detected_language:
+        return detected_language
+    return probe_audio_stream_language(media_path) or "auto"
 
 
 class EstimatedProgressReporter:
@@ -1700,7 +1725,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     output_root.mkdir(parents=True, exist_ok=True)
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
-    subtitle_language = env["WHISPER_LANG"] if env["WHISPER_LANG"] != "auto" else (detected_language or "auto")
+    subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
         write_txt(text_path, mlx_result.get("text", ""))
@@ -1742,7 +1767,7 @@ def process_existing_subtitle_file(media_path: Path, env: dict[str, str], *, com
         output_root,
         env,
         compact_status=compact_status,
-        subtitle_language=env["WHISPER_LANG"],
+        subtitle_language=resolve_subtitle_language(media_path, env["WHISPER_LANG"]),
     )
     elapsed = time.time() - started_at
     return f"{media_path.name} [embed] ({elapsed:.1f}s)"

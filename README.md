@@ -219,7 +219,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
-- `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python and skips backend loading.
+- `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python, skips backend loading, and reuses source audio language metadata when available.
 - `--in-place` first writes to a temporary file, then replaces the original video only after a successful mux. The short alias is `-i`.
 - `--font` sets the font family used for ASS and karaoke subtitle output. The short alias is `-F`.
 - MP4 and MOV use `mov_text` for embedded text subtitles; ASS subtitles fall back to MKV so styling survives.
