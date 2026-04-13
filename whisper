@@ -920,6 +920,8 @@ def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) 
     if os_name == "unknown":
         die(f"unsupported OS: {sys.platform}")
     embed_requested = args.embed or args.embed_file is not None
+    if args.embed and args.embed_file is not None:
+        warn("--embed is ignored when --embed-file is set.")
     if not shutil.which("ffmpeg") and (args.burn or embed_requested):
         print_install_help(os_name, pkg_mgr)
         required_flags = " and ".join(
