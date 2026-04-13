@@ -186,6 +186,12 @@ Embed a soft subtitle track into the output video:
 whisper /path/to/file.mp4 --embed-subs
 ```
 
+Embed a soft subtitle track and replace the source video after muxing succeeds:
+
+```bash
+whisper /path/to/file.mp4 --embed-subs-in-place
+```
+
 Burn subtitles into a new video with an explicit AV1 encoder:
 
 ```bash
@@ -206,6 +212,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
 - `--embed-subs` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
+- `--embed-subs-in-place` first writes to a temporary file, then replaces the original video only after a successful mux.
 - MP4 and MOV use `mov_text` for embedded text subtitles; ASS subtitles fall back to MKV so styling survives.
 - `--burn` always re-encodes video because subtitle burn-in uses an `ffmpeg` video filter.
 - `--burn-vcodec=auto` lets `ffmpeg` choose the video encoder, or you can pass a codec such as `libx264` or `libsvtav1`.
@@ -219,6 +226,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
 - Soft subtitle embedding and burn-in both require `ffmpeg`.
+- In-place embedding only works when the embedded output can stay in the same container; cases that need an MKV fallback still require plain `--embed-subs`.
 - MLX behavior can vary by machine, Python version, and model choice.
 
 [↑ TOC](#table-of-contents)
