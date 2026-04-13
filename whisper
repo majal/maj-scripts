@@ -1096,7 +1096,7 @@ class EstimatedProgressReporter:
         if self.duration is None:
             self.note_unknown_duration()
         else:
-            print(f"⏱ Estimated duration: {self.duration:.1f}s for {media_path.name}", file=sys.stderr)
+            print(f"⏱ Media duration: {format_elapsed_summary(self.duration)} for {media_path.name}", file=sys.stderr)
 
     def clear_inline(self) -> None:
         if not self.inline_rendered:
@@ -1110,7 +1110,7 @@ class EstimatedProgressReporter:
             return
         self.clear_inline()
         self.unknown_duration_noted = True
-        print(f"⏱ Duration unknown for {self.media_path.name}; estimated % progress unavailable.", file=sys.stderr)
+        print(f"⏱ Media duration unavailable for {self.media_path.name}; estimated % progress unavailable.", file=sys.stderr)
 
     def report(self, current_end: float) -> None:
         if self.duration is None:
