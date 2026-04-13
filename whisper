@@ -37,6 +37,120 @@ BACKEND_MODULES = {
 }
 MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
 MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
+LANGUAGE_LABELS = {
+    "af": ("afr", "Afrikaans"),
+    "am": ("amh", "Amharic"),
+    "ar": ("ara", "Arabic"),
+    "as": ("asm", "Assamese"),
+    "az": ("aze", "Azerbaijani"),
+    "ba": ("bak", "Bashkir"),
+    "be": ("bel", "Belarusian"),
+    "bg": ("bul", "Bulgarian"),
+    "bn": ("ben", "Bengali"),
+    "bo": ("bod", "Tibetan"),
+    "br": ("bre", "Breton"),
+    "bs": ("bos", "Bosnian"),
+    "ca": ("cat", "Catalan"),
+    "cs": ("ces", "Czech"),
+    "cy": ("cym", "Welsh"),
+    "da": ("dan", "Danish"),
+    "de": ("deu", "German"),
+    "el": ("ell", "Greek"),
+    "en": ("eng", "English"),
+    "es": ("spa", "Spanish"),
+    "et": ("est", "Estonian"),
+    "eu": ("eus", "Basque"),
+    "fa": ("fas", "Persian"),
+    "fi": ("fin", "Finnish"),
+    "fo": ("fao", "Faroese"),
+    "fr": ("fra", "French"),
+    "gl": ("glg", "Galician"),
+    "gu": ("guj", "Gujarati"),
+    "ha": ("hau", "Hausa"),
+    "he": ("heb", "Hebrew"),
+    "hi": ("hin", "Hindi"),
+    "hr": ("hrv", "Croatian"),
+    "hu": ("hun", "Hungarian"),
+    "hy": ("hye", "Armenian"),
+    "id": ("ind", "Indonesian"),
+    "is": ("isl", "Icelandic"),
+    "it": ("ita", "Italian"),
+    "ja": ("jpn", "Japanese"),
+    "jv": ("jav", "Javanese"),
+    "ka": ("kat", "Georgian"),
+    "kk": ("kaz", "Kazakh"),
+    "km": ("khm", "Khmer"),
+    "kn": ("kan", "Kannada"),
+    "ko": ("kor", "Korean"),
+    "la": ("lat", "Latin"),
+    "lb": ("ltz", "Luxembourgish"),
+    "ln": ("lin", "Lingala"),
+    "lo": ("lao", "Lao"),
+    "lt": ("lit", "Lithuanian"),
+    "lv": ("lav", "Latvian"),
+    "mg": ("mlg", "Malagasy"),
+    "mi": ("mri", "Maori"),
+    "mk": ("mkd", "Macedonian"),
+    "ml": ("mal", "Malayalam"),
+    "mn": ("mon", "Mongolian"),
+    "mr": ("mar", "Marathi"),
+    "ms": ("msa", "Malay"),
+    "mt": ("mlt", "Maltese"),
+    "my": ("mya", "Burmese"),
+    "ne": ("nep", "Nepali"),
+    "nl": ("nld", "Dutch"),
+    "no": ("nor", "Norwegian"),
+    "oc": ("oci", "Occitan"),
+    "pa": ("pan", "Punjabi"),
+    "pl": ("pol", "Polish"),
+    "ps": ("pus", "Pashto"),
+    "pt": ("por", "Portuguese"),
+    "ro": ("ron", "Romanian"),
+    "ru": ("rus", "Russian"),
+    "sa": ("san", "Sanskrit"),
+    "sd": ("snd", "Sindhi"),
+    "si": ("sin", "Sinhala"),
+    "sk": ("slk", "Slovak"),
+    "sl": ("slv", "Slovenian"),
+    "sn": ("sna", "Shona"),
+    "so": ("som", "Somali"),
+    "sq": ("sqi", "Albanian"),
+    "sr": ("srp", "Serbian"),
+    "su": ("sun", "Sundanese"),
+    "sv": ("swe", "Swedish"),
+    "sw": ("swa", "Swahili"),
+    "ta": ("tam", "Tamil"),
+    "te": ("tel", "Telugu"),
+    "tg": ("tgk", "Tajik"),
+    "th": ("tha", "Thai"),
+    "tk": ("tuk", "Turkmen"),
+    "tl": ("tgl", "Tagalog"),
+    "tr": ("tur", "Turkish"),
+    "tt": ("tat", "Tatar"),
+    "uk": ("ukr", "Ukrainian"),
+    "ur": ("urd", "Urdu"),
+    "uz": ("uzb", "Uzbek"),
+    "vi": ("vie", "Vietnamese"),
+    "yue": ("yue", "Cantonese"),
+    "zh": ("zho", "Chinese"),
+}
+LANGUAGE_ALIASES = {
+    "burmese": "my",
+    "cantonese": "yue",
+    "farsi": "fa",
+    "fil": "tl",
+    "filipino": "tl",
+    "hebrew": "he",
+    "indonesian": "id",
+    "javanese": "jv",
+    "maori": "mi",
+    "moldovan": "ro",
+    "norwegian": "no",
+    "persian": "fa",
+    "romanian": "ro",
+    "tagalog": "tl",
+    "tibetan": "bo",
+}
 
 
 def use_color() -> bool:
@@ -1015,6 +1129,25 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
     )
 
 
+def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "WHISPER_TARGET": str(args.target or ""),
+        "WHISPER_LANG": args.lang,
+        "WHISPER_JOBS": str(args.jobs),
+        "WHISPER_OUTDIR": args.outdir,
+        "WHISPER_RECURSIVE": "1" if args.recursive else "0",
+        "WHISPER_ASS": "1" if args.ass else "0",
+        "WHISPER_EMBED": "1" if (args.embed or args.embed_file is not None) else "0",
+        "WHISPER_EMBED_FILE_MODE": "1" if args.embed_file is not None else "0",
+        "WHISPER_EMBED_FILE": args.embed_file or "",
+        "WHISPER_IN_PLACE": "1" if args.in_place else "0",
+        "WHISPER_BURN": "1" if args.burn else "0",
+        "WHISPER_BURN_VCODEC": args.burn_vcodec,
+        "WHISPER_FONT": args.font,
+        "WHISPER_KARAOKE": "1" if args.karaoke else "0",
+    }
+
+
 def rebuild_plan(plan: RuntimePlan) -> RuntimePlan:
     parser = build_parser()
     args = parser.parse_args()
@@ -1111,6 +1244,37 @@ def probe_duration_seconds(media_path: Path) -> float | None:
         return duration if duration and duration > 0 else None
     except Exception:
         return None
+
+
+def probe_subtitle_stream_count(media_path: Path) -> int:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index", "-of", "csv=p=0", str(media_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return sum(1 for line in proc.stdout.splitlines() if line.strip())
+    except Exception:
+        return 0
+
+
+def subtitle_track_metadata(language: str) -> tuple[str, str]:
+    token = (language or "").strip().lower().replace("_", "-")
+    if not token or token == "auto":
+        return "und", "Subtitles"
+    base = token.split("-", 1)[0]
+    canonical = LANGUAGE_ALIASES.get(token) or LANGUAGE_ALIASES.get(base)
+    if not canonical:
+        canonical = token if token in LANGUAGE_LABELS else base
+    if canonical in LANGUAGE_LABELS:
+        iso3, title = LANGUAGE_LABELS[canonical]
+        return iso3, title
+    for code, (iso3, title) in LANGUAGE_LABELS.items():
+        if token == iso3 or base == iso3 or token == title.lower():
+            return iso3, title
+    pretty = language.strip()
+    return "und", pretty[:1].upper() + pretty[1:] if pretty else "Subtitles"
 
 
 class EstimatedProgressReporter:
@@ -1252,7 +1416,9 @@ def embedded_subtitle_plan(video_path: Path, subtitle_path: Path, output_root: P
     return output_path, subtitle_codec
 
 
-def embed_subtitles(video_path: Path, subtitle_path: Path, output_path: Path, *, subtitle_codec: str) -> None:
+def embed_subtitles(video_path: Path, subtitle_path: Path, output_path: Path, *, subtitle_codec: str, subtitle_language: str) -> None:
+    subtitle_stream_index = probe_subtitle_stream_count(video_path)
+    track_language, track_title = subtitle_track_metadata(subtitle_language)
     result = run_command_with_spinner(
         [
             "ffmpeg",
@@ -1269,6 +1435,12 @@ def embed_subtitles(video_path: Path, subtitle_path: Path, output_path: Path, *,
             "copy",
             "-c:s",
             subtitle_codec,
+            f"-metadata:s:s:{subtitle_stream_index}",
+            f"language={track_language}",
+            f"-metadata:s:s:{subtitle_stream_index}",
+            f"title={track_title}",
+            f"-metadata:s:s:{subtitle_stream_index}",
+            f"handler_name={track_title}",
             str(output_path),
         ],
         description=f"Embedding subtitles into {video_path.name}",
@@ -1279,7 +1451,7 @@ def embed_subtitles(video_path: Path, subtitle_path: Path, output_path: Path, *,
         raise subprocess.CalledProcessError(result.returncode, result.args)
 
 
-def embed_subtitles_in_place(video_path: Path, subtitle_path: Path, *, subtitle_codec: str) -> None:
+def embed_subtitles_in_place(video_path: Path, subtitle_path: Path, *, subtitle_codec: str, subtitle_language: str) -> None:
     temp_handle = tempfile.NamedTemporaryFile(
         prefix=f".{video_path.stem}.embedtmp-",
         suffix=video_path.suffix,
@@ -1289,7 +1461,7 @@ def embed_subtitles_in_place(video_path: Path, subtitle_path: Path, *, subtitle_
     temp_path = Path(temp_handle.name)
     temp_handle.close()
     try:
-        embed_subtitles(video_path, subtitle_path, temp_path, subtitle_codec=subtitle_codec)
+        embed_subtitles(video_path, subtitle_path, temp_path, subtitle_codec=subtitle_codec, subtitle_language=subtitle_language)
         os.replace(temp_path, video_path)
     finally:
         if temp_path.exists():
@@ -1313,7 +1485,15 @@ def resolve_embed_subtitle_path(media_path: Path, embed_file_value: str) -> Path
     return candidates[0]
 
 
-def apply_subtitle_outputs(media_path: Path, subtitle_path: Path, output_root: Path, env: dict[str, str], *, compact_status: bool) -> None:
+def apply_subtitle_outputs(
+    media_path: Path,
+    subtitle_path: Path,
+    output_root: Path,
+    env: dict[str, str],
+    *,
+    compact_status: bool,
+    subtitle_language: str,
+) -> None:
     embed_requested = env["WHISPER_EMBED"] == "1"
     in_place = env["WHISPER_IN_PLACE"] == "1"
     if embed_requested and media_path.suffix.lower() in VIDEO_EXTENSIONS:
@@ -1323,13 +1503,13 @@ def apply_subtitle_outputs(media_path: Path, subtitle_path: Path, output_root: P
                 raise ValueError(
                     f"--in-place is not available for {media_path.suffix} with {subtitle_path.suffix} subtitles; use MKV/SRT or omit --in-place."
                 )
-            embed_subtitles_in_place(media_path, subtitle_path, subtitle_codec=subtitle_codec)
+            embed_subtitles_in_place(media_path, subtitle_path, subtitle_codec=subtitle_codec, subtitle_language=subtitle_language)
             if compact_status:
                 print("📦 Embedded subtitle track in place.", file=sys.stderr)
             else:
                 print(f"📦 Embedded subtitle track in place: {media_path.name}", file=sys.stderr)
         else:
-            embed_subtitles(media_path, subtitle_path, embedded_path, subtitle_codec=subtitle_codec)
+            embed_subtitles(media_path, subtitle_path, embedded_path, subtitle_codec=subtitle_codec, subtitle_language=subtitle_language)
             if compact_status:
                 print("📦 Embedded subtitle track.", file=sys.stderr)
             else:
@@ -1444,8 +1624,8 @@ def run_faster_whisper(media_path: Path, model: str, language: str, device: str,
     from faster_whisper import WhisperModel
 
     whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
-    segments_iter, _info = whisper_model.transcribe(str(media_path), language=None if language == "auto" else language, vad_filter=True, word_timestamps=True)
-    return normalize_faster_segments(segments_iter, report_progress)
+    segments_iter, info = whisper_model.transcribe(str(media_path), language=None if language == "auto" else language, vad_filter=True, word_timestamps=True)
+    return normalize_faster_segments(segments_iter, report_progress), getattr(info, "language", None)
 
 
 def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress, *, word_timestamps: bool):
@@ -1492,6 +1672,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
         progress.report(current_end)
 
     wait_spinner.start()
+    detected_language: str | None = None
     if backend == "mlx":
         try:
             mlx_result = run_mlx_whisper(
@@ -1501,13 +1682,16 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
                 report_with_spinner,
                 word_timestamps=mlx_word_timestamps_enabled,
             )
+            detected_language = mlx_result.get("language")
         finally:
             stop_wait_spinner()
     else:
         device = env["WHISPER_DEVICE"] if backend == env["WHISPER_BACKEND"] else env["WHISPER_FALLBACK_DEVICE"]
         compute = env["WHISPER_COMPUTE_TYPE"] if backend == env["WHISPER_BACKEND"] else env["WHISPER_FALLBACK_COMPUTE_TYPE"]
         try:
-            segments = run_faster_whisper(media_path, env["WHISPER_MODEL"], env["WHISPER_LANG"], device, compute, report_with_spinner)
+            segments, detected_language = run_faster_whisper(
+                media_path, env["WHISPER_MODEL"], env["WHISPER_LANG"], device, compute, report_with_spinner
+            )
         finally:
             stop_wait_spinner()
     progress.finish()
@@ -1516,6 +1700,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     output_root.mkdir(parents=True, exist_ok=True)
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
+    subtitle_language = env["WHISPER_LANG"] if env["WHISPER_LANG"] != "auto" else (detected_language or "auto")
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
         write_txt(text_path, mlx_result.get("text", ""))
@@ -1527,7 +1712,14 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
         else:
             write_srt(subtitle_path, segments)
         print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
-        apply_subtitle_outputs(media_path, subtitle_path, output_root, env, compact_status=compact_status)
+        apply_subtitle_outputs(
+            media_path,
+            subtitle_path,
+            output_root,
+            env,
+            compact_status=compact_status,
+            subtitle_language=subtitle_language,
+        )
     elapsed = time.time() - started_at
     return f"{media_path.name} [{backend}] ({elapsed:.1f}s)"
 
@@ -1544,7 +1736,14 @@ def process_existing_subtitle_file(media_path: Path, env: dict[str, str], *, com
         print("📝 Using existing subtitle file.", file=sys.stderr)
     else:
         print(f"📝 Using existing subtitle file: {subtitle_path.name}", file=sys.stderr)
-    apply_subtitle_outputs(media_path, subtitle_path, output_root, env, compact_status=compact_status)
+    apply_subtitle_outputs(
+        media_path,
+        subtitle_path,
+        output_root,
+        env,
+        compact_status=compact_status,
+        subtitle_language=env["WHISPER_LANG"],
+    )
     elapsed = time.time() - started_at
     return f"{media_path.name} [embed] ({elapsed:.1f}s)"
 
@@ -1569,11 +1768,19 @@ def format_elapsed_summary(seconds: float) -> str:
     return f"{secs}s"
 
 
+def file_progress_bar(total: int):
+    try:
+        return importlib.import_module("tqdm").tqdm(total=total, desc="📦 Files")
+    except ModuleNotFoundError:
+        warn("Files progress bar support is unavailable in this Python; continuing without it.")
+        return None
+
+
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     inline_progress = len(files) == 1 and jobs == 1 and not use_progress_bar
     compact_status = jobs == 1
-    progress = importlib.import_module("tqdm").tqdm(total=len(files), desc="📦 Files") if use_progress_bar else None
+    progress = file_progress_bar(len(files)) if use_progress_bar else None
     try:
         if jobs > 1:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -1598,7 +1805,7 @@ def process_embed_files(files: list[Path], env: dict[str, str], jobs: int) -> No
         raise ValueError("--embed-file=/path/to/file requires exactly one video target.")
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     compact_status = jobs == 1
-    progress = importlib.import_module("tqdm").tqdm(total=len(files), desc="📦 Files") if use_progress_bar else None
+    progress = file_progress_bar(len(files)) if use_progress_bar else None
     try:
         if jobs > 1:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -1618,6 +1825,29 @@ def process_embed_files(files: list[Path], env: dict[str, str], jobs: int) -> No
             progress.close()
 
 
+def run_embed_file_mode(target: Path, env: dict[str, str], *, recursive: bool, jobs: int) -> int:
+    started_at = time.time()
+    files = discover_files(target, recursive)
+    files = [path for path in files if path.suffix.lower() in VIDEO_EXTENSIONS]
+    if not files:
+        print("❌ No supported video files found for --embed-file.", file=sys.stderr)
+        print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
+        return 1
+    print(f"📦 Using existing subtitle files. Processing {len(files)} file(s).", file=sys.stderr)
+    try:
+        process_embed_files(files, env, jobs)
+        if jobs == 1:
+            print(file=sys.stderr)
+        print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
+        return 0
+    except Exception as exc:
+        print(f"❌ Embed mode ran into a problem: {exc}", file=sys.stderr)
+        if jobs == 1:
+            print(file=sys.stderr)
+        print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
+        return 1
+
+
 def install_backend_into_managed_runtime(backend: str) -> None:
     label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
     install_packages(Path(sys.executable), f"Installing {label}", *backend_packages(backend))
@@ -1627,31 +1857,13 @@ def managed_main() -> int:
     started_at = time.time()
     env = os.environ
     target = Path(env["WHISPER_TARGET"]).expanduser()
-    files = discover_files(target, env["WHISPER_RECURSIVE"] == "1")
     if env["WHISPER_EMBED_FILE_MODE"] == "1":
-        files = [path for path in files if path.suffix.lower() in VIDEO_EXTENSIONS]
+        return run_embed_file_mode(target, env, recursive=env["WHISPER_RECURSIVE"] == "1", jobs=int(env["WHISPER_JOBS"]))
+    files = discover_files(target, env["WHISPER_RECURSIVE"] == "1")
     if not files:
-        if env["WHISPER_EMBED_FILE_MODE"] == "1":
-            print("❌ No supported video files found for --embed-file.", file=sys.stderr)
-        else:
-            print("❌ No supported media files found.", file=sys.stderr)
+        print("❌ No supported media files found.", file=sys.stderr)
         print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
         return 1
-    if env["WHISPER_EMBED_FILE_MODE"] == "1":
-        jobs = int(env["WHISPER_JOBS"])
-        print(f"📦 Using existing subtitle files. Processing {len(files)} file(s).", file=sys.stderr)
-        try:
-            process_embed_files(files, env, jobs)
-            if jobs == 1:
-                print(file=sys.stderr)
-            print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
-            return 0
-        except Exception as exc:
-            print(f"❌ Embed mode ran into a problem: {exc}", file=sys.stderr)
-            if jobs == 1:
-                print(file=sys.stderr)
-            print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
-            return 1
     backend = env["WHISPER_BACKEND"]
     fallback = env["WHISPER_FALLBACK_BACKEND"]
     auto_backend = env.get("WHISPER_AUTO_BACKEND") == "1"
@@ -1719,10 +1931,10 @@ def print_modify_examples() -> None:
 
 def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
     env = os.environ.copy()
+    env.update(build_processing_env(args))
     env.update(
         {
             MANAGED_ENV_FLAG: "1",
-            "WHISPER_TARGET": str(args.target),
             "WHISPER_LANG": args.lang,
             "WHISPER_MODEL": plan.selected_model,
             "WHISPER_BACKEND": plan.selected_backend,
@@ -1732,18 +1944,6 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
             "WHISPER_FALLBACK_DEVICE": plan.fallback_device,
             "WHISPER_FALLBACK_COMPUTE_TYPE": plan.fallback_compute,
             "WHISPER_STATE_DIR": str(plan.state_dir),
-            "WHISPER_JOBS": str(args.jobs),
-            "WHISPER_OUTDIR": args.outdir,
-            "WHISPER_RECURSIVE": "1" if args.recursive else "0",
-            "WHISPER_ASS": "1" if args.ass else "0",
-            "WHISPER_EMBED": "1" if (args.embed or args.embed_file is not None) else "0",
-            "WHISPER_EMBED_FILE_MODE": "1" if args.embed_file is not None else "0",
-            "WHISPER_EMBED_FILE": args.embed_file or "",
-            "WHISPER_IN_PLACE": "1" if args.in_place else "0",
-            "WHISPER_BURN": "1" if args.burn else "0",
-            "WHISPER_BURN_VCODEC": args.burn_vcodec,
-            "WHISPER_FONT": args.font,
-            "WHISPER_KARAOKE": "1" if args.karaoke else "0",
             "WHISPER_AUTO_BACKEND": "1" if plan.auto_backend else "0",
             "WHISPER_STABLE_MLX_PYTHON": "1" if plan.stable_mlx_python else "0",
             "WHISPER_MLX_WORD_TIMESTAMPS": args.mlx_word_timestamps,
@@ -1776,6 +1976,13 @@ def outer_main() -> int:
         return 0
     if args.jobs < 1:
         die("--jobs must be at least 1")
+    runtime_management_requested = args.doctor or args.clean or args.reinstall or args.setup_only or args.update
+    if args.embed_file is not None and not runtime_management_requested:
+        if not args.target:
+            print_help()
+            return 1
+        ensure_system_prereqs(args, detect_os(), detect_pkg_manager())
+        return run_embed_file_mode(Path(args.target).expanduser(), build_processing_env(args), recursive=args.recursive, jobs=args.jobs)
     plan = build_runtime_plan(args)
     if args.doctor:
         print_doctor(plan)
