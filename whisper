@@ -882,7 +882,7 @@ def print_help() -> None:
 {BOLD}Runtime management{RESET}
   First run shows an install summary and asks before downloading packages.
   Defaults are chosen from detected hardware and OS capabilities.
-  Per-file progress percentages are estimated from media duration.
+  Per-file progress percentages and ETA are estimated from media length.
   --setup-only
   --update
   --reinstall
@@ -1090,13 +1090,15 @@ class EstimatedProgressReporter:
         self.duration = probe_duration_seconds(media_path)
         self.last_percent = -1
         self.last_reported_at = 0.0
+        self.eta_started_at: float | None = None
+        self.eta_started_media_end: float | None = None
         self.unknown_duration_noted = False
         self.inline_rendered = False
         self.last_render_width = 0
         if self.duration is None:
             self.note_unknown_duration()
         else:
-            print(f"⏱ Media duration: {format_elapsed_summary(self.duration)} for {media_path.name}", file=sys.stderr)
+            print(f"⏱ Media length: {format_elapsed_summary(self.duration)} for {media_path.name}", file=sys.stderr)
 
     def clear_inline(self) -> None:
         if not self.inline_rendered:
@@ -1110,12 +1112,30 @@ class EstimatedProgressReporter:
             return
         self.clear_inline()
         self.unknown_duration_noted = True
-        print(f"⏱ Media duration unavailable for {self.media_path.name}; estimated % progress unavailable.", file=sys.stderr)
+        print(f"⏱ Media length unavailable for {self.media_path.name}; estimated % progress and ETA unavailable.", file=sys.stderr)
+
+    def estimate_eta_seconds(self, current_end: float, now: float) -> float | None:
+        if self.duration is None:
+            return None
+        if self.eta_started_at is None or self.eta_started_media_end is None:
+            self.eta_started_at = now
+            self.eta_started_media_end = current_end
+            return None
+        elapsed = now - self.eta_started_at
+        processed_media = max(0.0, current_end - self.eta_started_media_end)
+        min_media_for_eta = min(60.0, max(15.0, self.duration * 0.03))
+        if elapsed < 5.0 or processed_media < min_media_for_eta:
+            return None
+        rate = processed_media / elapsed
+        if rate <= 0:
+            return None
+        remaining_media = max(0.0, self.duration - current_end)
+        return remaining_media / rate
 
     def report(self, current_end: float) -> None:
         if self.duration is None:
             return
-        now = time.time()
+        now = time.monotonic()
         percent = int(min(100, max(0, round((current_end / self.duration) * 100))))
         if percent <= self.last_percent:
             return
@@ -1124,6 +1144,9 @@ class EstimatedProgressReporter:
         self.last_percent = percent
         self.last_reported_at = now
         message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
+        eta_seconds = self.estimate_eta_seconds(current_end, now)
+        if eta_seconds is not None and percent < 100:
+            message += f" | ETA {format_elapsed_summary(eta_seconds)}"
         if self.inline:
             self.last_render_width = terminal_display_width(message)
             self.inline_rendered = True
