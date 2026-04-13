@@ -113,7 +113,7 @@ wh help
 - discovers supported audio/video files
 - builds and manages its own Python runtime
 - selects a backend based on the host, including MLX on Apple Silicon
-- writes subtitles by default and can also write text output for MLX diagnostics
+- writes subtitles by default, can mux soft subtitle tracks into video containers, and can also write text output for MLX diagnostics
 
 #### Supported Platforms
 
@@ -132,7 +132,7 @@ Shared prerequisites:
 
 Useful system dependency:
 
-- `ffmpeg` for media workflows, especially subtitle burn-in
+- `ffmpeg` for media workflows, especially subtitle burn-in and subtitle-track embedding
 
 Script-specific note:
 
@@ -180,6 +180,18 @@ Write output to a chosen folder:
 whisper /path/to/file.mp4 --outdir=/path/to/output
 ```
 
+Embed a soft subtitle track into the output video:
+
+```bash
+whisper /path/to/file.mp4 --embed-subs
+```
+
+Burn subtitles into a new video with an explicit AV1 encoder:
+
+```bash
+whisper /path/to/file.mp4 --burn --burn-vcodec=libsvtav1
+```
+
 Run MLX comparison diagnostics:
 
 ```bash
@@ -193,6 +205,10 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
+- `--embed-subs` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
+- MP4 and MOV use `mov_text` for embedded text subtitles; ASS subtitles fall back to MKV so styling survives.
+- `--burn` always re-encodes video because subtitle burn-in uses an `ffmpeg` video filter.
+- `--burn-vcodec=auto` lets `ffmpeg` choose the video encoder, or you can pass a codec such as `libx264` or `libsvtav1`.
 - MLX diagnostic flags are for comparison and investigation:
   - `--mlx-word-timestamps=auto|on|off`
   - `--mlx-output-format=auto|subtitle|text`
@@ -202,6 +218,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 #### Notes / Caveats
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
+- Soft subtitle embedding and burn-in both require `ffmpeg`.
 - MLX behavior can vary by machine, Python version, and model choice.
 
 [↑ TOC](#table-of-contents)
