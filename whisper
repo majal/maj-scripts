@@ -1083,10 +1083,11 @@ def probe_duration_seconds(media_path: Path) -> float | None:
 
 
 class EstimatedProgressReporter:
-    def __init__(self, media_path: Path, backend: str, *, inline: bool) -> None:
+    def __init__(self, media_path: Path, backend: str, *, inline: bool, show_media_name: bool) -> None:
         self.media_path = media_path
         self.backend = backend
         self.inline = inline and sys.stderr.isatty()
+        self.show_media_name = show_media_name
         self.duration = probe_duration_seconds(media_path)
         self.last_percent = -1
         self.last_reported_at = 0.0
@@ -1098,7 +1099,8 @@ class EstimatedProgressReporter:
         if self.duration is None:
             self.note_unknown_duration()
         else:
-            print(f"⏱ Media length: {format_elapsed_summary(self.duration)} for {media_path.name}", file=sys.stderr)
+            suffix = f" for {media_path.name}" if self.show_media_name else ""
+            print(f"⏱ Media length: {format_elapsed_summary(self.duration)}{suffix}", file=sys.stderr)
 
     def clear_inline(self) -> None:
         if not self.inline_rendered:
@@ -1112,7 +1114,8 @@ class EstimatedProgressReporter:
             return
         self.clear_inline()
         self.unknown_duration_noted = True
-        print(f"⏱ Media length unavailable for {self.media_path.name}; estimated % progress and ETA unavailable.", file=sys.stderr)
+        suffix = f" for {self.media_path.name}" if self.show_media_name else ""
+        print(f"⏱ Media length unavailable{suffix}; estimated % progress and ETA unavailable.", file=sys.stderr)
 
     def estimate_eta_seconds(self, current_end: float, now: float) -> float | None:
         if self.duration is None:
@@ -1143,7 +1146,10 @@ class EstimatedProgressReporter:
             return
         self.last_percent = percent
         self.last_reported_at = now
-        message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
+        if self.show_media_name:
+            message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
+        else:
+            message = f"⏳ ~{percent}%"
         eta_seconds = self.estimate_eta_seconds(current_end, now)
         if eta_seconds is not None and percent < 100:
             message += f" | ETA {format_elapsed_summary(eta_seconds)}"
@@ -1159,7 +1165,10 @@ class EstimatedProgressReporter:
             return
         if self.last_percent < 100:
             self.last_percent = 100
-            message = f"⏳ {self.media_path.name} [{self.backend}] ~100%"
+            if self.show_media_name:
+                message = f"⏳ {self.media_path.name} [{self.backend}] ~100%"
+            else:
+                message = "⏳ ~100%"
             if self.inline:
                 self.last_render_width = terminal_display_width(message)
                 self.inline_rendered = True
@@ -1309,11 +1318,12 @@ def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress
     return result
 
 
-def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_progress: bool) -> str:
+def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_progress: bool, compact_status: bool) -> str:
     started_at = time.time()
     print(f"▶ Starting transcription: {media_path.name} [{backend}]", file=sys.stderr)
-    wait_spinner = Spinner(f"Waiting for {backend} on {media_path.name}", enabled=True, delay_seconds=3.0)
-    progress = EstimatedProgressReporter(media_path, backend, inline=inline_progress)
+    wait_message = f"Waiting for {backend}" if compact_status else f"Waiting for {backend} on {media_path.name}"
+    wait_spinner = Spinner(wait_message, enabled=True, delay_seconds=3.0)
+    progress = EstimatedProgressReporter(media_path, backend, inline=inline_progress, show_media_name=not compact_status)
     spinner_state = {"stopped": False}
     mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
     mlx_output_format = env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto")
@@ -1357,18 +1367,16 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
     if output_txt:
-        print(f"📝 Writing text: {media_path.name}", file=sys.stderr)
         text_path = output_root / f"{media_path.stem}.txt"
         write_txt(text_path, mlx_result.get("text", ""))
-        print(f"📝 Writing text: {media_path.name} ... done", file=sys.stderr)
+        print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
     else:
-        print(f"📝 Writing subtitles: {media_path.name}", file=sys.stderr)
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
         if env["WHISPER_ASS"] == "1":
             write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
         else:
             write_srt(subtitle_path, segments)
-        print(f"📝 Writing subtitles: {media_path.name} ... done", file=sys.stderr)
+        print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
         if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
             burn_subtitles(media_path, subtitle_path, output_root / f"{media_path.stem}_subbed.mp4")
     elapsed = time.time() - started_at
@@ -1398,18 +1406,20 @@ def format_elapsed_summary(seconds: float) -> str:
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     inline_progress = len(files) == 1 and jobs == 1 and not use_progress_bar
+    compact_status = jobs == 1
     progress = importlib.import_module("tqdm").tqdm(total=len(files), desc="📦 Files") if use_progress_bar else None
     try:
         if jobs > 1:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = [executor.submit(process_file, media_path, env, backend, inline_progress=False) for media_path in files]
+                futures = [executor.submit(process_file, media_path, env, backend, inline_progress=False, compact_status=False) for media_path in files]
                 for future in as_completed(futures):
                     print(f"✅ {future.result()}")
                     if progress:
                         progress.update(1)
         else:
             for media_path in files:
-                print(f"✅ {process_file(media_path, env, backend, inline_progress=inline_progress)}")
+                print(file=sys.stderr)
+                print(f"✅ {process_file(media_path, env, backend, inline_progress=inline_progress, compact_status=compact_status)}")
                 if progress:
                     progress.update(1)
     finally:
@@ -1442,11 +1452,15 @@ def managed_main() -> int:
     print(f"🧠 Backend ready: {backend}. Processing {len(files)} file(s).", file=sys.stderr)
     try:
         process_files(files, env, backend, jobs)
+        if jobs == 1:
+            print(file=sys.stderr)
         print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
         return 0
     except Exception as primary_exc:
         summarize_backend_error(backend, primary_exc, env)
         if not auto_backend or fallback == "none":
+            if jobs == 1:
+                print(file=sys.stderr)
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
         print(f"⚠ Auto mode will try one more time with fallback backend '{fallback}'.", file=sys.stderr)
@@ -1459,10 +1473,14 @@ def managed_main() -> int:
             if backend == "mlx" and prompt_remove_failed_backend("mlx"):
                 uninstall_packages(Path(sys.executable), "mlx-whisper")
                 success("Removed MLX Python packages from the managed runtime.")
+            if jobs == 1:
+                print(file=sys.stderr)
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 0
         except Exception as fallback_exc:
             print(f"❌ Fallback backend '{fallback}' ran into a problem too: {fallback_exc}", file=sys.stderr)
+            if jobs == 1:
+                print(file=sys.stderr)
             print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
             return 1
 
