@@ -174,6 +174,12 @@ Choose a model explicitly:
 whisper /path/to/file.mp4 --model=medium
 ```
 
+Choose a language explicitly:
+
+```bash
+whisper /path/to/file.mp4 -l en
+```
+
 Write output to a chosen folder:
 
 ```bash
