@@ -1168,7 +1168,14 @@ class EstimatedProgressReporter:
                 print(message, file=sys.stderr)
 
     def before_stage_message(self) -> None:
-        self.clear_inline()
+        if not self.inline_rendered:
+            return
+        if self.inline:
+            print(file=sys.stderr, flush=True)
+        else:
+            self.clear_inline()
+        self.inline_rendered = False
+        self.last_render_width = 0
 
 
 def subtitle_filter_arg(path: Path) -> str:
