@@ -49,6 +49,12 @@ SUBTITLE_SPEECH_TRIM_TRIGGER_RATIO = 0.9
 SUBTITLE_SPEECH_TRIM_MIN_SEGMENT_SECONDS = 0.25
 SUBTITLE_SPEECH_TRIM_MERGE_GAP_SECONDS = 0.35
 SUBTITLE_SPEECH_TRIM_PREROLL_SECONDS = 0.06
+SUBTITLE_SPEECH_TRIM_POSTROLL_SECONDS = 0.12
+SUBTITLE_MIN_CUE_DURATION_SECONDS = 0.9
+SUBTITLE_MIN_CUE_GAP_SECONDS = 0.05
+SUBTITLE_MAX_CHARS_PER_SECOND = 22.0
+SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS = 7.0
+SUBTITLE_MAX_MERGE_GAP_SECONDS = 0.2
 SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
     {
         "dr.",
@@ -74,6 +80,28 @@ SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
 SUBTITLE_HONORIFIC_ABBREVIATIONS = frozenset({"dr.", "mr.", "mrs.", "ms.", "mx.", "prof.", "sr.", "jr.", "st."})
 SUBTITLE_INITIAL_RE = re.compile(r"^[A-Za-z]\.$")
 SUBTITLE_INITIALISM_RE = re.compile(r"^(?:[A-Za-z]\.){2,}$")
+SUBTITLE_REPEATABLE_FILLER_WORDS = frozenset(
+    {
+        "ah",
+        "eh",
+        "ha",
+        "hello",
+        "hey",
+        "hi",
+        "hmm",
+        "mm",
+        "no",
+        "oh",
+        "okay",
+        "really",
+        "so",
+        "very",
+        "well",
+        "wow",
+        "yes",
+    }
+)
+SUBTITLE_REPEATABLE_WORD_RE = re.compile(r"^[a-z]+(?:['-][a-z]+)?$")
 BIBLE_MAX_VERSE_NUMBER = 176
 BIBLE_REFERENCE_TOKEN_RE = re.compile(r'^([\"\'“‘(\[{<]*)(.*?)([\"\'”’)\]}>.,;!?]*)$')
 BIBLE_COMBINED_REFERENCE_RE = re.compile(r"^(\d{1,3})[:.\-](\d{1,3})(?:[-–](\d{1,3}))?$")
@@ -384,6 +412,13 @@ class BibleToken:
         return f"{self.leading}{self.core}{self.trailing}"
 
 
+@dataclass
+class SubtitleCue:
+    start: float
+    end: float
+    items: list[str] | list[dict[str, float | str]]
+
+
 def build_bible_book_alias_lookup() -> tuple[dict[tuple[str, ...], str], tuple[int, ...]]:
     alias_lookup: dict[tuple[str, ...], str] = {}
     for canonical, aliases in BIBLE_BOOK_BASE_ALIASES.items():
@@ -403,6 +438,26 @@ def build_bible_book_alias_lookup() -> tuple[dict[tuple[str, ...], str], tuple[i
 
 
 BIBLE_BOOK_ALIAS_LOOKUP, BIBLE_BOOK_ALIAS_LENGTHS = build_bible_book_alias_lookup()
+DOMAIN_TERM_REPLACEMENTS = {
+    ("armageddon",): ("Armageddon",),
+    ("bethel",): ("Bethel",),
+    ("christ",): ("Christ",),
+    ("governing", "body"): ("Governing", "Body"),
+    ("jehovah",): ("Jehovah",),
+    ("jehovah", "witnesses"): ("Jehovah's", "Witnesses"),
+    ("jehovah's", "witnesses"): ("Jehovah's", "Witnesses"),
+    ("jehovahs", "witnesses"): ("Jehovah's", "Witnesses"),
+    ("jesus",): ("Jesus",),
+    ("jesus", "christ"): ("Jesus", "Christ"),
+    ("jw", "org"): ("jw.org",),
+    ("jw.org",): ("jw.org",),
+    ("jworg",): ("jw.org",),
+    ("kingdom", "hall"): ("Kingdom", "Hall"),
+    ("new", "world", "translation"): ("New", "World", "Translation"),
+    ("satan",): ("Satan",),
+    ("watchtower",): ("Watchtower",),
+}
+DOMAIN_TERM_LENGTHS = tuple(sorted({len(alias) for alias in DOMAIN_TERM_REPLACEMENTS}, reverse=True))
 
 
 def use_color() -> bool:
@@ -1343,8 +1398,9 @@ def print_help() -> None:
   Per-file progress percentages and ETA are estimated from media length.
   Multiple explicit files are supported, so shell-expanded commands such as {name} *.mp4 work as expected.
   For recursive shell batching, prefer find ... -exec {name} '{{}}' + or find ... -print0 | xargs -0 {name}; plain -exec ... \\; starts one whisper process per file.
+  Common JW/Bible terms such as Jehovah, Governing Body, Kingdom Hall, New World Translation, and jw.org are normalized by default.
   Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
-  Subtitle cue starts are speech-trimmed by default; use --no-speech-trim to disable.
+  Subtitle cue starts and ends are speech-trimmed by default, and cue timing is smoothed for readability; use --no-speech-trim to disable.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1715,10 +1771,168 @@ def trim_cue_start_to_speech(start: float, end: float, speech_intervals: list[tu
     return start
 
 
+def trim_cue_end_to_speech(start: float, end: float, speech_intervals: list[tuple[float, float]] | None) -> float:
+    if not speech_intervals:
+        return end
+    overlap_end: float | None = None
+    for speech_start, speech_end in speech_intervals:
+        if speech_end <= start:
+            continue
+        if speech_start >= end:
+            break
+        overlap_end = speech_end
+    if overlap_end is None:
+        return end
+    adjusted_end = min(end, overlap_end + SUBTITLE_SPEECH_TRIM_POSTROLL_SECONDS)
+    return max(start + 0.01, adjusted_end)
+
+
 def subtitle_items_width(items: list[str] | list[dict[str, float | str]]) -> int:
     if not items:
         return 0
     return sum(terminal_display_width(subtitle_item_text(item)) for item in items) + max(len(items) - 1, 0)
+
+
+def subtitle_items_text(items: list[str] | list[dict[str, float | str]]) -> str:
+    return " ".join(subtitle_item_text(item) for item in items).strip()
+
+
+def subtitle_items_text_length(items: list[str] | list[dict[str, float | str]]) -> int:
+    return len(subtitle_items_text(items))
+
+
+def subtitle_cue_duration(cue: SubtitleCue) -> float:
+    return max(0.01, cue.end - cue.start)
+
+
+def subtitle_cue_chars_per_second(cue: SubtitleCue) -> float:
+    return subtitle_items_text_length(cue.items) / subtitle_cue_duration(cue)
+
+
+def subtitle_cue_apply_speech_trim(
+    cue: SubtitleCue, speech_intervals: list[tuple[float, float]] | None = None
+) -> SubtitleCue:
+    cue.start = trim_cue_start_to_speech(cue.start, cue.end, speech_intervals)
+    cue.end = trim_cue_end_to_speech(cue.start, cue.end, speech_intervals)
+    cue.end = max(cue.end, cue.start + 0.01)
+    return cue
+
+
+def choose_subtitle_cue_split_index(items: list[str] | list[dict[str, float | str]]) -> int | None:
+    if len(items) < 2:
+        return None
+    best_split: int | None = None
+    best_score: tuple[int, int] | None = None
+    for index in range(1, len(items)):
+        left = items[:index]
+        right = items[index:]
+        if subtitle_boundary_locked(left[-1], right[0]):
+            continue
+        score = (
+            abs(subtitle_items_text_length(left) - subtitle_items_text_length(right))
+            + subtitle_boundary_score_adjustment(left[-1], right[0]),
+            max(subtitle_items_text_length(left), subtitle_items_text_length(right)),
+        )
+        if best_score is None or score < best_score:
+            best_score = score
+            best_split = index
+    return best_split
+
+
+def split_subtitle_cue(cue: SubtitleCue, split_index: int) -> tuple[SubtitleCue, SubtitleCue] | None:
+    left_items = cue.items[:split_index]
+    right_items = cue.items[split_index:]
+    if not left_items or not right_items:
+        return None
+    if isinstance(left_items[0], dict) and isinstance(right_items[0], dict):
+        left_start = float(left_items[0]["start"])
+        left_end = max(float(left_items[-1]["end"]), left_start + 0.01)
+        right_start = float(right_items[0]["start"])
+        right_end = max(float(right_items[-1]["end"]), right_start + 0.01)
+        return SubtitleCue(left_start, left_end, left_items), SubtitleCue(right_start, right_end, right_items)
+    total_length = max(1, subtitle_items_text_length(cue.items))
+    left_ratio = subtitle_items_text_length(left_items) / total_length
+    split_time = cue.start + (cue.end - cue.start) * left_ratio
+    split_time = min(max(split_time, cue.start + 0.01), cue.end - 0.01)
+    return (
+        SubtitleCue(cue.start, split_time, left_items),
+        SubtitleCue(split_time, cue.end, right_items),
+    )
+
+
+def split_dense_subtitle_cue(cue: SubtitleCue) -> list[SubtitleCue]:
+    minimum_split_duration = SUBTITLE_MIN_CUE_DURATION_SECONDS * 0.6
+    if (
+        len(cue.items) < 2
+        or subtitle_cue_chars_per_second(cue) <= SUBTITLE_MAX_CHARS_PER_SECOND
+        or subtitle_cue_duration(cue) < SUBTITLE_MIN_CUE_DURATION_SECONDS * 1.5
+    ):
+        return [cue]
+    split_index = choose_subtitle_cue_split_index(cue.items)
+    if split_index is None:
+        return [cue]
+    split_result = split_subtitle_cue(cue, split_index)
+    if split_result is None:
+        return [cue]
+    left, right = split_result
+    if subtitle_cue_duration(left) < minimum_split_duration or subtitle_cue_duration(right) < minimum_split_duration:
+        return [cue]
+    return [*split_dense_subtitle_cue(left), *split_dense_subtitle_cue(right)]
+
+
+def can_merge_subtitle_cues(left: SubtitleCue, right: SubtitleCue) -> bool:
+    gap = max(0.0, right.start - left.end)
+    if gap > SUBTITLE_MAX_MERGE_GAP_SECONDS:
+        return False
+    merged = SubtitleCue(left.start, right.end, [*left.items, *right.items])
+    if len(chunk_subtitle_items(merged.items)) != 1:
+        return False
+    if subtitle_cue_duration(merged) > SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS:
+        return False
+    return subtitle_cue_chars_per_second(merged) <= SUBTITLE_MAX_CHARS_PER_SECOND
+
+
+def merge_short_subtitle_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
+    if len(cues) < 2:
+        return cues
+    merged: list[SubtitleCue] = []
+    index = 0
+    while index < len(cues):
+        current = cues[index]
+        while index + 1 < len(cues):
+            next_cue = cues[index + 1]
+            if (
+                subtitle_cue_duration(current) >= SUBTITLE_MIN_CUE_DURATION_SECONDS
+                and subtitle_cue_duration(next_cue) >= SUBTITLE_MIN_CUE_DURATION_SECONDS
+            ):
+                break
+            if not can_merge_subtitle_cues(current, next_cue):
+                break
+            current = SubtitleCue(current.start, next_cue.end, [*current.items, *next_cue.items])
+            index += 1
+        merged.append(current)
+        index += 1
+    return merged
+
+
+def stretch_short_subtitle_cues(cues: list[SubtitleCue], segment_end: float) -> list[SubtitleCue]:
+    if not cues:
+        return cues
+    for index, cue in enumerate(cues):
+        minimum_end = cue.start + SUBTITLE_MIN_CUE_DURATION_SECONDS
+        if cue.end >= minimum_end:
+            continue
+        next_start = cues[index + 1].start if index + 1 < len(cues) else segment_end
+        max_end = min(segment_end, next_start - SUBTITLE_MIN_CUE_GAP_SECONDS)
+        if max_end > cue.end:
+            cue.end = min(max_end, minimum_end)
+        cue.end = max(cue.end, cue.start + 0.01)
+    return cues
+
+
+def subtitle_cue_line_groups(cue: SubtitleCue) -> list[list[str] | list[dict[str, float | str]]]:
+    line_groups, _fits = subtitle_line_groups(cue.items)
+    return line_groups
 
 
 def subtitle_line_groups(
@@ -1751,12 +1965,36 @@ def subtitle_line_groups(
     return [items[:best_split], items[best_split:]], True
 
 
+def subtitle_should_force_chunk_split(
+    current: list[str] | list[dict[str, float | str]], next_item: str | dict[str, float | str]
+) -> bool:
+    if not current:
+        return False
+    left_item = current[-1]
+    if subtitle_boundary_locked(left_item, next_item):
+        return False
+    left_token = subtitle_boundary_token(subtitle_item_text(left_item))
+    gap = subtitle_boundary_gap(left_item, next_item)
+    current_length = subtitle_items_text_length(current)
+    if left_token.endswith((".", "!", "?")) and not subtitle_is_protected_abbreviation(left_token):
+        return current_length >= 8
+    if gap is not None and gap >= SUBTITLE_STRONG_PAUSE_SECONDS:
+        return current_length >= 10
+    if gap is not None and gap >= SUBTITLE_MEDIUM_PAUSE_SECONDS and left_token.endswith((",", ";", ":")):
+        return current_length >= 18
+    return False
+
+
 def chunk_subtitle_items(
     items: list[str] | list[dict[str, float | str]], max_line_width: int = SUBTITLE_MAX_LINE_WIDTH
 ) -> list[list[str] | list[dict[str, float | str]]]:
     chunks: list[list[str] | list[dict[str, float | str]]] = []
     current: list[str] | list[dict[str, float | str]] = []
     for item in items:
+        if current and subtitle_should_force_chunk_split(current, item):
+            chunks.append(current)
+            current = [item]
+            continue
         candidate = [*current, item]
         _line_groups, fits = subtitle_line_groups(candidate, max_line_width=max_line_width)
         if current and not fits:
@@ -1782,28 +2020,32 @@ def iter_segment_subtitle_cues(
         for word in segment.get("words", []) or []
         if subtitle_item_text(word)
     ]
-    cues: list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]] = []
+    cue_objects: list[SubtitleCue] = []
     if words:
         for chunk in chunk_subtitle_items(words):
-            line_groups, _fits = subtitle_line_groups(chunk)
             start = float(chunk[0]["start"])
             end = max(float(chunk[-1]["end"]), start + 0.01)
-            start = trim_cue_start_to_speech(start, end, speech_intervals)
-            cues.append((start, end, line_groups))
-        return cues
-    text = normalized_text(str(segment.get("text", "")))
-    if not text:
-        return cues
-    text_words = [word for word in text.split() if word]
-    chunks = chunk_subtitle_items(text_words)
-    duration = max((float(segment["end"]) - float(segment["start"])) / max(len(chunks), 1), 0.01)
-    for offset, chunk in enumerate(chunks):
-        line_groups, _fits = subtitle_line_groups(chunk)
-        start = float(segment["start"]) + offset * duration
-        raw_end = float(segment["end"]) if offset == len(chunks) - 1 else min(float(segment["end"]), start + duration)
-        end = max(raw_end, start + 0.01)
-        start = trim_cue_start_to_speech(start, end, speech_intervals)
-        cues.append((start, end, line_groups))
+            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk)))
+    else:
+        text = normalized_text(str(segment.get("text", "")))
+        if not text:
+            return []
+        text_words = [word for word in text.split() if word]
+        chunks = chunk_subtitle_items(text_words)
+        duration = max((float(segment["end"]) - float(segment["start"])) / max(len(chunks), 1), 0.01)
+        for offset, chunk in enumerate(chunks):
+            start = float(segment["start"]) + offset * duration
+            raw_end = float(segment["end"]) if offset == len(chunks) - 1 else min(float(segment["end"]), start + duration)
+            end = max(raw_end, start + 0.01)
+            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk)))
+    for cue in cue_objects:
+        subtitle_cue_apply_speech_trim(cue, speech_intervals)
+    cue_objects = merge_short_subtitle_cues(cue_objects)
+    cue_objects = stretch_short_subtitle_cues(cue_objects, float(segment["end"]))
+    cues: list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]] = []
+    for cue in cue_objects:
+        line_groups = subtitle_cue_line_groups(cue)
+        cues.append((cue.start, cue.end, line_groups))
     return cues
 
 
@@ -1831,6 +2073,44 @@ def format_ass_time(value: float) -> str:
 
 def normalized_text(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def normalized_token_core(token: BibleToken) -> str:
+    return token.core.lower()
+
+
+def repeated_word_key(token: BibleToken) -> str:
+    return token.core.lower()
+
+
+def can_collapse_repeated_word(left: BibleToken, right: BibleToken) -> bool:
+    if left.start is None or left.end is None or right.start is None or right.end is None:
+        return False
+    left_key = repeated_word_key(left)
+    right_key = repeated_word_key(right)
+    if not left_key or left_key != right_key:
+        return False
+    if left_key in SUBTITLE_REPEATABLE_FILLER_WORDS:
+        return False
+    if not SUBTITLE_REPEATABLE_WORD_RE.fullmatch(left_key):
+        return False
+    if left.trailing or right.leading:
+        return False
+    gap = max(0.0, right.start - left.end)
+    return gap <= SUBTITLE_TIGHT_JOIN_SECONDS and (right.end - left.start) <= 0.9
+
+
+def collapse_repeated_word_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
+    collapsed: list[BibleToken] = []
+    for token in tokens:
+        if collapsed and can_collapse_repeated_word(collapsed[-1], token):
+            previous = collapsed[-1]
+            previous.end = max(previous.end or previous.start or 0.0, token.end or token.start or 0.0)
+            if token.trailing:
+                previous.trailing = token.trailing
+            continue
+        collapsed.append(token)
+    return collapsed
 
 
 def split_bible_token(text: str) -> BibleToken:
@@ -1960,6 +2240,77 @@ def make_bible_reference_token(
     )
 
 
+def make_replacement_tokens(
+    source_tokens: list[BibleToken],
+    start_index: int,
+    end_index: int,
+    replacement_cores: tuple[str, ...],
+) -> list[BibleToken]:
+    source_slice = source_tokens[start_index:end_index]
+    if not source_slice:
+        return []
+    if len(source_slice) == len(replacement_cores):
+        replaced: list[BibleToken] = []
+        for source, replacement_core in zip(source_slice, replacement_cores):
+            replaced.append(
+                BibleToken(
+                    source.leading,
+                    replacement_core,
+                    source.trailing,
+                    start=source.start,
+                    end=source.end,
+                )
+            )
+        return replaced
+    first = source_slice[0]
+    last = source_slice[-1]
+    total_start = first.start
+    total_end = last.end
+    replaced = []
+    for index, replacement_core in enumerate(replacement_cores):
+        replacement_start = None
+        replacement_end = None
+        if total_start is not None and total_end is not None:
+            replacement_start = total_start + ((total_end - total_start) * index / len(replacement_cores))
+            replacement_end = total_start + ((total_end - total_start) * (index + 1) / len(replacement_cores))
+        replaced.append(
+            BibleToken(
+                first.leading if index == 0 else "",
+                replacement_core,
+                last.trailing if index == len(replacement_cores) - 1 else "",
+                start=replacement_start,
+                end=replacement_end,
+            )
+        )
+    return replaced
+
+
+def find_domain_term_match(tokens: list[BibleToken], index: int) -> tuple[tuple[str, ...], int] | None:
+    for length in DOMAIN_TERM_LENGTHS:
+        if index + length > len(tokens):
+            continue
+        alias = tuple(normalized_token_core(token) for token in tokens[index:index + length])
+        replacement = DOMAIN_TERM_REPLACEMENTS.get(alias)
+        if replacement:
+            return replacement, length
+    return None
+
+
+def normalize_domain_term_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
+    normalized: list[BibleToken] = []
+    index = 0
+    while index < len(tokens):
+        match = find_domain_term_match(tokens, index)
+        if not match:
+            normalized.append(tokens[index])
+            index += 1
+            continue
+        replacement_cores, consumed = match
+        normalized.extend(make_replacement_tokens(tokens, index, index + consumed, replacement_cores))
+        index += consumed
+    return normalized
+
+
 def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book: str) -> tuple[int, BibleToken] | None:
     if index >= len(tokens):
         return None
@@ -2053,12 +2404,26 @@ def normalize_bible_reference_tokens(tokens: list[BibleToken]) -> list[BibleToke
     return normalized
 
 
-def normalize_bible_references_in_segments(segments: list[dict[str, float | str | list[dict[str, float | str]]]]) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
+def postprocess_text_tokens(tokens: list[BibleToken], *, normalize_bible_references: bool) -> list[BibleToken]:
+    normalized_tokens = collapse_repeated_word_tokens(tokens)
+    if normalize_bible_references:
+        normalized_tokens = normalize_bible_reference_tokens(normalized_tokens)
+    return normalize_domain_term_tokens(normalized_tokens)
+
+
+def postprocess_segments(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    *,
+    normalize_bible_references: bool,
+) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
     normalized_segments: list[dict[str, float | str | list[dict[str, float | str]]]] = []
     for segment in segments:
         words = segment.get("words", []) or []
         if words:
-            normalized_tokens = normalize_bible_reference_tokens(build_bible_tokens_from_words(words))
+            normalized_tokens = postprocess_text_tokens(
+                build_bible_tokens_from_words(words),
+                normalize_bible_references=normalize_bible_references,
+            )
             normalized_segments.append(
                 {
                     **segment,
@@ -2068,7 +2433,10 @@ def normalize_bible_references_in_segments(segments: list[dict[str, float | str 
             )
             continue
         text = normalized_text(str(segment.get("text", "")))
-        normalized_tokens = normalize_bible_reference_tokens(build_bible_tokens_from_text(text))
+        normalized_tokens = postprocess_text_tokens(
+            build_bible_tokens_from_text(text),
+            normalize_bible_references=normalize_bible_references,
+        )
         normalized_segments.append({**segment, "text": bible_tokens_to_text(normalized_tokens)})
     return normalized_segments
 
@@ -2616,8 +2984,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
     bible_reference_normalization_enabled = env.get("WHISPER_BIBLE_REFERENCE_NORMALIZATION", "1") == "1"
-    if bible_reference_normalization_enabled:
-        segments = normalize_bible_references_in_segments(segments)
+    segments = postprocess_segments(segments, normalize_bible_references=bible_reference_normalization_enabled)
     subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
     speech_intervals: list[tuple[float, float]] | None = None
     if not output_txt and env.get("WHISPER_SPEECH_TRIM", "1") == "1":
@@ -2630,8 +2997,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             speech_trim_spinner.stop()
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
-        normalized_plain_text = segments_to_plain_text(segments) if bible_reference_normalization_enabled else ""
-        write_txt(text_path, normalized_plain_text or mlx_result.get("text", ""))
+        write_txt(text_path, segments_to_plain_text(segments) or mlx_result.get("text", ""))
         print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"

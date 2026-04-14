@@ -241,8 +241,9 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - Default model selection is hardware-aware.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
+- Common JW/Bible terms such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `New World Translation`, and `jw.org` are normalized by default.
 - Bible references such as `Psalm 83 18`, `Psalm 83-18`, `Psalm 83.18`, `Psalm 8318`, and range forms like `Psalm 83 18 19` are normalized by default. Use `--no-bible-reference-normalization` to opt out.
-- Subtitle cue starts are speech-trimmed by default to avoid long lead-ins over music or ambient audio. Use `--no-speech-trim` to opt out.
+- Subtitle cue starts and ends are speech-trimmed by default to avoid long lead-ins and long tails over music or ambient audio. Cue timing is also smoothed for readability, and obvious repeated-word glitches are collapsed conservatively when timed words are available. Use `--no-speech-trim` to opt out of the speech-trim pass.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
 - `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python, skips backend loading, and reuses source audio language metadata when available.
 - `--in-place` first writes to a temporary file, then replaces the original video only after a successful mux. The short alias is `-i`.
