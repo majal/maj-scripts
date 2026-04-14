@@ -38,6 +38,34 @@ BACKEND_MODULES = {
 MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
 MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
 SUBTITLE_MAX_LINE_WIDTH = 42
+SUBTITLE_STRONG_PAUSE_SECONDS = 0.45
+SUBTITLE_MEDIUM_PAUSE_SECONDS = 0.2
+SUBTITLE_TIGHT_JOIN_SECONDS = 0.08
+SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
+    {
+        "dr.",
+        "mr.",
+        "mrs.",
+        "ms.",
+        "mx.",
+        "prof.",
+        "sr.",
+        "jr.",
+        "st.",
+        "vs.",
+        "etc.",
+        "e.g.",
+        "i.e.",
+        "fig.",
+        "no.",
+        "dept.",
+        "est.",
+        "mt.",
+    }
+)
+SUBTITLE_HONORIFIC_ABBREVIATIONS = frozenset({"dr.", "mr.", "mrs.", "ms.", "mx.", "prof.", "sr.", "jr.", "st."})
+SUBTITLE_INITIAL_RE = re.compile(r"^[A-Za-z]\.$")
+SUBTITLE_INITIALISM_RE = re.compile(r"^(?:[A-Za-z]\.){2,}$")
 LANGUAGE_LABELS = {
     "af": ("afr", "Afrikaans"),
     "am": ("amh", "Amharic"),
@@ -1235,6 +1263,82 @@ def subtitle_item_text(item: str | dict[str, float | str]) -> str:
     return normalized_text(str(item.get("word", "")))
 
 
+def subtitle_boundary_token(text: str) -> str:
+    return text.strip().lstrip("\"'“‘([{<").rstrip("\"'”’)]}>")
+
+
+def subtitle_token_starts_upper(text: str) -> bool:
+    for char in text:
+        if char.isalpha():
+            return char.isupper()
+    return False
+
+
+def subtitle_is_initial(token: str) -> bool:
+    return SUBTITLE_INITIAL_RE.fullmatch(token) is not None
+
+
+def subtitle_is_initialism(token: str) -> bool:
+    return SUBTITLE_INITIALISM_RE.fullmatch(token) is not None
+
+
+def subtitle_is_protected_abbreviation(token: str) -> bool:
+    lowered = token.lower()
+    return (
+        lowered in SUBTITLE_PROTECTED_ABBREVIATIONS
+        or subtitle_is_initial(token)
+        or subtitle_is_initialism(token)
+    )
+
+
+def subtitle_boundary_gap(left_item: str | dict[str, float | str], right_item: str | dict[str, float | str]) -> float | None:
+    if not isinstance(left_item, dict) or not isinstance(right_item, dict):
+        return None
+    return max(0.0, float(right_item["start"]) - float(left_item["end"]))
+
+
+def subtitle_boundary_locked(left_item: str | dict[str, float | str], right_item: str | dict[str, float | str]) -> bool:
+    left_token = subtitle_boundary_token(subtitle_item_text(left_item))
+    right_token = subtitle_boundary_token(subtitle_item_text(right_item))
+    if not left_token or not right_token:
+        return False
+    lowered = left_token.lower()
+    if lowered in SUBTITLE_HONORIFIC_ABBREVIATIONS and subtitle_token_starts_upper(right_token):
+        return True
+    if subtitle_is_initial(left_token) and subtitle_token_starts_upper(right_token):
+        return True
+    return False
+
+
+def subtitle_boundary_score_adjustment(left_item: str | dict[str, float | str], right_item: str | dict[str, float | str]) -> int:
+    left_token = subtitle_boundary_token(subtitle_item_text(left_item))
+    right_token = subtitle_boundary_token(subtitle_item_text(right_item))
+    if not left_token or not right_token:
+        return 0
+    gap = subtitle_boundary_gap(left_item, right_item)
+    protected_abbreviation = subtitle_is_protected_abbreviation(left_token)
+    adjustment = 0
+    if gap is not None:
+        if gap >= SUBTITLE_STRONG_PAUSE_SECONDS:
+            adjustment -= 8
+        elif gap >= SUBTITLE_MEDIUM_PAUSE_SECONDS:
+            adjustment -= 4
+        elif gap <= SUBTITLE_TIGHT_JOIN_SECONDS:
+            adjustment += 3
+    if left_token.endswith((".", "!", "?")):
+        if protected_abbreviation:
+            adjustment += 4
+        else:
+            adjustment -= 6
+    elif left_token.endswith((",", ";", ":")):
+        adjustment -= 3
+    if protected_abbreviation and gap is not None and gap < SUBTITLE_MEDIUM_PAUSE_SECONDS:
+        adjustment += 3
+    if subtitle_is_initialism(left_token) and gap is None:
+        adjustment += 2
+    return adjustment
+
+
 def subtitle_items_width(items: list[str] | list[dict[str, float | str]]) -> int:
     if not items:
         return 0
@@ -1257,13 +1361,12 @@ def subtitle_line_groups(
         right_width = subtitle_items_width(right)
         if left_width > max_line_width or right_width > max_line_width:
             continue
-        boundary_text = subtitle_item_text(left[-1])
-        punctuation_bonus = 0
-        if boundary_text.endswith((".", "!", "?")):
-            punctuation_bonus = -6
-        elif boundary_text.endswith((",", ";", ":")):
-            punctuation_bonus = -3
-        score = (abs(left_width - right_width) + punctuation_bonus, max(left_width, right_width))
+        if subtitle_boundary_locked(left[-1], right[0]):
+            continue
+        score = (
+            abs(left_width - right_width) + subtitle_boundary_score_adjustment(left[-1], right[0]),
+            max(left_width, right_width),
+        )
         if best_score is None or score < best_score:
             best_score = score
             best_split = index
@@ -1281,8 +1384,12 @@ def chunk_subtitle_items(
         candidate = [*current, item]
         _line_groups, fits = subtitle_line_groups(candidate, max_line_width=max_line_width)
         if current and not fits:
-            chunks.append(current)
-            current = [item]
+            next_chunk = [item]
+            while current and subtitle_boundary_locked(current[-1], next_chunk[0]):
+                next_chunk.insert(0, current.pop())
+            if current:
+                chunks.append(current)
+            current = next_chunk
             continue
         current = candidate
     if current:
