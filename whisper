@@ -109,6 +109,8 @@ BIBLE_PARTIAL_REFERENCE_PREFIX_RE = re.compile(r"^(\d{1,3})[:.\-]$")
 BIBLE_VERSE_RANGE_RE = re.compile(r"^(\d{1,3})(?:[-–](\d{1,3}))?$")
 BIBLE_INLINE_VERSE_END_RE = re.compile(r"^[-–](\d{1,3})$")
 BIBLE_GLUE_DIGITS_RE = re.compile(r"^\d{2,6}$")
+BIBLE_CHAPTER_WORDS = frozenset({"chapter", "chapters"})
+BIBLE_VERSE_WORDS = frozenset({"verse", "verses"})
 BIBLE_RANGE_WORDS = frozenset({"to", "through", "thru"})
 BIBLE_BOOK_CHAPTER_COUNTS = {
     "genesis": 50,
@@ -1276,6 +1278,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         default=True,
     )
+    parser.add_argument("--bible-reference-phrases", action="store_true")
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--python", default="")
@@ -1328,6 +1331,7 @@ def print_help() -> None:
             ("--compute-type=auto|int8|float16|int8_float16", "Compute precision selection."),
             ("--jobs=N", "Number of files to process in parallel."),
             ("--no-bible-reference-normalization", "Skip the default Bible reference cleanup pass."),
+            ("--bible-reference-phrases", "Opt in to spoken Bible-reference parsing like Psalm 83 verse 18."),
             ("--no-speech-trim", "Skip the default speech-onset VAD pass for subtitle cue starts."),
             ("--recursive", "Recurse into folders when a target is a directory."),
         )
@@ -1400,6 +1404,7 @@ def print_help() -> None:
   For recursive shell batching, prefer find ... -exec {name} '{{}}' + or find ... -print0 | xargs -0 {name}; plain -exec ... \\; starts one whisper process per file.
   Common JW/Bible terms such as Jehovah, Governing Body, Kingdom Hall, New World Translation, and jw.org are normalized by default.
   Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
+  Spoken forms such as Psalm 83 verse 18 are available as an opt-in with --bible-reference-phrases.
   Subtitle cue starts and ends are speech-trimmed by default, and cue timing is smoothed for readability; use --no-speech-trim to disable.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
@@ -1513,6 +1518,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_JOBS": str(args.jobs),
         "WHISPER_OUTDIR": args.outdir,
         "WHISPER_BIBLE_REFERENCE_NORMALIZATION": "1" if args.bible_reference_normalization else "0",
+        "WHISPER_BIBLE_REFERENCE_PHRASES": "1" if args.bible_reference_phrases else "0",
         "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
         "WHISPER_ASS": "1" if args.ass else "0",
@@ -2211,16 +2217,18 @@ def parse_bible_range_suffix(
 
 
 def choose_glued_bible_reference(book: str, digits: str) -> tuple[int, int] | None:
-    if not BIBLE_GLUE_DIGITS_RE.fullmatch(digits):
+    if not BIBLE_GLUE_DIGITS_RE.fullmatch(digits) or len(digits) < 3:
         return None
-    for verse_digits in (2, 1, 3):
+    candidates: list[tuple[int, int]] = []
+    for verse_digits in (1, 2, 3):
         if len(digits) <= verse_digits:
             continue
         chapter = int(digits[:-verse_digits])
         verse = int(digits[-verse_digits:])
         if is_valid_bible_reference(book, chapter, verse):
-            return chapter, verse
-    return None
+            candidates.append((chapter, verse))
+    unique_candidates = list(dict.fromkeys(candidates))
+    return unique_candidates[0] if len(unique_candidates) == 1 else None
 
 
 def make_bible_reference_token(
@@ -2356,14 +2364,15 @@ def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book:
                 if verse_end is not None:
                     reference += f"-{verse_end}"
                 return 2 + extra_consumed, make_bible_reference_token(tokens, index, index + 2 + extra_consumed, reference)
-        glued = choose_glued_bible_reference(book, first.core)
-        if glued is not None:
-            chapter, verse = glued
-            extra_consumed, verse_end = parse_bible_range_suffix(tokens, index + 1, book, chapter, verse)
-            reference = f"{chapter}:{verse}"
-            if verse_end is not None:
-                reference += f"-{verse_end}"
-            return 1 + extra_consumed, make_bible_reference_token(tokens, index, index + 1 + extra_consumed, reference)
+        if second.core.lower() not in BIBLE_CHAPTER_WORDS and second.core.lower() not in BIBLE_VERSE_WORDS:
+            glued = choose_glued_bible_reference(book, first.core)
+            if glued is not None:
+                chapter, verse = glued
+                extra_consumed, verse_end = parse_bible_range_suffix(tokens, index + 1, book, chapter, verse)
+                reference = f"{chapter}:{verse}"
+                if verse_end is not None:
+                    reference += f"-{verse_end}"
+                return 1 + extra_consumed, make_bible_reference_token(tokens, index, index + 1 + extra_consumed, reference)
     partial_match = BIBLE_PARTIAL_REFERENCE_PREFIX_RE.fullmatch(first.core)
     if partial_match:
         verse_range = parse_bible_verse_range(second.core)
@@ -2383,7 +2392,59 @@ def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book:
     return None
 
 
-def normalize_bible_reference_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
+def parse_bible_reference_phrase_after_book(tokens: list[BibleToken], index: int, book: str) -> tuple[int, BibleToken] | None:
+    if index >= len(tokens):
+        return None
+    cursor = index
+    chapter: int | None = None
+    chapter_keyword_used = False
+    if tokens[cursor].core.lower() in BIBLE_CHAPTER_WORDS:
+        chapter_keyword_used = True
+        cursor += 1
+        if cursor >= len(tokens) or not tokens[cursor].core.isdigit():
+            return None
+    if chapter_keyword_used:
+        chapter = int(tokens[cursor].core)
+        cursor += 1
+        if cursor >= len(tokens) or tokens[cursor].core.lower() not in BIBLE_VERSE_WORDS:
+            return None
+        cursor += 1
+    else:
+        if not tokens[cursor].core.isdigit():
+            if (
+                BIBLE_BOOK_CHAPTER_COUNTS.get(book) == 1
+                and tokens[cursor].core.lower() in BIBLE_VERSE_WORDS
+            ):
+                chapter = 1
+                cursor += 1
+            else:
+                return None
+        else:
+            chapter = int(tokens[cursor].core)
+            cursor += 1
+            if cursor >= len(tokens) or tokens[cursor].core.lower() not in BIBLE_VERSE_WORDS:
+                return None
+            cursor += 1
+    if chapter is None or cursor >= len(tokens):
+        return None
+    verse_range = parse_bible_verse_range(tokens[cursor].core)
+    if verse_range is None:
+        return None
+    verse, verse_end = verse_range
+    if not is_valid_bible_reference(book, chapter, verse, verse_end):
+        return None
+    extra_consumed = 0
+    if verse_end is None:
+        extra_consumed, ranged_verse_end = parse_bible_range_suffix(tokens, cursor + 1, book, chapter, verse)
+        if ranged_verse_end is not None:
+            verse_end = ranged_verse_end
+    reference = f"{chapter}:{verse}"
+    if verse_end is not None:
+        reference += f"-{verse_end}"
+    return cursor - index + 1 + extra_consumed, make_bible_reference_token(tokens, index, cursor + 1 + extra_consumed, reference)
+
+
+def normalize_bible_reference_tokens(tokens: list[BibleToken], *, normalize_phrases: bool = False) -> list[BibleToken]:
     normalized: list[BibleToken] = []
     index = 0
     while index < len(tokens):
@@ -2395,6 +2456,8 @@ def normalize_bible_reference_tokens(tokens: list[BibleToken]) -> list[BibleToke
         book, book_length = book_match
         normalized.extend(tokens[index:index + book_length])
         reference_match = parse_bible_reference_after_book(tokens, index + book_length, book)
+        if reference_match is None and normalize_phrases:
+            reference_match = parse_bible_reference_phrase_after_book(tokens, index + book_length, book)
         if reference_match:
             consumed, normalized_reference = reference_match
             normalized.append(normalized_reference)
@@ -2404,10 +2467,15 @@ def normalize_bible_reference_tokens(tokens: list[BibleToken]) -> list[BibleToke
     return normalized
 
 
-def postprocess_text_tokens(tokens: list[BibleToken], *, normalize_bible_references: bool) -> list[BibleToken]:
+def postprocess_text_tokens(
+    tokens: list[BibleToken], *, normalize_bible_references: bool, normalize_bible_reference_phrases: bool
+) -> list[BibleToken]:
     normalized_tokens = collapse_repeated_word_tokens(tokens)
     if normalize_bible_references:
-        normalized_tokens = normalize_bible_reference_tokens(normalized_tokens)
+        normalized_tokens = normalize_bible_reference_tokens(
+            normalized_tokens,
+            normalize_phrases=normalize_bible_reference_phrases,
+        )
     return normalize_domain_term_tokens(normalized_tokens)
 
 
@@ -2415,6 +2483,7 @@ def postprocess_segments(
     segments: list[dict[str, float | str | list[dict[str, float | str]]]],
     *,
     normalize_bible_references: bool,
+    normalize_bible_reference_phrases: bool,
 ) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
     normalized_segments: list[dict[str, float | str | list[dict[str, float | str]]]] = []
     for segment in segments:
@@ -2423,6 +2492,7 @@ def postprocess_segments(
             normalized_tokens = postprocess_text_tokens(
                 build_bible_tokens_from_words(words),
                 normalize_bible_references=normalize_bible_references,
+                normalize_bible_reference_phrases=normalize_bible_reference_phrases,
             )
             normalized_segments.append(
                 {
@@ -2436,6 +2506,7 @@ def postprocess_segments(
         normalized_tokens = postprocess_text_tokens(
             build_bible_tokens_from_text(text),
             normalize_bible_references=normalize_bible_references,
+            normalize_bible_reference_phrases=normalize_bible_reference_phrases,
         )
         normalized_segments.append({**segment, "text": bible_tokens_to_text(normalized_tokens)})
     return normalized_segments
@@ -2984,7 +3055,15 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
     bible_reference_normalization_enabled = env.get("WHISPER_BIBLE_REFERENCE_NORMALIZATION", "1") == "1"
-    segments = postprocess_segments(segments, normalize_bible_references=bible_reference_normalization_enabled)
+    bible_reference_phrase_normalization_enabled = (
+        bible_reference_normalization_enabled
+        and env.get("WHISPER_BIBLE_REFERENCE_PHRASES", "0") == "1"
+    )
+    segments = postprocess_segments(
+        segments,
+        normalize_bible_references=bible_reference_normalization_enabled,
+        normalize_bible_reference_phrases=bible_reference_phrase_normalization_enabled,
+    )
     subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
     speech_intervals: list[tuple[float, float]] | None = None
     if not output_txt and env.get("WHISPER_SPEECH_TRIM", "1") == "1":
@@ -3245,6 +3324,7 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--mlx-output-format=text{RESET}")
     say(f"  {MAGENTA}--mlx-model-default=official{RESET}")
     say(f"  {MAGENTA}--no-bible-reference-normalization{RESET}")
+    say(f"  {MAGENTA}--bible-reference-phrases{RESET}")
     say(f"  {MAGENTA}--no-speech-trim{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")

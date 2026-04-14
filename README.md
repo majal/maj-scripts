@@ -176,6 +176,12 @@ whisper *.mkv
 whisper *.mp3 *.mp4
 ```
 
+Opt in to spoken Bible-reference parsing:
+
+```bash
+whisper /path/to/file.mp4 --bible-reference-phrases
+```
+
 Transcribe recursive matches in batches instead of starting one `whisper` process per file:
 
 ```bash
@@ -243,6 +249,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Common JW/Bible terms such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `New World Translation`, and `jw.org` are normalized by default.
 - Bible references such as `Psalm 83 18`, `Psalm 83-18`, `Psalm 83.18`, `Psalm 8318`, and range forms like `Psalm 83 18 19` are normalized by default. Use `--no-bible-reference-normalization` to opt out.
+- Spoken forms such as `Psalm 83 verse 18`, `Psalm chapter 83 verse 18`, and `1 John chapter 4 verse 8` are available as an opt-in with `--bible-reference-phrases`.
 - Subtitle cue starts and ends are speech-trimmed by default to avoid long lead-ins and long tails over music or ambient audio. Cue timing is also smoothed for readability, and obvious repeated-word glitches are collapsed conservatively when timed words are available. Use `--no-speech-trim` to opt out of the speech-trim pass.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
 - `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python, skips backend loading, and reuses source audio language metadata when available.
