@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import importlib
 import json
 import os
@@ -25,7 +26,7 @@ APP_NAME = "whisper-cli"
 MANAGED_ENV_FLAG = "WHISPER_MANAGED_RUNTIME"
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov"}
-SHARED_RUNTIME_PACKAGES = ("tqdm>=4.66.0",)
+SHARED_RUNTIME_PACKAGES = ("tqdm>=4.66.0", "webrtcvad-wheels>=2.0.14")
 PIP_BOOTSTRAP_PACKAGES = ("pip>=26.0", "setuptools<82", "wheel>=0.46.0")
 BACKEND_PACKAGES = {
     "mlx": ("mlx-whisper>=0.4.2",),
@@ -41,6 +42,13 @@ SUBTITLE_MAX_LINE_WIDTH = 42
 SUBTITLE_STRONG_PAUSE_SECONDS = 0.45
 SUBTITLE_MEDIUM_PAUSE_SECONDS = 0.2
 SUBTITLE_TIGHT_JOIN_SECONDS = 0.08
+SUBTITLE_SPEECH_TRIM_SAMPLE_RATE = 16000
+SUBTITLE_SPEECH_TRIM_FRAME_MS = 30
+SUBTITLE_SPEECH_TRIM_PADDING_MS = 300
+SUBTITLE_SPEECH_TRIM_TRIGGER_RATIO = 0.9
+SUBTITLE_SPEECH_TRIM_MIN_SEGMENT_SECONDS = 0.25
+SUBTITLE_SPEECH_TRIM_MERGE_GAP_SECONDS = 0.35
+SUBTITLE_SPEECH_TRIM_PREROLL_SECONDS = 0.06
 SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
     {
         "dr.",
@@ -66,6 +74,7 @@ SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
 SUBTITLE_HONORIFIC_ABBREVIATIONS = frozenset({"dr.", "mr.", "mrs.", "ms.", "mx.", "prof.", "sr.", "jr.", "st."})
 SUBTITLE_INITIAL_RE = re.compile(r"^[A-Za-z]\.$")
 SUBTITLE_INITIALISM_RE = re.compile(r"^(?:[A-Za-z]\.){2,}$")
+RUNTIME_WARNINGS_SHOWN: set[str] = set()
 LANGUAGE_LABELS = {
     "af": ("afr", "Afrikaans"),
     "am": ("amh", "Amharic"),
@@ -268,6 +277,13 @@ def success(message: str) -> None:
 
 def warn(message: str) -> None:
     say(f"{YELLOW}⚠{RESET} {message}", err=True)
+
+
+def warn_once(key: str, message: str) -> None:
+    if key in RUNTIME_WARNINGS_SHOWN:
+        return
+    RUNTIME_WARNINGS_SHOWN.add(key)
+    warn(message)
 
 
 def error(message: str) -> None:
@@ -835,6 +851,8 @@ def installed_packages(python_bin: Path) -> tuple[str, ...]:
     found: list[str] = []
     if runtime_has_module(python_bin, "tqdm"):
         found.append("tqdm")
+    if runtime_has_module(python_bin, "webrtcvad"):
+        found.append("webrtcvad")
     for backend in ("mlx", "faster-whisper"):
         if runtime_has_backend(python_bin, backend):
             found.append("mlx-whisper" if backend == "mlx" else "faster-whisper")
@@ -882,7 +900,8 @@ def ensure_venv(plan: RuntimePlan) -> None:
 
 def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> RuntimePlan:
     ensure_venv(plan)
-    if update or not runtime_has_module(plan.venv_python, "tqdm"):
+    missing_shared_runtime = not runtime_has_module(plan.venv_python, "tqdm") or not runtime_has_module(plan.venv_python, "webrtcvad")
+    if update or missing_shared_runtime:
         install_packages(plan.venv_python, "Preparing pip in the local runtime", *PIP_BOOTSTRAP_PACKAGES)
         install_packages(plan.venv_python, "Installing shared Python packages", *SHARED_RUNTIME_PACKAGES)
     current_backends = set(installed_backends(plan.venv_python))
@@ -908,8 +927,8 @@ def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required
 
 def packages_to_install_now(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> tuple[str, ...]:
     packages: list[str] = []
-    if update or "tqdm" not in plan.installed_packages:
-        packages.extend(["pip", "setuptools", "wheel", "tqdm"])
+    if update or "tqdm" not in plan.installed_packages or "webrtcvad" not in plan.installed_packages:
+        packages.extend(["pip", "setuptools", "wheel", "tqdm", "webrtcvad"])
     if selected_backend_required and plan.selected_backend not in plan.installed_backends:
         packages.extend(["mlx-whisper" if plan.selected_backend == "mlx" else "faster-whisper"])
     return tuple(dict.fromkeys(packages))
@@ -982,6 +1001,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compute-type", default="auto")
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--outdir", default="")
+    parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--python", default="")
     parser.add_argument("--stable-mlx-python", action="store_true")
@@ -1030,6 +1050,7 @@ def print_help() -> None:
             ("--device=auto|cpu|cuda", "Processing device selection."),
             ("--compute-type=auto|int8|float16|int8_float16", "Compute precision selection."),
             ("--jobs=N", "Number of files to process in parallel."),
+            ("--no-speech-trim", "Skip the default speech-onset VAD pass for subtitle cue starts."),
             ("--recursive", "Recurse into folders when the target is a directory."),
         )
     )
@@ -1097,7 +1118,8 @@ def print_help() -> None:
   First run shows an install summary before downloading packages.
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
-  ffmpeg is required for --embed, --embed-file, and --burn.
+  Subtitle cue starts are speech-trimmed by default; use --no-speech-trim to disable.
+  Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
     )
@@ -1208,6 +1230,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_LANG": args.lang,
         "WHISPER_JOBS": str(args.jobs),
         "WHISPER_OUTDIR": args.outdir,
+        "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
         "WHISPER_ASS": "1" if args.ass else "0",
         "WHISPER_EMBED": "1" if (args.embed or args.embed_file is not None) else "0",
@@ -1339,6 +1362,132 @@ def subtitle_boundary_score_adjustment(left_item: str | dict[str, float | str], 
     return adjustment
 
 
+def iter_speech_trim_frames(media_path: Path):
+    if not shutil.which("ffmpeg"):
+        warn_once(
+            "speech-trim-missing-ffmpeg",
+            "ffmpeg is not available, so default speech-onset subtitle trimming is being skipped. Install ffmpeg or use --no-speech-trim to silence this warning.",
+        )
+        return
+    frame_size = SUBTITLE_SPEECH_TRIM_SAMPLE_RATE * 2 * SUBTITLE_SPEECH_TRIM_FRAME_MS // 1000
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(media_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(SUBTITLE_SPEECH_TRIM_SAMPLE_RATE),
+        "-af",
+        "highpass=f=120,lowpass=f=3800",
+        "-f",
+        "s16le",
+        "-",
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        return
+    timestamp = 0.0
+    try:
+        while True:
+            frame = process.stdout.read(frame_size)
+            if len(frame) < frame_size:
+                break
+            yield timestamp, frame
+            timestamp += SUBTITLE_SPEECH_TRIM_FRAME_MS / 1000.0
+    finally:
+        if process.stdout:
+            process.stdout.close()
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(f"ffmpeg audio analysis failed for {media_path.name}")
+
+
+def merge_speech_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    merged: list[tuple[float, float]] = []
+    for start, end in intervals:
+        if end - start < SUBTITLE_SPEECH_TRIM_MIN_SEGMENT_SECONDS:
+            continue
+        if not merged:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        if start - prev_end <= SUBTITLE_SPEECH_TRIM_MERGE_GAP_SECONDS:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def detect_speech_intervals(media_path: Path) -> list[tuple[float, float]] | None:
+    try:
+        import webrtcvad
+    except ModuleNotFoundError:
+        warn_once(
+            "speech-trim-missing-webrtcvad",
+            "Speech-onset trimming support is unavailable in this runtime, so subtitle timing is falling back to backend timestamps.",
+        )
+        return None
+    try:
+        vad = webrtcvad.Vad(3)
+        padding_frames = max(1, SUBTITLE_SPEECH_TRIM_PADDING_MS // SUBTITLE_SPEECH_TRIM_FRAME_MS)
+        ring_buffer: deque[tuple[float, bool]] = deque(maxlen=padding_frames)
+        speech_intervals: list[tuple[float, float]] = []
+        triggered = False
+        segment_start = 0.0
+        last_frame_time = 0.0
+        frame_duration = SUBTITLE_SPEECH_TRIM_FRAME_MS / 1000.0
+        for timestamp, frame in iter_speech_trim_frames(media_path):
+            is_speech = vad.is_speech(frame, SUBTITLE_SPEECH_TRIM_SAMPLE_RATE)
+            last_frame_time = timestamp
+            if not triggered:
+                ring_buffer.append((timestamp, is_speech))
+                voiced_frames = sum(1 for _frame_time, voiced in ring_buffer if voiced)
+                if len(ring_buffer) == padding_frames and voiced_frames >= max(1, int(padding_frames * SUBTITLE_SPEECH_TRIM_TRIGGER_RATIO)):
+                    triggered = True
+                    segment_start = ring_buffer[0][0]
+                    ring_buffer.clear()
+            else:
+                ring_buffer.append((timestamp, is_speech))
+                unvoiced_frames = sum(1 for _frame_time, voiced in ring_buffer if not voiced)
+                if len(ring_buffer) == padding_frames and unvoiced_frames >= max(1, int(padding_frames * SUBTITLE_SPEECH_TRIM_TRIGGER_RATIO)):
+                    speech_intervals.append((segment_start, ring_buffer[0][0] + frame_duration))
+                    triggered = False
+                    ring_buffer.clear()
+        if triggered:
+            speech_intervals.append((segment_start, last_frame_time + frame_duration))
+        return merge_speech_intervals(speech_intervals)
+    except RuntimeError as exc:
+        warn_once("speech-trim-analysis-failed", str(exc))
+        return None
+    except Exception as exc:
+        warn_once(
+            "speech-trim-unexpected-error",
+            f"Speech-onset trimming hit an unexpected problem ({exc}); continuing with backend timings.",
+        )
+        return None
+
+
+def trim_cue_start_to_speech(start: float, end: float, speech_intervals: list[tuple[float, float]] | None) -> float:
+    if not speech_intervals:
+        return start
+    for speech_start, speech_end in speech_intervals:
+        if speech_end <= start:
+            continue
+        if speech_start <= start < speech_end:
+            return start
+        if speech_start < end:
+            adjusted_start = max(start, speech_start - SUBTITLE_SPEECH_TRIM_PREROLL_SECONDS)
+            return min(adjusted_start, max(start, end - 0.01))
+        break
+    return start
+
+
 def subtitle_items_width(items: list[str] | list[dict[str, float | str]]) -> int:
     if not items:
         return 0
@@ -1398,7 +1547,8 @@ def chunk_subtitle_items(
 
 
 def iter_segment_subtitle_cues(
-    segment: dict[str, float | str | list[dict[str, float | str]]]
+    segment: dict[str, float | str | list[dict[str, float | str]]],
+    speech_intervals: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]]:
     words = [
         {"start": float(word["start"]), "end": float(word["end"]), "word": subtitle_item_text(word)}
@@ -1411,6 +1561,7 @@ def iter_segment_subtitle_cues(
             line_groups, _fits = subtitle_line_groups(chunk)
             start = float(chunk[0]["start"])
             end = max(float(chunk[-1]["end"]), start + 0.01)
+            start = trim_cue_start_to_speech(start, end, speech_intervals)
             cues.append((start, end, line_groups))
         return cues
     text = normalized_text(str(segment.get("text", "")))
@@ -1424,6 +1575,7 @@ def iter_segment_subtitle_cues(
         start = float(segment["start"]) + offset * duration
         raw_end = float(segment["end"]) if offset == len(chunks) - 1 else min(float(segment["end"]), start + duration)
         end = max(raw_end, start + 0.01)
+        start = trim_cue_start_to_speech(start, end, speech_intervals)
         cues.append((start, end, line_groups))
     return cues
 
@@ -1784,7 +1936,14 @@ def apply_subtitle_outputs(
             print(f"🎞 Wrote burned-in video: {media_path.name}", file=sys.stderr)
 
 
-def write_ass(path: Path, segments, font_name: str, karaoke: bool) -> None:
+def write_ass(
+    path: Path,
+    segments,
+    font_name: str,
+    karaoke: bool,
+    *,
+    speech_intervals: list[tuple[float, float]] | None = None,
+) -> None:
     with path.open("w", encoding="utf-8") as handle:
         handle.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n")
         handle.write("[V4+ Styles]\n")
@@ -1792,7 +1951,7 @@ def write_ass(path: Path, segments, font_name: str, karaoke: bool) -> None:
         handle.write(f"Style: Default,{font_name},30,&H00FFFFFF,&H0000FFFF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1\n\n")
         handle.write("[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
         for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment):
+            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals):
                 has_word_timings = bool(line_groups and isinstance(line_groups[0][0], dict))
                 if karaoke and has_word_timings:
                     rendered_lines = []
@@ -1811,11 +1970,11 @@ def write_ass(path: Path, segments, font_name: str, karaoke: bool) -> None:
                     handle.write(f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},Default,,0,0,0,,{text}\n")
 
 
-def write_srt(path: Path, segments) -> None:
+def write_srt(path: Path, segments, *, speech_intervals: list[tuple[float, float]] | None = None) -> None:
     index = 1
     with path.open("w", encoding="utf-8") as handle:
         for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment):
+            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals):
                 lines = [" ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line]
                 if not lines:
                     continue
@@ -1953,6 +2112,15 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
     subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
+    speech_intervals: list[tuple[float, float]] | None = None
+    if not output_txt and env.get("WHISPER_SPEECH_TRIM", "1") == "1":
+        speech_trim_message = "Analyzing speech onset" if compact_status else f"Analyzing speech onset on {media_path.name}"
+        speech_trim_spinner = Spinner(speech_trim_message, enabled=True, delay_seconds=1.2)
+        speech_trim_spinner.start()
+        try:
+            speech_intervals = detect_speech_intervals(media_path)
+        finally:
+            speech_trim_spinner.stop()
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
         write_txt(text_path, mlx_result.get("text", ""))
@@ -1960,9 +2128,15 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
         if env["WHISPER_ASS"] == "1":
-            write_ass(subtitle_path, segments, env["WHISPER_FONT"], env["WHISPER_KARAOKE"] == "1")
+            write_ass(
+                subtitle_path,
+                segments,
+                env["WHISPER_FONT"],
+                env["WHISPER_KARAOKE"] == "1",
+                speech_intervals=speech_intervals,
+            )
         else:
-            write_srt(subtitle_path, segments)
+            write_srt(subtitle_path, segments, speech_intervals=speech_intervals)
         print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
         apply_subtitle_outputs(
             media_path,
@@ -2177,6 +2351,7 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--mlx-word-timestamps=off{RESET}")
     say(f"  {MAGENTA}--mlx-output-format=text{RESET}")
     say(f"  {MAGENTA}--mlx-model-default=official{RESET}")
+    say(f"  {MAGENTA}--no-speech-trim{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 

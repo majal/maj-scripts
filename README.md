@@ -132,7 +132,7 @@ Shared prerequisites:
 
 Useful system dependency:
 
-- `ffmpeg` for media workflows, especially subtitle burn-in and subtitle-track embedding
+- `ffmpeg` for media workflows, especially default speech-onset subtitle trimming, subtitle burn-in, and subtitle-track embedding
 
 Script-specific note:
 
@@ -224,6 +224,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
+- Subtitle cue starts are speech-trimmed by default to avoid long lead-ins over music or ambient audio. Use `--no-speech-trim` to opt out.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
 - `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python, skips backend loading, and reuses source audio language metadata when available.
 - `--in-place` first writes to a temporary file, then replaces the original video only after a successful mux. The short alias is `-i`.
@@ -240,7 +241,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 #### Notes / Caveats
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
-- Soft subtitle embedding and burn-in both require `ffmpeg`.
+- Soft subtitle embedding and burn-in both require `ffmpeg`, and the default speech-onset trim uses it when available.
 - In-place embedding only works when the embedded output can stay in the same container; cases that need an MKV fallback still require plain `--embed`.
 - MLX behavior can vary by machine, Python version, and model choice.
 
