@@ -182,6 +182,24 @@ Opt in to spoken Bible-reference parsing:
 whisper /path/to/file.mp4 --bible-reference-phrases
 ```
 
+Use a stricter subtitle readability profile:
+
+```bash
+whisper /path/to/file.mp4 --subtitle-style=strict
+```
+
+Layer in a custom glossary and review what postprocessing still looks suspicious:
+
+```bash
+whisper /path/to/file.mp4 --glossary=/path/to/whisper-glossary.txt --review-postprocessing
+```
+
+Suppress a known intro or outro from a shared phrase list:
+
+```bash
+whisper /path/to/file.mp4 --suppress-phrases=/path/to/whisper-suppress.txt
+```
+
 Transcribe recursive matches in batches instead of starting one `whisper` process per file:
 
 ```bash
@@ -247,10 +265,15 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - Default model selection is hardware-aware.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
-- Common JW/Bible terms such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `New World Translation`, and `jw.org` are normalized by default.
+- Common JW/Bible and general capitalization such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `Bible`, `jw.org`, `OpenAI`, `ChatGPT`, `YouTube`, and `Wi-Fi` is normalized by default.
+- Project glossary files named `.whisper-glossary.json`, `.whisper-glossary.txt`, `whisper-glossary.json`, or `whisper-glossary.txt` are auto-loaded from parent folders when present. You can stack extra glossary files explicitly with repeated `--glossary=PATH`.
+- Text glossary files use `source => Replacement` lines, while JSON glossary files can be a plain object of string replacements. Suppression text files accept optional `start:`, `end:`, or `any:` prefixes per line, and JSON suppression files can use matching `start`, `end`, and `any` keys.
 - Bible references such as `Psalm 83 18`, `Psalm 83-18`, `Psalm 83.18`, `Psalm 8318`, and range forms like `Psalm 83 18 19` are normalized by default. Use `--no-bible-reference-normalization` to opt out.
 - Spoken forms such as `Psalm 83 verse 18`, `Psalm chapter 83 verse 18`, and `1 John chapter 4 verse 8` are available as an opt-in with `--bible-reference-phrases`.
-- Subtitle cue starts and ends are speech-trimmed by default to avoid long lead-ins and long tails over music or ambient audio. Cue timing is also smoothed for readability, and obvious repeated-word glitches are collapsed conservatively when timed words are available. Use `--no-speech-trim` to opt out of the speech-trim pass.
+- Subtitle cue starts and ends are speech-trimmed by default to avoid long lead-ins and long tails over music or ambient audio. Timed-word edges that sit outside detected speech are also pruned conservatively, cue timing is smoothed for readability, and obvious repeated-word glitches are collapsed conservatively when timed words are available. Use `--no-speech-trim` to opt out of the speech-aware cleanup pass.
+- `--subtitle-style=balanced|strict` lets you keep the current balanced defaults or switch to a stricter readability profile with tighter line width and lower chars-per-second targets.
+- Known boilerplate intros and outros can be suppressed with `--suppress-phrases=PATH`, and project suppression files named `.whisper-suppress.json`, `.whisper-suppress.txt`, `whisper-suppress.json`, or `whisper-suppress.txt` are auto-loaded from parent folders when present.
+- `--review-postprocessing` / `--lint` does not rewrite extra text on its own; it reports leftover spoken Bible-reference phrases, dense subtitle cues, and other postprocessing things you may want to inspect.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
 - `--embed-file` uses an existing `.srt` or `.ass` instead of retranscribing, and bare `-f` / `--embed-file` looks for a matching subtitle file next to the video. It runs directly in the launcher Python, skips backend loading, and reuses source audio language metadata when available.
 - `--in-place` first writes to a temporary file, then replaces the original video only after a successful mux. The short alias is `-i`.

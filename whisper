@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from functools import lru_cache
 import importlib
 import json
 import os
@@ -55,6 +56,7 @@ SUBTITLE_MIN_CUE_GAP_SECONDS = 0.05
 SUBTITLE_MAX_CHARS_PER_SECOND = 22.0
 SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS = 7.0
 SUBTITLE_MAX_MERGE_GAP_SECONDS = 0.2
+SUBTITLE_SPEECH_PRUNE_MARGIN_SECONDS = 0.08
 SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
     {
         "dr.",
@@ -112,6 +114,66 @@ BIBLE_GLUE_DIGITS_RE = re.compile(r"^\d{2,6}$")
 BIBLE_CHAPTER_WORDS = frozenset({"chapter", "chapters"})
 BIBLE_VERSE_WORDS = frozenset({"verse", "verses"})
 BIBLE_RANGE_WORDS = frozenset({"to", "through", "thru"})
+GLOSSARY_PROJECT_FILENAMES = (
+    ".whisper-glossary.json",
+    ".whisper-glossary.txt",
+    "whisper-glossary.json",
+    "whisper-glossary.txt",
+)
+SUPPRESSION_PROJECT_FILENAMES = (
+    ".whisper-suppress.json",
+    ".whisper-suppress.txt",
+    "whisper-suppress.json",
+    "whisper-suppress.txt",
+)
+BUILT_IN_GLOSSARY_PHRASES = {
+    "armageddon": "Armageddon",
+    "bethel": "Bethel",
+    "bible": "Bible",
+    "christ": "Christ",
+    "governing body": "Governing Body",
+    "jehovah": "Jehovah",
+    "jehovah witnesses": "Jehovah's Witnesses",
+    "jehovah's witnesses": "Jehovah's Witnesses",
+    "jehovahs witnesses": "Jehovah's Witnesses",
+    "jesus": "Jesus",
+    "jesus christ": "Jesus Christ",
+    "jw broadcasting": "JW Broadcasting",
+    "jw org": "jw.org",
+    "jw.org": "jw.org",
+    "jworg": "jw.org",
+    "kingdom hall": "Kingdom Hall",
+    "new world translation": "New World Translation",
+    "satan": "Satan",
+    "watchtower": "Watchtower",
+    "chatgpt": "ChatGPT",
+    "cuda": "CUDA",
+    "flac": "FLAC",
+    "github": "GitHub",
+    "google": "Google",
+    "h.264": "H.264",
+    "h.265": "H.265",
+    "h264": "H.264",
+    "h265": "H.265",
+    "hevc": "HEVC",
+    "ios": "iOS",
+    "jw": "JW",
+    "mkv": "MKV",
+    "mp3": "MP3",
+    "mp4": "MP4",
+    "nvidia": "NVIDIA",
+    "ogg": "OGG",
+    "openai": "OpenAI",
+    "pdf": "PDF",
+    "usb": "USB",
+    "wav": "WAV",
+    "whatsapp": "WhatsApp",
+    "wi fi": "Wi-Fi",
+    "wi-fi": "Wi-Fi",
+    "wifi": "Wi-Fi",
+    "youtube": "YouTube",
+    "zoom": "Zoom",
+}
 BIBLE_BOOK_CHAPTER_COUNTS = {
     "genesis": 50,
     "exodus": 40,
@@ -421,6 +483,60 @@ class SubtitleCue:
     items: list[str] | list[dict[str, float | str]]
 
 
+@dataclass(frozen=True)
+class SubtitleStyleProfile:
+    name: str
+    max_line_width: int
+    min_cue_duration: float
+    min_cue_gap: float
+    max_chars_per_second: float
+    max_merged_cue_duration: float
+    max_merge_gap: float
+
+
+@dataclass(frozen=True)
+class SuppressionRules:
+    start: tuple[str, ...] = ()
+    end: tuple[str, ...] = ()
+    any: tuple[str, ...] = ()
+
+
+@dataclass
+class SpeechPruneStats:
+    trimmed_segments: int = 0
+    dropped_segments: int = 0
+    dropped_words: int = 0
+
+
+@dataclass
+class SuppressionStats:
+    leading_segments: int = 0
+    trailing_segments: int = 0
+    anywhere_segments: int = 0
+
+
+SUBTITLE_STYLE_PRESETS = {
+    "balanced": SubtitleStyleProfile(
+        name="balanced",
+        max_line_width=SUBTITLE_MAX_LINE_WIDTH,
+        min_cue_duration=SUBTITLE_MIN_CUE_DURATION_SECONDS,
+        min_cue_gap=SUBTITLE_MIN_CUE_GAP_SECONDS,
+        max_chars_per_second=SUBTITLE_MAX_CHARS_PER_SECOND,
+        max_merged_cue_duration=SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS,
+        max_merge_gap=SUBTITLE_MAX_MERGE_GAP_SECONDS,
+    ),
+    "strict": SubtitleStyleProfile(
+        name="strict",
+        max_line_width=38,
+        min_cue_duration=1.05,
+        min_cue_gap=0.06,
+        max_chars_per_second=18.0,
+        max_merged_cue_duration=6.2,
+        max_merge_gap=0.16,
+    ),
+}
+
+
 def build_bible_book_alias_lookup() -> tuple[dict[tuple[str, ...], str], tuple[int, ...]]:
     alias_lookup: dict[tuple[str, ...], str] = {}
     for canonical, aliases in BIBLE_BOOK_BASE_ALIASES.items():
@@ -440,26 +556,56 @@ def build_bible_book_alias_lookup() -> tuple[dict[tuple[str, ...], str], tuple[i
 
 
 BIBLE_BOOK_ALIAS_LOOKUP, BIBLE_BOOK_ALIAS_LENGTHS = build_bible_book_alias_lookup()
-DOMAIN_TERM_REPLACEMENTS = {
-    ("armageddon",): ("Armageddon",),
-    ("bethel",): ("Bethel",),
-    ("christ",): ("Christ",),
-    ("governing", "body"): ("Governing", "Body"),
-    ("jehovah",): ("Jehovah",),
-    ("jehovah", "witnesses"): ("Jehovah's", "Witnesses"),
-    ("jehovah's", "witnesses"): ("Jehovah's", "Witnesses"),
-    ("jehovahs", "witnesses"): ("Jehovah's", "Witnesses"),
-    ("jesus",): ("Jesus",),
-    ("jesus", "christ"): ("Jesus", "Christ"),
-    ("jw", "org"): ("jw.org",),
-    ("jw.org",): ("jw.org",),
-    ("jworg",): ("jw.org",),
-    ("kingdom", "hall"): ("Kingdom", "Hall"),
-    ("new", "world", "translation"): ("New", "World", "Translation"),
-    ("satan",): ("Satan",),
-    ("watchtower",): ("Watchtower",),
-}
-DOMAIN_TERM_LENGTHS = tuple(sorted({len(alias) for alias in DOMAIN_TERM_REPLACEMENTS}, reverse=True))
+
+
+def normalized_lookup_text(text: str) -> str:
+    return " ".join(
+        text.replace("’", "'").replace("‘", "'").replace("ʼ", "'").replace("–", "-").replace("—", "-").split()
+    ).casefold()
+
+
+def glossary_phrase_core_tokens(text: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for raw_token in " ".join(text.strip().split()).split():
+        match = BIBLE_REFERENCE_TOKEN_RE.match(raw_token)
+        if not match:
+            continue
+        core = normalized_lookup_text(match.group(2))
+        if core:
+            tokens.append(core)
+    return tuple(tokens)
+
+
+def glossary_phrase_replacement_tokens(text: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    for raw_token in " ".join(text.strip().split()).split():
+        match = BIBLE_REFERENCE_TOKEN_RE.match(raw_token)
+        if not match:
+            continue
+        core = match.group(2)
+        if core:
+            tokens.append(core)
+    return tuple(tokens)
+
+
+def normalized_phrase_key(text: str) -> str:
+    return " ".join(glossary_phrase_core_tokens(text))
+
+
+def compile_glossary_phrase_mapping(
+    phrase_mapping: dict[str, str] | tuple[tuple[str, str], ...],
+) -> tuple[dict[tuple[str, ...], tuple[str, ...]], tuple[int, ...]]:
+    replacements: dict[tuple[str, ...], tuple[str, ...]] = {}
+    items = phrase_mapping.items() if isinstance(phrase_mapping, dict) else phrase_mapping
+    for alias_phrase, replacement_phrase in items:
+        alias_tokens = glossary_phrase_core_tokens(alias_phrase)
+        replacement_tokens = glossary_phrase_replacement_tokens(replacement_phrase)
+        if alias_tokens and replacement_tokens:
+            replacements[alias_tokens] = replacement_tokens
+    return replacements, tuple(sorted({len(alias) for alias in replacements}, reverse=True))
+
+
+BUILT_IN_GLOSSARY_REPLACEMENTS, BUILT_IN_GLOSSARY_LENGTHS = compile_glossary_phrase_mapping(BUILT_IN_GLOSSARY_PHRASES)
 
 
 def use_color() -> bool:
@@ -1280,6 +1426,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bible-reference-phrases", action="store_true")
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
+    parser.add_argument("--review-postprocessing", "--lint", dest="review_postprocessing", action="store_true")
+    parser.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLE_PRESETS), default="balanced")
+    parser.add_argument("--glossary", action="append", default=[], metavar="PATH")
+    parser.add_argument("--suppress-phrases", action="append", default=[], metavar="PATH")
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--python", default="")
     parser.add_argument("--stable-mlx-python", action="store_true")
@@ -1330,10 +1480,18 @@ def print_help() -> None:
             ("--device=auto|cpu|cuda", "Processing device selection."),
             ("--compute-type=auto|int8|float16|int8_float16", "Compute precision selection."),
             ("--jobs=N", "Number of files to process in parallel."),
+            ("--recursive", "Recurse into folders when a target is a directory."),
+        )
+    )
+    postprocess_rows = format_help_rows(
+        (
             ("--no-bible-reference-normalization", "Skip the default Bible reference cleanup pass."),
             ("--bible-reference-phrases", "Opt in to spoken Bible-reference parsing like Psalm 83 verse 18."),
-            ("--no-speech-trim", "Skip the default speech-onset VAD pass for subtitle cue starts."),
-            ("--recursive", "Recurse into folders when a target is a directory."),
+            ("--no-speech-trim", "Skip speech-aware timing and edge-word cleanup."),
+            ("--subtitle-style=balanced|strict", "Choose the subtitle readability profile; balanced is the default."),
+            ("--glossary=PATH", "Load a custom capitalization/replacement glossary; repeat to stack files."),
+            ("--suppress-phrases=PATH", "Load known intro/outro phrases to suppress; repeat to stack files."),
+            ("--review-postprocessing, --lint", "Report suspicious leftovers such as spoken references or dense cues."),
         )
     )
     output_rows = format_help_rows(
@@ -1386,6 +1544,9 @@ def print_help() -> None:
 {BOLD}Transcription and selection{RESET}
 {transcription_rows}
 
+{BOLD}Postprocessing and cleanup{RESET}
+{postprocess_rows}
+
 {BOLD}Output and subtitle modes{RESET}
 {output_rows}
 
@@ -1402,10 +1563,11 @@ def print_help() -> None:
   Per-file progress percentages and ETA are estimated from media length.
   Multiple explicit files are supported, so shell-expanded commands such as {name} *.mp4 work as expected.
   For recursive shell batching, prefer find ... -exec {name} '{{}}' + or find ... -print0 | xargs -0 {name}; plain -exec ... \\; starts one whisper process per file.
-  Common JW/Bible terms such as Jehovah, Governing Body, Kingdom Hall, New World Translation, and jw.org are normalized by default.
+  Common JW/Bible and general capitalization such as Jehovah, Governing Body, Kingdom Hall, Bible, jw.org, ChatGPT, OpenAI, YouTube, and Wi-Fi is normalized by default.
   Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
   Spoken forms such as Psalm 83 verse 18 are available as an opt-in with --bible-reference-phrases.
-  Subtitle cue starts and ends are speech-trimmed by default, and cue timing is smoothed for readability; use --no-speech-trim to disable.
+  Subtitle cue starts and ends are speech-trimmed by default, out-of-speech timed-word edges are pruned conservatively, and cue timing is smoothed for readability; use --no-speech-trim to disable.
+  Project glossary files named .whisper-glossary.json/.txt and suppression files named .whisper-suppress.json/.txt are auto-loaded from parent folders when present.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1520,6 +1682,10 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_BIBLE_REFERENCE_NORMALIZATION": "1" if args.bible_reference_normalization else "0",
         "WHISPER_BIBLE_REFERENCE_PHRASES": "1" if args.bible_reference_phrases else "0",
         "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
+        "WHISPER_REVIEW_POSTPROCESSING": "1" if args.review_postprocessing else "0",
+        "WHISPER_SUBTITLE_STYLE": args.subtitle_style,
+        "WHISPER_GLOSSARY_FILES": json.dumps(list(args.glossary or [])),
+        "WHISPER_SUPPRESSION_FILES": json.dumps(list(args.suppress_phrases or [])),
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
         "WHISPER_ASS": "1" if args.ass else "0",
         "WHISPER_EMBED": "1" if (args.embed or args.embed_file is not None) else "0",
@@ -1866,12 +2032,16 @@ def split_subtitle_cue(cue: SubtitleCue, split_index: int) -> tuple[SubtitleCue,
     )
 
 
-def split_dense_subtitle_cue(cue: SubtitleCue) -> list[SubtitleCue]:
-    minimum_split_duration = SUBTITLE_MIN_CUE_DURATION_SECONDS * 0.6
+def split_dense_subtitle_cue(
+    cue: SubtitleCue,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> list[SubtitleCue]:
+    minimum_split_duration = style.min_cue_duration * 0.6
     if (
         len(cue.items) < 2
-        or subtitle_cue_chars_per_second(cue) <= SUBTITLE_MAX_CHARS_PER_SECOND
-        or subtitle_cue_duration(cue) < SUBTITLE_MIN_CUE_DURATION_SECONDS * 1.5
+        or subtitle_cue_chars_per_second(cue) <= style.max_chars_per_second
+        or subtitle_cue_duration(cue) < style.min_cue_duration * 1.5
     ):
         return [cue]
     split_index = choose_subtitle_cue_split_index(cue.items)
@@ -1883,22 +2053,31 @@ def split_dense_subtitle_cue(cue: SubtitleCue) -> list[SubtitleCue]:
     left, right = split_result
     if subtitle_cue_duration(left) < minimum_split_duration or subtitle_cue_duration(right) < minimum_split_duration:
         return [cue]
-    return [*split_dense_subtitle_cue(left), *split_dense_subtitle_cue(right)]
+    return [*split_dense_subtitle_cue(left, style=style), *split_dense_subtitle_cue(right, style=style)]
 
 
-def can_merge_subtitle_cues(left: SubtitleCue, right: SubtitleCue) -> bool:
+def can_merge_subtitle_cues(
+    left: SubtitleCue,
+    right: SubtitleCue,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> bool:
     gap = max(0.0, right.start - left.end)
-    if gap > SUBTITLE_MAX_MERGE_GAP_SECONDS:
+    if gap > style.max_merge_gap:
         return False
     merged = SubtitleCue(left.start, right.end, [*left.items, *right.items])
-    if len(chunk_subtitle_items(merged.items)) != 1:
+    if len(chunk_subtitle_items(merged.items, style=style)) != 1:
         return False
-    if subtitle_cue_duration(merged) > SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS:
+    if subtitle_cue_duration(merged) > style.max_merged_cue_duration:
         return False
-    return subtitle_cue_chars_per_second(merged) <= SUBTITLE_MAX_CHARS_PER_SECOND
+    return subtitle_cue_chars_per_second(merged) <= style.max_chars_per_second
 
 
-def merge_short_subtitle_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
+def merge_short_subtitle_cues(
+    cues: list[SubtitleCue],
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> list[SubtitleCue]:
     if len(cues) < 2:
         return cues
     merged: list[SubtitleCue] = []
@@ -1908,11 +2087,11 @@ def merge_short_subtitle_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
         while index + 1 < len(cues):
             next_cue = cues[index + 1]
             if (
-                subtitle_cue_duration(current) >= SUBTITLE_MIN_CUE_DURATION_SECONDS
-                and subtitle_cue_duration(next_cue) >= SUBTITLE_MIN_CUE_DURATION_SECONDS
+                subtitle_cue_duration(current) >= style.min_cue_duration
+                and subtitle_cue_duration(next_cue) >= style.min_cue_duration
             ):
                 break
-            if not can_merge_subtitle_cues(current, next_cue):
+            if not can_merge_subtitle_cues(current, next_cue, style=style):
                 break
             current = SubtitleCue(current.start, next_cue.end, [*current.items, *next_cue.items])
             index += 1
@@ -1921,32 +2100,45 @@ def merge_short_subtitle_cues(cues: list[SubtitleCue]) -> list[SubtitleCue]:
     return merged
 
 
-def stretch_short_subtitle_cues(cues: list[SubtitleCue], segment_end: float) -> list[SubtitleCue]:
+def stretch_short_subtitle_cues(
+    cues: list[SubtitleCue],
+    segment_end: float,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> list[SubtitleCue]:
     if not cues:
         return cues
     for index, cue in enumerate(cues):
-        minimum_end = cue.start + SUBTITLE_MIN_CUE_DURATION_SECONDS
+        minimum_end = cue.start + style.min_cue_duration
         if cue.end >= minimum_end:
             continue
         next_start = cues[index + 1].start if index + 1 < len(cues) else segment_end
-        max_end = min(segment_end, next_start - SUBTITLE_MIN_CUE_GAP_SECONDS)
+        max_end = min(segment_end, next_start - style.min_cue_gap)
         if max_end > cue.end:
             cue.end = min(max_end, minimum_end)
         cue.end = max(cue.end, cue.start + 0.01)
     return cues
 
 
-def subtitle_cue_line_groups(cue: SubtitleCue) -> list[list[str] | list[dict[str, float | str]]]:
-    line_groups, _fits = subtitle_line_groups(cue.items)
+def subtitle_cue_line_groups(
+    cue: SubtitleCue,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> list[list[str] | list[dict[str, float | str]]]:
+    line_groups, _fits = subtitle_line_groups(cue.items, style=style)
     return line_groups
 
 
 def subtitle_line_groups(
-    items: list[str] | list[dict[str, float | str]], max_line_width: int = SUBTITLE_MAX_LINE_WIDTH
+    items: list[str] | list[dict[str, float | str]],
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+    max_line_width: int | None = None,
 ) -> tuple[list[list[str] | list[dict[str, float | str]]], bool]:
+    line_width = style.max_line_width if max_line_width is None else max_line_width
     if not items:
         return [], True
-    if len(items) == 1 or subtitle_items_width(items) <= max_line_width:
+    if len(items) == 1 or subtitle_items_width(items) <= line_width:
         return [items], True
     best_split: int | None = None
     best_score: tuple[int, int] | None = None
@@ -1955,7 +2147,7 @@ def subtitle_line_groups(
         right = items[index:]
         left_width = subtitle_items_width(left)
         right_width = subtitle_items_width(right)
-        if left_width > max_line_width or right_width > max_line_width:
+        if left_width > line_width or right_width > line_width:
             continue
         if subtitle_boundary_locked(left[-1], right[0]):
             continue
@@ -1992,8 +2184,12 @@ def subtitle_should_force_chunk_split(
 
 
 def chunk_subtitle_items(
-    items: list[str] | list[dict[str, float | str]], max_line_width: int = SUBTITLE_MAX_LINE_WIDTH
+    items: list[str] | list[dict[str, float | str]],
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+    max_line_width: int | None = None,
 ) -> list[list[str] | list[dict[str, float | str]]]:
+    line_width = style.max_line_width if max_line_width is None else max_line_width
     chunks: list[list[str] | list[dict[str, float | str]]] = []
     current: list[str] | list[dict[str, float | str]] = []
     for item in items:
@@ -2002,7 +2198,7 @@ def chunk_subtitle_items(
             current = [item]
             continue
         candidate = [*current, item]
-        _line_groups, fits = subtitle_line_groups(candidate, max_line_width=max_line_width)
+        _line_groups, fits = subtitle_line_groups(candidate, style=style, max_line_width=line_width)
         if current and not fits:
             next_chunk = [item]
             while current and subtitle_boundary_locked(current[-1], next_chunk[0]):
@@ -2020,6 +2216,8 @@ def chunk_subtitle_items(
 def iter_segment_subtitle_cues(
     segment: dict[str, float | str | list[dict[str, float | str]]],
     speech_intervals: list[tuple[float, float]] | None = None,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
 ) -> list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]]:
     words = [
         {"start": float(word["start"]), "end": float(word["end"]), "word": subtitle_item_text(word)}
@@ -2028,29 +2226,29 @@ def iter_segment_subtitle_cues(
     ]
     cue_objects: list[SubtitleCue] = []
     if words:
-        for chunk in chunk_subtitle_items(words):
+        for chunk in chunk_subtitle_items(words, style=style):
             start = float(chunk[0]["start"])
             end = max(float(chunk[-1]["end"]), start + 0.01)
-            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk)))
+            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk), style=style))
     else:
         text = normalized_text(str(segment.get("text", "")))
         if not text:
             return []
         text_words = [word for word in text.split() if word]
-        chunks = chunk_subtitle_items(text_words)
+        chunks = chunk_subtitle_items(text_words, style=style)
         duration = max((float(segment["end"]) - float(segment["start"])) / max(len(chunks), 1), 0.01)
         for offset, chunk in enumerate(chunks):
             start = float(segment["start"]) + offset * duration
             raw_end = float(segment["end"]) if offset == len(chunks) - 1 else min(float(segment["end"]), start + duration)
             end = max(raw_end, start + 0.01)
-            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk)))
+            cue_objects.extend(split_dense_subtitle_cue(SubtitleCue(start, end, chunk), style=style))
     for cue in cue_objects:
         subtitle_cue_apply_speech_trim(cue, speech_intervals)
-    cue_objects = merge_short_subtitle_cues(cue_objects)
-    cue_objects = stretch_short_subtitle_cues(cue_objects, float(segment["end"]))
+    cue_objects = merge_short_subtitle_cues(cue_objects, style=style)
+    cue_objects = stretch_short_subtitle_cues(cue_objects, float(segment["end"]), style=style)
     cues: list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]] = []
     for cue in cue_objects:
-        line_groups = subtitle_cue_line_groups(cue)
+        line_groups = subtitle_cue_line_groups(cue, style=style)
         cues.append((cue.start, cue.end, line_groups))
     return cues
 
@@ -2156,6 +2354,186 @@ def bible_tokens_to_words(tokens: list[BibleToken]) -> list[dict[str, float | st
 
 def bible_tokens_to_text(tokens: list[BibleToken]) -> str:
     return " ".join(token.text for token in tokens if token.text)
+
+
+def glossary_token_core(token: BibleToken) -> str:
+    return normalized_lookup_text(token.core)
+
+
+def discover_project_config_files(media_path: Path, filenames: tuple[str, ...]) -> tuple[Path, ...]:
+    directory = media_path.resolve().parent
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    for ancestor in reversed((directory, *directory.parents)):
+        for filename in filenames:
+            candidate = (ancestor / filename).resolve()
+            if candidate in seen or not candidate.is_file():
+                continue
+            discovered.append(candidate)
+            seen.add(candidate)
+    return tuple(discovered)
+
+
+def parse_text_mapping_lines(text: str, path: Path) -> tuple[tuple[str, str], ...]:
+    items: list[tuple[str, str]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        separator = "=>" if "=>" in line else "=" if "=" in line else None
+        if separator is None:
+            raise ValueError(f"{path.name}:{line_number} should use 'source => replacement' or 'source = replacement'")
+        source, replacement = (part.strip() for part in line.split(separator, 1))
+        if not source or not replacement:
+            raise ValueError(f"{path.name}:{line_number} needs both a source and replacement phrase")
+        items.append((source, replacement))
+    return tuple(items)
+
+
+def _suppression_values_from_json(value: object, label: str, path: Path) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        normalized = normalized_text(value)
+        return (normalized,) if normalized else ()
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return tuple(normalized for normalized in (normalized_text(item) for item in value) if normalized)
+    raise ValueError(f"{path.name} key '{label}' should be a string or list of strings")
+
+
+@lru_cache(maxsize=None)
+def load_glossary_replacement_items(path: Path) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            if all(isinstance(key, str) and isinstance(value, str) for key, value in payload.items()):
+                raw_items = tuple(payload.items())
+            else:
+                nested: object = None
+                for key in ("replace", "terms", "glossary"):
+                    if key in payload:
+                        nested = payload[key]
+                        break
+                if not isinstance(nested, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in nested.items()):
+                    raise ValueError(f"{path.name} should be a JSON object of string replacements")
+                raw_items = tuple(nested.items())
+        else:
+            raise ValueError(f"{path.name} should be a JSON object of string replacements")
+    else:
+        raw_items = parse_text_mapping_lines(path.read_text(encoding="utf-8"), path)
+    replacements, _lengths = compile_glossary_phrase_mapping(raw_items)
+    return tuple(replacements.items())
+
+
+@lru_cache(maxsize=None)
+def load_suppression_rules(path: Path) -> SuppressionRules:
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            any_phrases = _suppression_values_from_json(payload, "any", path)
+            return SuppressionRules(any=any_phrases)
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path.name} should be a JSON object or list of strings")
+        return SuppressionRules(
+            start=_suppression_values_from_json(payload.get("start"), "start", path),
+            end=_suppression_values_from_json(payload.get("end"), "end", path),
+            any=_suppression_values_from_json(payload.get("any"), "any", path),
+        )
+    start_phrases: list[str] = []
+    end_phrases: list[str] = []
+    any_phrases: list[str] = []
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        label = "any"
+        value = line
+        if ":" in line:
+            maybe_label, maybe_value = (part.strip() for part in line.split(":", 1))
+            if maybe_label.lower() in {"start", "end", "any"}:
+                label = maybe_label.lower()
+                value = maybe_value
+        normalized_value = normalized_text(value)
+        if not normalized_value:
+            raise ValueError(f"{path.name}:{line_number} needs a phrase after the optional start:/end:/any: label")
+        if label == "start":
+            start_phrases.append(normalized_value)
+        elif label == "end":
+            end_phrases.append(normalized_value)
+        else:
+            any_phrases.append(normalized_value)
+    return SuppressionRules(start=tuple(start_phrases), end=tuple(end_phrases), any=tuple(any_phrases))
+
+
+def merge_glossary_replacement_sources(
+    sources: list[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]],
+) -> tuple[dict[tuple[str, ...], tuple[str, ...]], tuple[int, ...]]:
+    replacements = dict(BUILT_IN_GLOSSARY_REPLACEMENTS)
+    for source_items in sources:
+        for alias, replacement in source_items:
+            replacements[alias] = replacement
+    return replacements, tuple(sorted({len(alias) for alias in replacements}, reverse=True))
+
+
+def merge_suppression_rule_sources(sources: list[SuppressionRules]) -> SuppressionRules:
+    def unique_phrases(groups: list[tuple[str, ...]]) -> tuple[str, ...]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            for phrase in group:
+                normalized = normalized_phrase_key(phrase)
+                if not normalized or normalized in seen:
+                    continue
+                ordered.append(phrase)
+                seen.add(normalized)
+        return tuple(ordered)
+
+    return SuppressionRules(
+        start=unique_phrases([rules.start for rules in sources]),
+        end=unique_phrases([rules.end for rules in sources]),
+        any=unique_phrases([rules.any for rules in sources]),
+    )
+
+
+def load_effective_glossary(
+    media_path: Path, explicit_paths: list[Path]
+) -> tuple[dict[tuple[str, ...], tuple[str, ...]], tuple[int, ...], tuple[Path, ...]]:
+    source_paths: list[Path] = []
+    source_items: list[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]] = []
+    for path in discover_project_config_files(media_path, GLOSSARY_PROJECT_FILENAMES):
+        try:
+            items = load_glossary_replacement_items(path)
+        except Exception as exc:
+            warn_once(f"glossary-project-{path}", f"Ignoring glossary file {path}: {exc}")
+            continue
+        source_paths.append(path)
+        source_items.append(items)
+    for path in explicit_paths:
+        resolved = path.expanduser().resolve()
+        items = load_glossary_replacement_items(resolved)
+        source_paths.append(resolved)
+        source_items.append(items)
+    replacements, lengths = merge_glossary_replacement_sources(source_items)
+    return replacements, lengths, tuple(source_paths)
+
+
+def load_effective_suppression_rules(media_path: Path, explicit_paths: list[Path]) -> tuple[SuppressionRules, tuple[Path, ...]]:
+    source_paths: list[Path] = []
+    source_rules: list[SuppressionRules] = []
+    for path in discover_project_config_files(media_path, SUPPRESSION_PROJECT_FILENAMES):
+        try:
+            rules = load_suppression_rules(path)
+        except Exception as exc:
+            warn_once(f"suppression-project-{path}", f"Ignoring suppression file {path}: {exc}")
+            continue
+        source_paths.append(path)
+        source_rules.append(rules)
+    for path in explicit_paths:
+        resolved = path.expanduser().resolve()
+        rules = load_suppression_rules(resolved)
+        source_paths.append(resolved)
+        source_rules.append(rules)
+    return merge_suppression_rule_sources(source_rules), tuple(source_paths)
 
 
 def find_bible_book_match(tokens: list[BibleToken], index: int) -> tuple[str, int] | None:
@@ -2293,22 +2671,32 @@ def make_replacement_tokens(
     return replaced
 
 
-def find_domain_term_match(tokens: list[BibleToken], index: int) -> tuple[tuple[str, ...], int] | None:
-    for length in DOMAIN_TERM_LENGTHS:
+def find_glossary_match(
+    tokens: list[BibleToken],
+    index: int,
+    replacements: dict[tuple[str, ...], tuple[str, ...]],
+    alias_lengths: tuple[int, ...],
+) -> tuple[tuple[str, ...], int] | None:
+    for length in alias_lengths:
         if index + length > len(tokens):
             continue
-        alias = tuple(normalized_token_core(token) for token in tokens[index:index + length])
-        replacement = DOMAIN_TERM_REPLACEMENTS.get(alias)
+        alias = tuple(glossary_token_core(token) for token in tokens[index:index + length])
+        replacement = replacements.get(alias)
         if replacement:
             return replacement, length
     return None
 
 
-def normalize_domain_term_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
+def normalize_glossary_tokens(
+    tokens: list[BibleToken],
+    *,
+    replacements: dict[tuple[str, ...], tuple[str, ...]],
+    alias_lengths: tuple[int, ...],
+) -> list[BibleToken]:
     normalized: list[BibleToken] = []
     index = 0
     while index < len(tokens):
-        match = find_domain_term_match(tokens, index)
+        match = find_glossary_match(tokens, index, replacements, alias_lengths)
         if not match:
             normalized.append(tokens[index])
             index += 1
@@ -2317,6 +2705,31 @@ def normalize_domain_term_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
         normalized.extend(make_replacement_tokens(tokens, index, index + consumed, replacement_cores))
         index += consumed
     return normalized
+
+
+def bible_book_display_core(token_core: str, *, lowercase_small_word: bool) -> str:
+    if token_core.isdigit():
+        return token_core
+    lowered = normalized_lookup_text(token_core)
+    if lowercase_small_word and lowered in {"of", "the"}:
+        return lowered
+    return token_core[:1].upper() + token_core[1:].lower()
+
+
+def capitalized_bible_book_tokens(tokens: list[BibleToken], start_index: int, length: int) -> list[BibleToken]:
+    capitalized: list[BibleToken] = []
+    source_slice = tokens[start_index:start_index + length]
+    for offset, token in enumerate(source_slice):
+        capitalized.append(
+            BibleToken(
+                token.leading,
+                bible_book_display_core(token.core, lowercase_small_word=offset > 0),
+                token.trailing,
+                start=token.start,
+                end=token.end,
+            )
+        )
+    return capitalized
 
 
 def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book: str) -> tuple[int, BibleToken] | None:
@@ -2454,21 +2867,27 @@ def normalize_bible_reference_tokens(tokens: list[BibleToken], *, normalize_phra
             index += 1
             continue
         book, book_length = book_match
-        normalized.extend(tokens[index:index + book_length])
         reference_match = parse_bible_reference_after_book(tokens, index + book_length, book)
         if reference_match is None and normalize_phrases:
             reference_match = parse_bible_reference_phrase_after_book(tokens, index + book_length, book)
         if reference_match:
             consumed, normalized_reference = reference_match
+            normalized.extend(capitalized_bible_book_tokens(tokens, index, book_length))
             normalized.append(normalized_reference)
             index += book_length + consumed
         else:
+            normalized.extend(tokens[index:index + book_length])
             index += book_length
     return normalized
 
 
 def postprocess_text_tokens(
-    tokens: list[BibleToken], *, normalize_bible_references: bool, normalize_bible_reference_phrases: bool
+    tokens: list[BibleToken],
+    *,
+    normalize_bible_references: bool,
+    normalize_bible_reference_phrases: bool,
+    glossary_replacements: dict[tuple[str, ...], tuple[str, ...]],
+    glossary_lengths: tuple[int, ...],
 ) -> list[BibleToken]:
     normalized_tokens = collapse_repeated_word_tokens(tokens)
     if normalize_bible_references:
@@ -2476,7 +2895,11 @@ def postprocess_text_tokens(
             normalized_tokens,
             normalize_phrases=normalize_bible_reference_phrases,
         )
-    return normalize_domain_term_tokens(normalized_tokens)
+    return normalize_glossary_tokens(
+        normalized_tokens,
+        replacements=glossary_replacements,
+        alias_lengths=glossary_lengths,
+    )
 
 
 def postprocess_segments(
@@ -2484,6 +2907,8 @@ def postprocess_segments(
     *,
     normalize_bible_references: bool,
     normalize_bible_reference_phrases: bool,
+    glossary_replacements: dict[tuple[str, ...], tuple[str, ...]],
+    glossary_lengths: tuple[int, ...],
 ) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
     normalized_segments: list[dict[str, float | str | list[dict[str, float | str]]]] = []
     for segment in segments:
@@ -2493,6 +2918,8 @@ def postprocess_segments(
                 build_bible_tokens_from_words(words),
                 normalize_bible_references=normalize_bible_references,
                 normalize_bible_reference_phrases=normalize_bible_reference_phrases,
+                glossary_replacements=glossary_replacements,
+                glossary_lengths=glossary_lengths,
             )
             normalized_segments.append(
                 {
@@ -2507,9 +2934,141 @@ def postprocess_segments(
             build_bible_tokens_from_text(text),
             normalize_bible_references=normalize_bible_references,
             normalize_bible_reference_phrases=normalize_bible_reference_phrases,
+            glossary_replacements=glossary_replacements,
+            glossary_lengths=glossary_lengths,
         )
         normalized_segments.append({**segment, "text": bible_tokens_to_text(normalized_tokens)})
     return normalized_segments
+
+
+def segment_text_key(segment: dict[str, float | str | list[dict[str, float | str]]]) -> str:
+    return normalized_phrase_key(str(segment.get("text", "")))
+
+
+def time_range_overlaps_speech(start: float, end: float, speech_intervals: list[tuple[float, float]] | None, *, margin: float = 0.0) -> bool:
+    if not speech_intervals:
+        return False
+    adjusted_start = start - margin
+    adjusted_end = end + margin
+    for speech_start, speech_end in speech_intervals:
+        if speech_end <= adjusted_start:
+            continue
+        if speech_start >= adjusted_end:
+            break
+        return True
+    return False
+
+
+def prune_segments_to_speech(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    speech_intervals: list[tuple[float, float]] | None,
+) -> tuple[list[dict[str, float | str | list[dict[str, float | str]]]], SpeechPruneStats]:
+    stats = SpeechPruneStats()
+    if not speech_intervals:
+        return segments, stats
+    pruned_segments: list[dict[str, float | str | list[dict[str, float | str]]]] = []
+    for segment in segments:
+        words = segment.get("words", []) or []
+        if not words:
+            pruned_segments.append(segment)
+            continue
+        keep_flags = [
+            time_range_overlaps_speech(
+                float(word["start"]),
+                float(word["end"]),
+                speech_intervals,
+                margin=SUBTITLE_SPEECH_PRUNE_MARGIN_SECONDS,
+            )
+            for word in words
+        ]
+        if not any(keep_flags):
+            stats.dropped_segments += 1
+            stats.dropped_words += len(words)
+            continue
+        first_keep = next(index for index, keep in enumerate(keep_flags) if keep)
+        last_keep = len(keep_flags) - 1 - next(index for index, keep in enumerate(reversed(keep_flags)) if keep)
+        kept_words = words[first_keep:last_keep + 1]
+        dropped_word_count = len(words) - len(kept_words)
+        if dropped_word_count:
+            stats.trimmed_segments += 1
+            stats.dropped_words += dropped_word_count
+        normalized_tokens = build_bible_tokens_from_words(kept_words)
+        pruned_segments.append(
+            {
+                **segment,
+                "start": float(kept_words[0]["start"]),
+                "end": float(kept_words[-1]["end"]),
+                "words": kept_words,
+                "text": bible_tokens_to_text(normalized_tokens),
+            }
+        )
+    return pruned_segments, stats
+
+
+def apply_suppression_rules_to_segments(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    rules: SuppressionRules,
+) -> tuple[list[dict[str, float | str | list[dict[str, float | str]]]], SuppressionStats]:
+    stats = SuppressionStats()
+    if not segments:
+        return segments, stats
+    start_keys = {normalized_phrase_key(phrase) for phrase in rules.start}
+    end_keys = {normalized_phrase_key(phrase) for phrase in rules.end}
+    any_keys = {normalized_phrase_key(phrase) for phrase in rules.any}
+    filtered = list(segments)
+    while filtered and segment_text_key(filtered[0]) in start_keys:
+        filtered.pop(0)
+        stats.leading_segments += 1
+    while filtered and segment_text_key(filtered[-1]) in end_keys:
+        filtered.pop()
+        stats.trailing_segments += 1
+    if any_keys:
+        kept: list[dict[str, float | str | list[dict[str, float | str]]]] = []
+        for segment in filtered:
+            if segment_text_key(segment) in any_keys:
+                stats.anywhere_segments += 1
+                continue
+            kept.append(segment)
+        filtered = kept
+    return filtered, stats
+
+
+def count_spoken_bible_reference_phrase_candidates(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+) -> int:
+    count = 0
+    for segment in segments:
+        words = segment.get("words", []) or []
+        tokens = build_bible_tokens_from_words(words) if words else build_bible_tokens_from_text(str(segment.get("text", "")))
+        index = 0
+        while index < len(tokens):
+            book_match = find_bible_book_match(tokens, index)
+            if not book_match:
+                index += 1
+                continue
+            book, book_length = book_match
+            phrase_match = parse_bible_reference_phrase_after_book(tokens, index + book_length, book)
+            if phrase_match:
+                count += 1
+                index += book_length + phrase_match[0]
+                continue
+            index += book_length
+    return count
+
+
+def count_text_only_outside_speech_segments(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    speech_intervals: list[tuple[float, float]] | None,
+) -> int:
+    if not speech_intervals:
+        return 0
+    count = 0
+    for segment in segments:
+        if segment.get("words"):
+            continue
+        if not time_range_overlaps_speech(float(segment["start"]), float(segment["end"]), speech_intervals):
+            count += 1
+    return count
 
 
 def segments_to_plain_text(segments: list[dict[str, float | str | list[dict[str, float | str]]]]) -> str:
@@ -2556,6 +3115,23 @@ def load_env_targets(env: dict[str, str]) -> list[Path]:
             return [Path(str(value)).expanduser() for value in values if str(value).strip()]
     legacy_target = env.get("WHISPER_TARGET", "")
     return [Path(legacy_target).expanduser()] if legacy_target else []
+
+
+def load_env_paths(env: dict[str, str], key: str) -> list[Path]:
+    encoded_value = env.get(key, "")
+    if not encoded_value:
+        return []
+    try:
+        values = json.loads(encoded_value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(values, list):
+        return []
+    return [Path(str(value)).expanduser() for value in values if str(value).strip()]
+
+
+def resolve_subtitle_style_profile(name: str) -> SubtitleStyleProfile:
+    return SUBTITLE_STYLE_PRESETS.get(name, SUBTITLE_STYLE_PRESETS["balanced"])
 
 
 def probe_duration_seconds(media_path: Path) -> float | None:
@@ -2886,6 +3462,7 @@ def write_ass(
     karaoke: bool,
     *,
     speech_intervals: list[tuple[float, float]] | None = None,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
 ) -> None:
     with path.open("w", encoding="utf-8") as handle:
         handle.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n")
@@ -2894,7 +3471,7 @@ def write_ass(
         handle.write(f"Style: Default,{font_name},30,&H00FFFFFF,&H0000FFFF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1\n\n")
         handle.write("[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
         for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals):
+            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
                 has_word_timings = bool(line_groups and isinstance(line_groups[0][0], dict))
                 if karaoke and has_word_timings:
                     rendered_lines = []
@@ -2913,11 +3490,17 @@ def write_ass(
                     handle.write(f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},Default,,0,0,0,,{text}\n")
 
 
-def write_srt(path: Path, segments, *, speech_intervals: list[tuple[float, float]] | None = None) -> None:
+def write_srt(
+    path: Path,
+    segments,
+    *,
+    speech_intervals: list[tuple[float, float]] | None = None,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+) -> None:
     index = 1
     with path.open("w", encoding="utf-8") as handle:
         for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals):
+            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
                 lines = [" ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line]
                 if not lines:
                     continue
@@ -2932,6 +3515,87 @@ def write_txt(path: Path, text: str) -> None:
     with path.open("w", encoding="utf-8") as handle:
         handle.write(text.rstrip())
         handle.write("\n")
+
+
+def count_high_cps_cues(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    *,
+    speech_intervals: list[tuple[float, float]] | None,
+    style: SubtitleStyleProfile,
+) -> tuple[int, float]:
+    count = 0
+    max_cps = 0.0
+    for segment in segments:
+        for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
+            text = " ".join(
+                " ".join(subtitle_item_text(item) for item in line).strip()
+                for line in line_groups
+                if line
+            ).strip()
+            if not text:
+                continue
+            cps = len(text) / max(0.01, end - start)
+            if cps > style.max_chars_per_second:
+                count += 1
+                max_cps = max(max_cps, cps)
+    return count, max_cps
+
+
+def render_path_list(paths: tuple[Path, ...], *, limit: int = 3) -> str:
+    if not paths:
+        return ""
+    names = [path.name for path in paths[:limit]]
+    if len(paths) > limit:
+        names.append(f"+{len(paths) - limit} more")
+    return ", ".join(names)
+
+
+def print_postprocess_review(
+    media_path: Path,
+    *,
+    glossary_sources: tuple[Path, ...],
+    suppression_sources: tuple[Path, ...],
+    speech_prune_stats: SpeechPruneStats,
+    suppression_stats: SuppressionStats,
+    spoken_phrase_candidates: int,
+    text_only_outside_speech_segments: int,
+    high_cps_count: int,
+    high_cps_max: float,
+    bible_reference_phrases_enabled: bool,
+    style: SubtitleStyleProfile,
+) -> None:
+    notes: list[str] = []
+    if glossary_sources:
+        notes.append(f"Applied glossary files: {render_path_list(glossary_sources)}.")
+    if suppression_sources:
+        notes.append(f"Applied suppression files: {render_path_list(suppression_sources)}.")
+    if speech_prune_stats.dropped_segments or speech_prune_stats.trimmed_segments:
+        notes.append(
+            "Speech-aware cleanup trimmed "
+            f"{speech_prune_stats.trimmed_segments} segment(s), dropped {speech_prune_stats.dropped_segments} segment(s), "
+            f"and removed {speech_prune_stats.dropped_words} edge word(s)."
+        )
+    suppressed_total = suppression_stats.leading_segments + suppression_stats.trailing_segments + suppression_stats.anywhere_segments
+    if suppressed_total:
+        notes.append(f"Suppression removed {suppressed_total} segment(s) from the transcript cleanup pass.")
+    if not bible_reference_phrases_enabled and spoken_phrase_candidates:
+        notes.append(
+            f"Detected {spoken_phrase_candidates} spoken Bible-reference phrase(s) still in text; rerun with --bible-reference-phrases if you want them normalized."
+        )
+    if text_only_outside_speech_segments:
+        notes.append(
+            f"Left {text_only_outside_speech_segments} text-only segment(s) outside detected speech untouched because the backend did not provide word timings."
+        )
+    if high_cps_count:
+        notes.append(
+            f"{high_cps_count} subtitle cue(s) still exceed the {style.name} target of {style.max_chars_per_second:.1f} chars/sec; max observed was {high_cps_max:.1f}."
+        )
+    print(f"🔎 Postprocessing review: {media_path.name}", file=sys.stderr)
+    if not notes:
+        print("   Nothing suspicious stood out.", file=sys.stderr)
+        return
+    for note in notes:
+        print(f"   - {note}", file=sys.stderr)
 
 
 def normalize_faster_segments(segments_iter, report_progress):
@@ -3005,6 +3669,16 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     spinner_state = {"stopped": False}
     mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
     mlx_output_format = env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto")
+    subtitle_style = resolve_subtitle_style_profile(env.get("WHISPER_SUBTITLE_STYLE", "balanced"))
+    review_postprocessing = env.get("WHISPER_REVIEW_POSTPROCESSING", "0") == "1"
+    glossary_replacements, glossary_lengths, glossary_sources = load_effective_glossary(
+        media_path,
+        load_env_paths(env, "WHISPER_GLOSSARY_FILES"),
+    )
+    suppression_rules, suppression_sources = load_effective_suppression_rules(
+        media_path,
+        load_env_paths(env, "WHISPER_SUPPRESSION_FILES"),
+    )
     output_txt = (
         backend == "mlx"
         and mlx_output_format == "text"
@@ -3063,10 +3737,13 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
         segments,
         normalize_bible_references=bible_reference_normalization_enabled,
         normalize_bible_reference_phrases=bible_reference_phrase_normalization_enabled,
+        glossary_replacements=glossary_replacements,
+        glossary_lengths=glossary_lengths,
     )
     subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
+    speech_trim_enabled = env.get("WHISPER_SPEECH_TRIM", "1") == "1"
     speech_intervals: list[tuple[float, float]] | None = None
-    if not output_txt and env.get("WHISPER_SPEECH_TRIM", "1") == "1":
+    if speech_trim_enabled:
         speech_trim_message = "Analyzing speech onset" if compact_status else f"Analyzing speech onset on {media_path.name}"
         speech_trim_spinner = Spinner(speech_trim_message, enabled=True, delay_seconds=1.2)
         speech_trim_spinner.start()
@@ -3074,9 +3751,32 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             speech_intervals = detect_speech_intervals(media_path)
         finally:
             speech_trim_spinner.stop()
+    segments, speech_prune_stats = prune_segments_to_speech(segments, speech_intervals if speech_trim_enabled else None)
+    segments, suppression_stats = apply_suppression_rules_to_segments(segments, suppression_rules)
+    spoken_phrase_candidates = (
+        count_spoken_bible_reference_phrase_candidates(segments)
+        if review_postprocessing and not bible_reference_phrase_normalization_enabled
+        else 0
+    )
+    text_only_outside_speech_segments = (
+        count_text_only_outside_speech_segments(segments, speech_intervals)
+        if review_postprocessing and speech_intervals
+        else 0
+    )
+    high_cps_count = 0
+    high_cps_max = 0.0
+    if review_postprocessing and not output_txt:
+        high_cps_count, high_cps_max = count_high_cps_cues(
+            segments,
+            speech_intervals=speech_intervals,
+            style=subtitle_style,
+        )
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
-        write_txt(text_path, segments_to_plain_text(segments) or mlx_result.get("text", ""))
+        plain_text = segments_to_plain_text(segments)
+        if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources:
+            plain_text = normalized_text(str(mlx_result.get("text", "")))
+        write_txt(text_path, plain_text)
         print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
@@ -3087,9 +3787,10 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
                 env["WHISPER_FONT"],
                 env["WHISPER_KARAOKE"] == "1",
                 speech_intervals=speech_intervals,
+                style=subtitle_style,
             )
         else:
-            write_srt(subtitle_path, segments, speech_intervals=speech_intervals)
+            write_srt(subtitle_path, segments, speech_intervals=speech_intervals, style=subtitle_style)
         print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
         apply_subtitle_outputs(
             media_path,
@@ -3098,6 +3799,20 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             env,
             compact_status=compact_status,
             subtitle_language=subtitle_language,
+        )
+    if review_postprocessing:
+        print_postprocess_review(
+            media_path,
+            glossary_sources=glossary_sources,
+            suppression_sources=suppression_sources,
+            speech_prune_stats=speech_prune_stats,
+            suppression_stats=suppression_stats,
+            spoken_phrase_candidates=spoken_phrase_candidates,
+            text_only_outside_speech_segments=text_only_outside_speech_segments,
+            high_cps_count=high_cps_count,
+            high_cps_max=high_cps_max,
+            bible_reference_phrases_enabled=bible_reference_phrase_normalization_enabled,
+            style=subtitle_style,
         )
     elapsed = time.time() - started_at
     return f"Done in {format_elapsed_precise(elapsed)}"
@@ -3326,6 +4041,10 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--no-bible-reference-normalization{RESET}")
     say(f"  {MAGENTA}--bible-reference-phrases{RESET}")
     say(f"  {MAGENTA}--no-speech-trim{RESET}")
+    say(f"  {MAGENTA}--subtitle-style=strict{RESET}")
+    say(f"  {MAGENTA}--glossary=/path/to/whisper-glossary.txt{RESET}")
+    say(f"  {MAGENTA}--suppress-phrases=/path/to/whisper-suppress.txt{RESET}")
+    say(f"  {MAGENTA}--review-postprocessing{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
