@@ -2906,6 +2906,7 @@ def outer_main() -> int:
     install_needed = (
         not plan.venv_python.exists()
         or "tqdm" not in plan.installed_packages
+        or "webrtcvad" not in plan.installed_packages
         or (selected_backend_required and plan.selected_backend not in plan.installed_backends)
         or args.update
     )
