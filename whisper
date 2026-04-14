@@ -973,6 +973,71 @@ def build_parser() -> argparse.ArgumentParser:
 
 def print_help() -> None:
     name = Path(sys.argv[0]).name
+    option_width = 40
+
+    def format_help_rows(rows: tuple[tuple[str, str], ...]) -> str:
+        lines: list[str] = []
+        for option, description in rows:
+            if len(option) <= option_width:
+                lines.append(f"  {option:<{option_width}} {description}")
+            else:
+                lines.append(f"  {option}")
+                lines.append(f"  {'':<{option_width}} {description}")
+        return "\n".join(lines)
+
+    quick_examples = format_help_rows(
+        (
+            (f"{name} clip.mp4", "Transcribe one file and write subtitles next to it."),
+            (f"{name} folder --recursive --jobs=4", "Walk a folder and process discovered media in parallel."),
+            (f"{name} video.mp4 --embed", "Transcribe, then mux a soft subtitle track into the output video."),
+            (f"{name} video.mp4 -f edited.srt -i", "Reuse an existing subtitle file and replace the source video after muxing."),
+        )
+    )
+    transcription_rows = format_help_rows(
+        (
+            ("-l, --lang=CODE", "Language code; default is auto-detect."),
+            ("--model=NAME", "Model name; default is chosen from your hardware."),
+            ("--backend=auto|mlx|faster-whisper", "Backend choice; auto prefers MLX on Apple Silicon."),
+            ("--device=auto|cpu|cuda", "Processing device selection."),
+            ("--compute-type=auto|int8|float16|int8_float16", "Compute precision selection."),
+            ("--jobs=N", "Number of files to process in parallel."),
+            ("--recursive", "Recurse into folders when the target is a directory."),
+        )
+    )
+    output_rows = format_help_rows(
+        (
+            ("--outdir=PATH", "Write outputs to PATH instead of next to the source."),
+            ("--ass", "Write ASS subtitles instead of SRT."),
+            ("--karaoke", "Add karaoke timing to ASS output."),
+            ("-e, --embed", "Mux a soft subtitle track after transcription."),
+            ("-f, --embed-file[=PATH]", "Embed an existing .srt/.ass file; bare -f auto-detects a sidecar match."),
+            ("-i, --in-place", "Replace the source video after a successful embed."),
+            ("--burn", "Render subtitles into a new video file."),
+            ("--burn-vcodec=CODEC", "Codec override for --burn; auto lets ffmpeg choose."),
+            ("-F, --font=NAME", "Font family for ASS and karaoke subtitle output."),
+        )
+    )
+    runtime_rows = format_help_rows(
+        (
+            ("--doctor", "Show detected hardware and runtime choices."),
+            ("--setup-only", "Prepare the managed runtime and stop."),
+            ("--update", "Refresh packages in the managed runtime."),
+            ("--reinstall", "Rebuild the managed runtime from scratch."),
+            ("--clean", "Remove the managed runtime."),
+            ("--yes", "Skip confirmation prompts."),
+            ("--state-dir=PATH", "Store the managed runtime under PATH."),
+            ("--python=/path/to/python", "Interpreter to use when building the managed runtime."),
+            ("--stable-mlx-python", "Compatibility alias for validated Apple Silicon MLX Python selection."),
+            ("-h, --help", "Show this help text."),
+        )
+    )
+    mlx_rows = format_help_rows(
+        (
+            ("--mlx-word-timestamps=auto|on|off", "Compare wrapper vs direct MLX word timestamps."),
+            ("--mlx-output-format=auto|subtitle|text", "Compare subtitle output vs text-only output."),
+            ("--mlx-model-default=wrapper|official", "Use wrapper defaults or the official tiny default when --model is omitted."),
+        )
+    )
     say(
         f"""{name} {DIM}— self-bootstrapping subtitle + transcription CLI{RESET}
 
@@ -983,49 +1048,28 @@ def print_help() -> None:
   {name} --doctor
   {name} --setup-only
 
-{BOLD}Common options{RESET}
-  -l, --lang=CODE
-  --model=NAME
-  --backend=auto|mlx|faster-whisper
-  --device=auto|cpu|cuda
-  --compute-type=auto|int8|float16|int8_float16
-  --jobs=N
-  --outdir=PATH
-  --python=/path/to/python
-  --mlx-word-timestamps=auto|on|off
-  --mlx-output-format=auto|subtitle|text
-  --mlx-model-default=wrapper|official
-  -e, --embed
-  -f, --embed-file[=PATH]
-  -i, --in-place
-  --recursive
-  --burn
-  --burn-vcodec=CODEC
-  -F, --font=NAME
+{BOLD}Quick examples{RESET}
+{quick_examples}
 
-{BOLD}Runtime management{RESET}
-  First run shows an install summary and asks before downloading packages.
+{BOLD}Transcription and selection{RESET}
+{transcription_rows}
+
+{BOLD}Output and subtitle modes{RESET}
+{output_rows}
+
+{BOLD}Setup and maintenance{RESET}
+{runtime_rows}
+
+{BOLD}MLX diagnostics{RESET}
+{mlx_rows}
+  These only affect MLX and are ignored with --backend=faster-whisper.
+
+{BOLD}Notes{RESET}
+  First run shows an install summary before downloading packages.
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
-  --setup-only
-  --update
-  --reinstall
-  --clean
-  --doctor
-  --yes
-  --state-dir=PATH
-  --python=/path/to/python   {DIM}(manual managed-runtime interpreter override){RESET}
-  --stable-mlx-python   {DIM}(compat alias; MLX now auto-prefers a validated Python on Apple Silicon){RESET}
-  --mlx-word-timestamps {DIM}(MLX diagnostic control; auto keeps current wrapper behavior){RESET}
-  --mlx-output-format   {DIM}(MLX diagnostic control; text isolates subtitle-writing overhead){RESET}
-  --mlx-model-default   {DIM}(MLX diagnostic control; official uses tiny when --model is omitted){RESET}
-  -e, --embed          {DIM}(muxes a soft subtitle track after transcription){RESET}
-  -f, --embed-file     {DIM}(uses an existing .srt/.ass instead of retranscribing, then embeds it){RESET}
-  -i, --in-place       {DIM}(replaces the source video after successful subtitle muxing){RESET}
-  --burn               {DIM}(renders subtitles into a new video file){RESET}
-  --burn-vcodec        {DIM}(video codec override for --burn; auto lets ffmpeg choose){RESET}
-  -F, --font           {DIM}(font family name for ASS and karaoke subtitle output){RESET}
-  -h, --help
+  ffmpeg is required for --embed, --embed-file, and --burn.
+  --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
     )
 
