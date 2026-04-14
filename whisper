@@ -2223,6 +2223,16 @@ class EstimatedProgressReporter:
         suffix = f" for {self.media_path.name}" if self.show_media_name else ""
         print(f"⏱ Media length unavailable{suffix}; estimated % progress and ETA unavailable.", file=sys.stderr)
 
+    def render_message(self, message: str) -> None:
+        if self.inline:
+            width = terminal_display_width(message)
+            padding = max(0, self.last_render_width - width)
+            self.last_render_width = width
+            self.inline_rendered = True
+            print(f"\r{message}{' ' * padding}", end="", file=sys.stderr, flush=True)
+            return
+        print(message, file=sys.stderr)
+
     def estimate_eta_seconds(self, current_end: float, now: float) -> float | None:
         if self.duration is None:
             return None
@@ -2253,18 +2263,13 @@ class EstimatedProgressReporter:
         self.last_percent = percent
         self.last_reported_at = now
         if self.show_media_name:
-            message = f"⏳ {self.media_path.name} [{self.backend}] ~{percent}%"
+            message = f"⏳ {self.media_path.name} [{self.backend}] {percent}%"
         else:
-            message = f"⏳ ~{percent}%"
+            message = f"⏳ {percent}%"
         eta_seconds = self.estimate_eta_seconds(current_end, now)
         if eta_seconds is not None and percent < 100:
             message += f" | ETA {format_elapsed_summary(eta_seconds)}"
-        if self.inline:
-            self.last_render_width = terminal_display_width(message)
-            self.inline_rendered = True
-            print(f"\r{message}", end="", file=sys.stderr, flush=True)
-        else:
-            print(message, file=sys.stderr)
+        self.render_message(message)
 
     def finish(self) -> None:
         if self.duration is None:
@@ -2272,15 +2277,10 @@ class EstimatedProgressReporter:
         if self.last_percent < 100:
             self.last_percent = 100
             if self.show_media_name:
-                message = f"⏳ {self.media_path.name} [{self.backend}] ~100%"
+                message = f"⏳ {self.media_path.name} [{self.backend}] 100% | Finalizing output..."
             else:
-                message = "⏳ ~100%"
-            if self.inline:
-                self.last_render_width = terminal_display_width(message)
-                self.inline_rendered = True
-                print(f"\r{message}", end="", file=sys.stderr, flush=True)
-            else:
-                print(message, file=sys.stderr)
+                message = "⏳ 100% | Finalizing output..."
+            self.render_message(message)
 
     def before_stage_message(self) -> None:
         if not self.inline_rendered:
@@ -2653,7 +2653,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             subtitle_language=subtitle_language,
         )
     elapsed = time.time() - started_at
-    return f"{media_path.name} [{backend}] ({elapsed:.1f}s)"
+    return f"Done in {format_elapsed_precise(elapsed)}"
 
 
 def process_existing_subtitle_file(media_path: Path, env: dict[str, str], *, compact_status: bool) -> str:
@@ -2677,7 +2677,7 @@ def process_existing_subtitle_file(media_path: Path, env: dict[str, str], *, com
         subtitle_language=resolve_subtitle_language(media_path, env["WHISPER_LANG"]),
     )
     elapsed = time.time() - started_at
-    return f"{media_path.name} [embed] ({elapsed:.1f}s)"
+    return f"Done in {format_elapsed_precise(elapsed)}"
 
 
 def summarize_backend_error(backend: str, exc: Exception, env: dict[str, str]) -> None:
@@ -2698,6 +2698,25 @@ def format_elapsed_summary(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
+
+
+def format_elapsed_precise(seconds: float) -> str:
+    total_seconds = max(0.0, seconds)
+    hours = int(total_seconds // 3600)
+    remainder = total_seconds - (hours * 3600)
+    minutes = int(remainder // 60)
+    secs = remainder - (minutes * 60)
+    if secs >= 59.95:
+        secs = 0.0
+        minutes += 1
+    if minutes >= 60:
+        minutes = 0
+        hours += 1
+    if hours:
+        return f"{hours}h {minutes}m {secs:.1f}s"
+    if minutes:
+        return f"{minutes}m {secs:.1f}s"
+    return f"{secs:.1f}s"
 
 
 def file_progress_bar(total: int):
