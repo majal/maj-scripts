@@ -74,6 +74,184 @@ SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
 SUBTITLE_HONORIFIC_ABBREVIATIONS = frozenset({"dr.", "mr.", "mrs.", "ms.", "mx.", "prof.", "sr.", "jr.", "st."})
 SUBTITLE_INITIAL_RE = re.compile(r"^[A-Za-z]\.$")
 SUBTITLE_INITIALISM_RE = re.compile(r"^(?:[A-Za-z]\.){2,}$")
+BIBLE_MAX_VERSE_NUMBER = 176
+BIBLE_REFERENCE_TOKEN_RE = re.compile(r'^([\"\'“‘(\[{<]*)(.*?)([\"\'”’)\]}>.,;!?]*)$')
+BIBLE_COMBINED_REFERENCE_RE = re.compile(r"^(\d{1,3})[:.\-](\d{1,3})(?:[-–](\d{1,3}))?$")
+BIBLE_PARTIAL_REFERENCE_PREFIX_RE = re.compile(r"^(\d{1,3})[:.\-]$")
+BIBLE_VERSE_RANGE_RE = re.compile(r"^(\d{1,3})(?:[-–](\d{1,3}))?$")
+BIBLE_GLUE_DIGITS_RE = re.compile(r"^\d{2,6}$")
+BIBLE_BOOK_CHAPTER_COUNTS = {
+    "genesis": 50,
+    "exodus": 40,
+    "leviticus": 27,
+    "numbers": 36,
+    "deuteronomy": 34,
+    "joshua": 24,
+    "judges": 21,
+    "ruth": 4,
+    "1 samuel": 31,
+    "2 samuel": 24,
+    "1 kings": 22,
+    "2 kings": 25,
+    "1 chronicles": 29,
+    "2 chronicles": 36,
+    "ezra": 10,
+    "nehemiah": 13,
+    "esther": 10,
+    "job": 42,
+    "psalms": 150,
+    "proverbs": 31,
+    "ecclesiastes": 12,
+    "song of solomon": 8,
+    "isaiah": 66,
+    "jeremiah": 52,
+    "lamentations": 5,
+    "ezekiel": 48,
+    "daniel": 12,
+    "hosea": 14,
+    "joel": 3,
+    "amos": 9,
+    "obadiah": 1,
+    "jonah": 4,
+    "micah": 7,
+    "nahum": 3,
+    "habakkuk": 3,
+    "zephaniah": 3,
+    "haggai": 2,
+    "zechariah": 14,
+    "malachi": 4,
+    "matthew": 28,
+    "mark": 16,
+    "luke": 24,
+    "john": 21,
+    "acts": 28,
+    "romans": 16,
+    "1 corinthians": 16,
+    "2 corinthians": 13,
+    "galatians": 6,
+    "ephesians": 6,
+    "philippians": 4,
+    "colossians": 4,
+    "1 thessalonians": 5,
+    "2 thessalonians": 3,
+    "1 timothy": 6,
+    "2 timothy": 4,
+    "titus": 3,
+    "philemon": 1,
+    "hebrews": 13,
+    "james": 5,
+    "1 peter": 5,
+    "2 peter": 3,
+    "1 john": 5,
+    "2 john": 1,
+    "3 john": 1,
+    "jude": 1,
+    "revelation": 22,
+}
+BIBLE_BOOK_BASE_ALIASES = {
+    "genesis": (("genesis",), ("gen",), ("ge",), ("gn",)),
+    "exodus": (("exodus",), ("exod",), ("exo",), ("ex",)),
+    "leviticus": (("leviticus",), ("lev",), ("lv",)),
+    "numbers": (("numbers",), ("number",), ("num",), ("nums",), ("nm",)),
+    "deuteronomy": (("deuteronomy",), ("deut",), ("dt",)),
+    "joshua": (("joshua",), ("josh",), ("jos",)),
+    "judges": (("judges",), ("judge",), ("judg",), ("jdg",), ("jud",)),
+    "ruth": (("ruth",), ("rth",), ("ru",)),
+    "ezra": (("ezra",), ("ezr",)),
+    "nehemiah": (("nehemiah",), ("neh",), ("ne",)),
+    "esther": (("esther",), ("esth",), ("est",)),
+    "job": (("job",),),
+    "psalms": (("psalm",), ("psalms",), ("ps",), ("psa",), ("pss",)),
+    "proverbs": (("proverbs",), ("proverb",), ("prov",), ("pr",)),
+    "ecclesiastes": (("ecclesiastes",), ("eccles",), ("eccl",), ("ecc",)),
+    "song of solomon": (
+        ("song", "of", "solomon"),
+        ("song", "of", "songs"),
+        ("song", "solomon"),
+        ("canticles",),
+    ),
+    "isaiah": (("isaiah",), ("isa",),),
+    "jeremiah": (("jeremiah",), ("jer",),),
+    "lamentations": (("lamentations",), ("lamentation",), ("lam",)),
+    "ezekiel": (("ezekiel",), ("ezek",), ("eze",)),
+    "daniel": (("daniel",), ("dan",), ("dn",)),
+    "hosea": (("hosea",), ("hos",), ("ho",)),
+    "joel": (("joel",), ("jl",)),
+    "amos": (("amos",), ("am",)),
+    "obadiah": (("obadiah",), ("obad",), ("ob",)),
+    "jonah": (("jonah",), ("jon",), ("jh",)),
+    "micah": (("micah",), ("mic",), ("mc",)),
+    "nahum": (("nahum",), ("nah",), ("na",)),
+    "habakkuk": (("habakkuk",), ("hab",), ("hb",)),
+    "zephaniah": (("zephaniah",), ("zeph",), ("zep",)),
+    "haggai": (("haggai",), ("hag",), ("hg",)),
+    "zechariah": (("zechariah",), ("zech",), ("zec",)),
+    "malachi": (("malachi",), ("mal",), ("ml",)),
+    "matthew": (("matthew",), ("matt",), ("mt",)),
+    "mark": (("mark",), ("mrk",), ("mk",)),
+    "luke": (("luke",), ("luk",), ("lk",)),
+    "john": (("john",), ("jhn",), ("jn",)),
+    "acts": (("acts",), ("act",), ("ac",)),
+    "romans": (("romans",), ("roman",), ("rom",), ("ro",)),
+    "galatians": (("galatians",), ("gal",),),
+    "ephesians": (("ephesians",), ("eph",),),
+    "philippians": (("philippians",), ("phil",), ("php",)),
+    "colossians": (("colossians",), ("col",),),
+    "titus": (("titus",), ("tit",),),
+    "philemon": (("philemon",), ("philem",), ("phm",)),
+    "hebrews": (("hebrews",), ("heb",),),
+    "james": (("james",), ("jas",), ("jam",)),
+    "jude": (("jude",), ("jud",),),
+    "revelation": (("revelation",), ("revelations",), ("rev",), ("re",), ("apocalypse",)),
+}
+BIBLE_NUMBERED_BOOK_ALIASES = {
+    "samuel": {
+        1: "1 samuel",
+        2: "2 samuel",
+        "aliases": (("samuel",), ("sam",)),
+    },
+    "kings": {
+        1: "1 kings",
+        2: "2 kings",
+        "aliases": (("kings",), ("king",), ("kgs",), ("kgs",), ("ki",)),
+    },
+    "chronicles": {
+        1: "1 chronicles",
+        2: "2 chronicles",
+        "aliases": (("chronicles",), ("chronicle",), ("chron",), ("chr",)),
+    },
+    "corinthians": {
+        1: "1 corinthians",
+        2: "2 corinthians",
+        "aliases": (("corinthians",), ("corinthian",), ("cor",)),
+    },
+    "thessalonians": {
+        1: "1 thessalonians",
+        2: "2 thessalonians",
+        "aliases": (("thessalonians",), ("thessalonian",), ("thess",)),
+    },
+    "timothy": {
+        1: "1 timothy",
+        2: "2 timothy",
+        "aliases": (("timothy",), ("tim",)),
+    },
+    "peter": {
+        1: "1 peter",
+        2: "2 peter",
+        "aliases": (("peter",), ("pet",)),
+    },
+    "john_letter": {
+        1: "1 john",
+        2: "2 john",
+        3: "3 john",
+        "aliases": (("john",), ("jn",),),
+    },
+}
+BIBLE_NUMBER_PREFIX_ALIASES = {
+    1: (("1",), ("1st",), ("first",), ("i",)),
+    2: (("2",), ("2nd",), ("second",), ("ii",)),
+    3: (("3",), ("3rd",), ("third",), ("iii",)),
+}
 RUNTIME_WARNINGS_SHOWN: set[str] = set()
 LANGUAGE_LABELS = {
     "af": ("afr", "Afrikaans"),
@@ -189,6 +367,40 @@ LANGUAGE_ALIASES = {
     "tagalog": "tl",
     "tibetan": "bo",
 }
+
+
+@dataclass
+class BibleToken:
+    leading: str
+    core: str
+    trailing: str
+    start: float | None = None
+    end: float | None = None
+
+    @property
+    def text(self) -> str:
+        return f"{self.leading}{self.core}{self.trailing}"
+
+
+def build_bible_book_alias_lookup() -> tuple[dict[tuple[str, ...], str], tuple[int, ...]]:
+    alias_lookup: dict[tuple[str, ...], str] = {}
+    for canonical, aliases in BIBLE_BOOK_BASE_ALIASES.items():
+        for alias in aliases:
+            alias_lookup[alias] = canonical
+    for book_info in BIBLE_NUMBERED_BOOK_ALIASES.values():
+        base_aliases = book_info["aliases"]
+        for number, prefixes in BIBLE_NUMBER_PREFIX_ALIASES.items():
+            canonical = book_info.get(number)
+            if not canonical:
+                continue
+            for prefix in prefixes:
+                for base_alias in base_aliases:
+                    alias_lookup[prefix + base_alias] = canonical
+    alias_lengths = tuple(sorted({len(alias) for alias in alias_lookup}, reverse=True))
+    return alias_lookup, alias_lengths
+
+
+BIBLE_BOOK_ALIAS_LOOKUP, BIBLE_BOOK_ALIAS_LENGTHS = build_bible_book_alias_lookup()
 
 
 def use_color() -> bool:
@@ -1001,6 +1213,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compute-type", default="auto")
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--outdir", default="")
+    parser.add_argument(
+        "--no-bible-reference-normalization",
+        dest="bible_reference_normalization",
+        action="store_false",
+        default=True,
+    )
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--python", default="")
@@ -1050,6 +1268,7 @@ def print_help() -> None:
             ("--device=auto|cpu|cuda", "Processing device selection."),
             ("--compute-type=auto|int8|float16|int8_float16", "Compute precision selection."),
             ("--jobs=N", "Number of files to process in parallel."),
+            ("--no-bible-reference-normalization", "Skip the default Bible reference cleanup pass."),
             ("--no-speech-trim", "Skip the default speech-onset VAD pass for subtitle cue starts."),
             ("--recursive", "Recurse into folders when the target is a directory."),
         )
@@ -1118,6 +1337,7 @@ def print_help() -> None:
   First run shows an install summary before downloading packages.
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
+  Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
   Subtitle cue starts are speech-trimmed by default; use --no-speech-trim to disable.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
@@ -1230,6 +1450,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_LANG": args.lang,
         "WHISPER_JOBS": str(args.jobs),
         "WHISPER_OUTDIR": args.outdir,
+        "WHISPER_BIBLE_REFERENCE_NORMALIZATION": "1" if args.bible_reference_normalization else "0",
         "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
         "WHISPER_ASS": "1" if args.ass else "0",
@@ -1604,6 +1825,204 @@ def format_ass_time(value: float) -> str:
 
 def normalized_text(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def split_bible_token(text: str) -> BibleToken:
+    match = BIBLE_REFERENCE_TOKEN_RE.match(text)
+    if not match:
+        return BibleToken("", text, "")
+    leading, core, trailing = match.groups()
+    return BibleToken(leading, core, trailing)
+
+
+def bible_alias_token(token: BibleToken) -> str:
+    return re.sub(r"[.]+$", "", token.core.lower())
+
+
+def build_bible_tokens_from_words(words: list[dict[str, float | str]]) -> list[BibleToken]:
+    tokens: list[BibleToken] = []
+    for word in words:
+        token = split_bible_token(normalized_text(str(word.get("word", ""))))
+        token.start = float(word["start"])
+        token.end = float(word["end"])
+        tokens.append(token)
+    return tokens
+
+
+def build_bible_tokens_from_text(text: str) -> list[BibleToken]:
+    return [split_bible_token(word) for word in normalized_text(text).split() if word]
+
+
+def bible_tokens_to_words(tokens: list[BibleToken]) -> list[dict[str, float | str]]:
+    words: list[dict[str, float | str]] = []
+    for token in tokens:
+        if token.start is None or token.end is None:
+            continue
+        words.append({"start": token.start, "end": token.end, "word": token.text})
+    return words
+
+
+def bible_tokens_to_text(tokens: list[BibleToken]) -> str:
+    return " ".join(token.text for token in tokens if token.text)
+
+
+def find_bible_book_match(tokens: list[BibleToken], index: int) -> tuple[str, int] | None:
+    for length in BIBLE_BOOK_ALIAS_LENGTHS:
+        if index + length > len(tokens):
+            continue
+        alias = tuple(bible_alias_token(token) for token in tokens[index:index + length])
+        canonical = BIBLE_BOOK_ALIAS_LOOKUP.get(alias)
+        if canonical:
+            return canonical, length
+    return None
+
+
+def is_valid_bible_reference(book: str, chapter: int, verse: int, verse_end: int | None = None) -> bool:
+    chapter_limit = BIBLE_BOOK_CHAPTER_COUNTS.get(book)
+    if chapter_limit is None or chapter < 1 or chapter > chapter_limit:
+        return False
+    if verse < 1 or verse > BIBLE_MAX_VERSE_NUMBER:
+        return False
+    if verse_end is not None and (verse_end < verse or verse_end > BIBLE_MAX_VERSE_NUMBER):
+        return False
+    return True
+
+
+def parse_bible_verse_range(text: str) -> tuple[int, int | None] | None:
+    match = BIBLE_VERSE_RANGE_RE.fullmatch(text)
+    if not match:
+        return None
+    verse = int(match.group(1))
+    verse_end = int(match.group(2)) if match.group(2) else None
+    return verse, verse_end
+
+
+def choose_glued_bible_reference(book: str, digits: str) -> tuple[int, int] | None:
+    if not BIBLE_GLUE_DIGITS_RE.fullmatch(digits):
+        return None
+    for verse_digits in (2, 1, 3):
+        if len(digits) <= verse_digits:
+            continue
+        chapter = int(digits[:-verse_digits])
+        verse = int(digits[-verse_digits:])
+        if is_valid_bible_reference(book, chapter, verse):
+            return chapter, verse
+    return None
+
+
+def make_bible_reference_token(
+    source_tokens: list[BibleToken],
+    start_index: int,
+    end_index: int,
+    normalized_reference: str,
+) -> BibleToken:
+    first = source_tokens[start_index]
+    last = source_tokens[end_index - 1]
+    return BibleToken(
+        first.leading,
+        normalized_reference,
+        last.trailing,
+        start=first.start,
+        end=last.end,
+    )
+
+
+def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book: str) -> tuple[int, BibleToken] | None:
+    if index >= len(tokens):
+        return None
+    first = tokens[index]
+    combined_match = BIBLE_COMBINED_REFERENCE_RE.fullmatch(first.core)
+    if combined_match:
+        chapter = int(combined_match.group(1))
+        verse = int(combined_match.group(2))
+        verse_end = int(combined_match.group(3)) if combined_match.group(3) else None
+        if is_valid_bible_reference(book, chapter, verse, verse_end):
+            reference = f"{chapter}:{verse}"
+            if verse_end is not None:
+                reference += f"-{verse_end}"
+            return 1, make_bible_reference_token(tokens, index, index + 1, reference)
+    if index + 1 >= len(tokens):
+        glued = choose_glued_bible_reference(book, first.core)
+        if glued is not None:
+            chapter, verse = glued
+            return 1, make_bible_reference_token(tokens, index, index + 1, f"{chapter}:{verse}")
+        return None
+    second = tokens[index + 1]
+    if first.core.isdigit():
+        verse_range = parse_bible_verse_range(second.core)
+        if verse_range is not None:
+            chapter = int(first.core)
+            verse, verse_end = verse_range
+            if is_valid_bible_reference(book, chapter, verse, verse_end):
+                reference = f"{chapter}:{verse}"
+                if verse_end is not None:
+                    reference += f"-{verse_end}"
+                return 2, make_bible_reference_token(tokens, index, index + 2, reference)
+        glued = choose_glued_bible_reference(book, first.core)
+        if glued is not None:
+            chapter, verse = glued
+            return 1, make_bible_reference_token(tokens, index, index + 1, f"{chapter}:{verse}")
+    partial_match = BIBLE_PARTIAL_REFERENCE_PREFIX_RE.fullmatch(first.core)
+    if partial_match:
+        verse_range = parse_bible_verse_range(second.core)
+        if verse_range is not None:
+            chapter = int(partial_match.group(1))
+            verse, verse_end = verse_range
+            if is_valid_bible_reference(book, chapter, verse, verse_end):
+                reference = f"{chapter}:{verse}"
+                if verse_end is not None:
+                    reference += f"-{verse_end}"
+                return 2, make_bible_reference_token(tokens, index, index + 2, reference)
+    return None
+
+
+def normalize_bible_reference_tokens(tokens: list[BibleToken]) -> list[BibleToken]:
+    normalized: list[BibleToken] = []
+    index = 0
+    while index < len(tokens):
+        book_match = find_bible_book_match(tokens, index)
+        if not book_match:
+            normalized.append(tokens[index])
+            index += 1
+            continue
+        book, book_length = book_match
+        normalized.extend(tokens[index:index + book_length])
+        reference_match = parse_bible_reference_after_book(tokens, index + book_length, book)
+        if reference_match:
+            consumed, normalized_reference = reference_match
+            normalized.append(normalized_reference)
+            index += book_length + consumed
+        else:
+            index += book_length
+    return normalized
+
+
+def normalize_bible_references_in_segments(segments: list[dict[str, float | str | list[dict[str, float | str]]]]) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
+    normalized_segments: list[dict[str, float | str | list[dict[str, float | str]]]] = []
+    for segment in segments:
+        words = segment.get("words", []) or []
+        if words:
+            normalized_tokens = normalize_bible_reference_tokens(build_bible_tokens_from_words(words))
+            normalized_segments.append(
+                {
+                    **segment,
+                    "words": bible_tokens_to_words(normalized_tokens),
+                    "text": bible_tokens_to_text(normalized_tokens),
+                }
+            )
+            continue
+        text = normalized_text(str(segment.get("text", "")))
+        normalized_tokens = normalize_bible_reference_tokens(build_bible_tokens_from_text(text))
+        normalized_segments.append({**segment, "text": bible_tokens_to_text(normalized_tokens)})
+    return normalized_segments
+
+
+def segments_to_plain_text(segments: list[dict[str, float | str | list[dict[str, float | str]]]]) -> str:
+    return " ".join(
+        normalized_text(str(segment.get("text", "")))
+        for segment in segments
+        if normalized_text(str(segment.get("text", "")))
+    )
 
 
 def discover_files(target: Path, recursive: bool) -> list[Path]:
@@ -2111,6 +2530,9 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     output_root.mkdir(parents=True, exist_ok=True)
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
+    bible_reference_normalization_enabled = env.get("WHISPER_BIBLE_REFERENCE_NORMALIZATION", "1") == "1"
+    if bible_reference_normalization_enabled:
+        segments = normalize_bible_references_in_segments(segments)
     subtitle_language = resolve_subtitle_language(media_path, env["WHISPER_LANG"], detected_language)
     speech_intervals: list[tuple[float, float]] | None = None
     if not output_txt and env.get("WHISPER_SPEECH_TRIM", "1") == "1":
@@ -2123,7 +2545,8 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             speech_trim_spinner.stop()
     if output_txt:
         text_path = output_root / f"{media_path.stem}.txt"
-        write_txt(text_path, mlx_result.get("text", ""))
+        normalized_plain_text = segments_to_plain_text(segments) if bible_reference_normalization_enabled else ""
+        write_txt(text_path, normalized_plain_text or mlx_result.get("text", ""))
         print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
@@ -2351,6 +2774,7 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--mlx-word-timestamps=off{RESET}")
     say(f"  {MAGENTA}--mlx-output-format=text{RESET}")
     say(f"  {MAGENTA}--mlx-model-default=official{RESET}")
+    say(f"  {MAGENTA}--no-bible-reference-normalization{RESET}")
     say(f"  {MAGENTA}--no-speech-trim{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
