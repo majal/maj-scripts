@@ -79,7 +79,9 @@ BIBLE_REFERENCE_TOKEN_RE = re.compile(r'^([\"\'“‘(\[{<]*)(.*?)([\"\'”’)\
 BIBLE_COMBINED_REFERENCE_RE = re.compile(r"^(\d{1,3})[:.\-](\d{1,3})(?:[-–](\d{1,3}))?$")
 BIBLE_PARTIAL_REFERENCE_PREFIX_RE = re.compile(r"^(\d{1,3})[:.\-]$")
 BIBLE_VERSE_RANGE_RE = re.compile(r"^(\d{1,3})(?:[-–](\d{1,3}))?$")
+BIBLE_INLINE_VERSE_END_RE = re.compile(r"^[-–](\d{1,3})$")
 BIBLE_GLUE_DIGITS_RE = re.compile(r"^\d{2,6}$")
+BIBLE_RANGE_WORDS = frozenset({"to", "through", "thru"})
 BIBLE_BOOK_CHAPTER_COUNTS = {
     "genesis": 50,
     "exodus": 40,
@@ -1897,6 +1899,33 @@ def parse_bible_verse_range(text: str) -> tuple[int, int | None] | None:
     return verse, verse_end
 
 
+def parse_bible_range_suffix(
+    tokens: list[BibleToken],
+    index: int,
+    book: str,
+    chapter: int,
+    verse_start: int,
+) -> tuple[int, int | None]:
+    if index >= len(tokens):
+        return 0, None
+    token = tokens[index].core.lower()
+    inline_match = BIBLE_INLINE_VERSE_END_RE.fullmatch(tokens[index].core)
+    if inline_match:
+        verse_end = int(inline_match.group(1))
+        if verse_end >= verse_start and is_valid_bible_reference(book, chapter, verse_start, verse_end):
+            return 1, verse_end
+        return 0, None
+    if tokens[index].core.isdigit():
+        verse_end = int(tokens[index].core)
+        if verse_end >= verse_start and is_valid_bible_reference(book, chapter, verse_start, verse_end):
+            return 1, verse_end
+    if token in BIBLE_RANGE_WORDS and index + 1 < len(tokens) and tokens[index + 1].core.isdigit():
+        verse_end = int(tokens[index + 1].core)
+        if verse_end >= verse_start and is_valid_bible_reference(book, chapter, verse_start, verse_end):
+            return 2, verse_end
+    return 0, None
+
+
 def choose_glued_bible_reference(book: str, digits: str) -> tuple[int, int] | None:
     if not BIBLE_GLUE_DIGITS_RE.fullmatch(digits):
         return None
@@ -1937,15 +1966,24 @@ def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book:
         verse = int(combined_match.group(2))
         verse_end = int(combined_match.group(3)) if combined_match.group(3) else None
         if is_valid_bible_reference(book, chapter, verse, verse_end):
+            extra_consumed = 0
+            if verse_end is None:
+                extra_consumed, ranged_verse_end = parse_bible_range_suffix(tokens, index + 1, book, chapter, verse)
+                if ranged_verse_end is not None:
+                    verse_end = ranged_verse_end
             reference = f"{chapter}:{verse}"
             if verse_end is not None:
                 reference += f"-{verse_end}"
-            return 1, make_bible_reference_token(tokens, index, index + 1, reference)
+            return 1 + extra_consumed, make_bible_reference_token(tokens, index, index + 1 + extra_consumed, reference)
     if index + 1 >= len(tokens):
         glued = choose_glued_bible_reference(book, first.core)
         if glued is not None:
             chapter, verse = glued
-            return 1, make_bible_reference_token(tokens, index, index + 1, f"{chapter}:{verse}")
+            extra_consumed, verse_end = parse_bible_range_suffix(tokens, index + 1, book, chapter, verse)
+            reference = f"{chapter}:{verse}"
+            if verse_end is not None:
+                reference += f"-{verse_end}"
+            return 1 + extra_consumed, make_bible_reference_token(tokens, index, index + 1 + extra_consumed, reference)
         return None
     second = tokens[index + 1]
     if first.core.isdigit():
@@ -1954,14 +1992,23 @@ def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book:
             chapter = int(first.core)
             verse, verse_end = verse_range
             if is_valid_bible_reference(book, chapter, verse, verse_end):
+                extra_consumed = 0
+                if verse_end is None:
+                    extra_consumed, ranged_verse_end = parse_bible_range_suffix(tokens, index + 2, book, chapter, verse)
+                    if ranged_verse_end is not None:
+                        verse_end = ranged_verse_end
                 reference = f"{chapter}:{verse}"
                 if verse_end is not None:
                     reference += f"-{verse_end}"
-                return 2, make_bible_reference_token(tokens, index, index + 2, reference)
+                return 2 + extra_consumed, make_bible_reference_token(tokens, index, index + 2 + extra_consumed, reference)
         glued = choose_glued_bible_reference(book, first.core)
         if glued is not None:
             chapter, verse = glued
-            return 1, make_bible_reference_token(tokens, index, index + 1, f"{chapter}:{verse}")
+            extra_consumed, verse_end = parse_bible_range_suffix(tokens, index + 1, book, chapter, verse)
+            reference = f"{chapter}:{verse}"
+            if verse_end is not None:
+                reference += f"-{verse_end}"
+            return 1 + extra_consumed, make_bible_reference_token(tokens, index, index + 1 + extra_consumed, reference)
     partial_match = BIBLE_PARTIAL_REFERENCE_PREFIX_RE.fullmatch(first.core)
     if partial_match:
         verse_range = parse_bible_verse_range(second.core)
@@ -1969,10 +2016,15 @@ def parse_bible_reference_after_book(tokens: list[BibleToken], index: int, book:
             chapter = int(partial_match.group(1))
             verse, verse_end = verse_range
             if is_valid_bible_reference(book, chapter, verse, verse_end):
+                extra_consumed = 0
+                if verse_end is None:
+                    extra_consumed, ranged_verse_end = parse_bible_range_suffix(tokens, index + 2, book, chapter, verse)
+                    if ranged_verse_end is not None:
+                        verse_end = ranged_verse_end
                 reference = f"{chapter}:{verse}"
                 if verse_end is not None:
                     reference += f"-{verse_end}"
-                return 2, make_bible_reference_token(tokens, index, index + 2, reference)
+                return 2 + extra_consumed, make_bible_reference_token(tokens, index, index + 2 + extra_consumed, reference)
     return None
 
 
