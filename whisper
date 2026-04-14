@@ -1258,6 +1258,7 @@ def print_help() -> None:
         (
             (f"{name} clip.mp4", "Transcribe one file and write subtitles next to it."),
             (f"{name} *.mp4", "Transcribe multiple explicit files from shell expansion."),
+            (f"find . -type f -name '*.mp4' -exec {name} '{{}}' +", "Batch recursive matches into one whisper run instead of one run per file."),
             (f"{name} folder --recursive --jobs=4", "Walk a folder and process discovered media in parallel."),
             (f"{name} video.mp4 --embed", "Transcribe, then mux a soft subtitle track into the output video."),
             (f"{name} video.mp4 -f edited.srt -i", "Reuse an existing subtitle file and replace the source video after muxing."),
@@ -1341,6 +1342,7 @@ def print_help() -> None:
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
   Multiple explicit files are supported, so shell-expanded commands such as {name} *.mp4 work as expected.
+  For recursive shell batching, prefer find ... -exec {name} '{{}}' + or find ... -print0 | xargs -0 {name}; plain -exec ... \\; starts one whisper process per file.
   Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
   Subtitle cue starts are speech-trimmed by default; use --no-speech-trim to disable.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
