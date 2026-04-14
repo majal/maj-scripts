@@ -37,6 +37,7 @@ BACKEND_MODULES = {
 }
 MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
 MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
+SUBTITLE_MAX_LINE_WIDTH = 42
 LANGUAGE_LABELS = {
     "af": ("afr", "Afrikaans"),
     "am": ("amh", "Amharic"),
@@ -945,7 +946,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--clean", action="store_true")
-    parser.add_argument("--yes", action="store_true")
+    parser.add_argument("-y", "--yes", action="store_true")
     parser.add_argument("-l", "--lang", default="auto")
     parser.add_argument("--model", default="")
     parser.add_argument("--backend", default="auto")
@@ -1024,7 +1025,7 @@ def print_help() -> None:
             ("--update", "Refresh packages in the managed runtime."),
             ("--reinstall", "Rebuild the managed runtime from scratch."),
             ("--clean", "Remove the managed runtime."),
-            ("--yes", "Skip confirmation prompts."),
+            ("-y, --yes", "Skip confirmation prompts."),
             ("--state-dir=PATH", "Store the managed runtime under PATH."),
             ("--python=/path/to/python", "Interpreter to use when building the managed runtime."),
             ("--stable-mlx-python", "Compatibility alias for validated Apple Silicon MLX Python selection."),
@@ -1228,16 +1229,96 @@ def print_doctor(plan: RuntimePlan) -> None:
         say(f"  {label + ':':18} {value}")
 
 
-def split_sentences(text: str) -> list[str]:
-    return [part for part in re.split(r"(?<=[.!?])\s+", text) if part]
+def subtitle_item_text(item: str | dict[str, float | str]) -> str:
+    if isinstance(item, str):
+        return item
+    return normalized_text(str(item.get("word", "")))
 
 
-def split_lines(text: str) -> list[str]:
-    words = text.split()
-    if len(words) <= 8:
-        return [text]
-    midpoint = len(words) // 2
-    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+def subtitle_items_width(items: list[str] | list[dict[str, float | str]]) -> int:
+    if not items:
+        return 0
+    return sum(terminal_display_width(subtitle_item_text(item)) for item in items) + max(len(items) - 1, 0)
+
+
+def subtitle_line_groups(
+    items: list[str] | list[dict[str, float | str]], max_line_width: int = SUBTITLE_MAX_LINE_WIDTH
+) -> tuple[list[list[str] | list[dict[str, float | str]]], bool]:
+    if not items:
+        return [], True
+    if len(items) == 1 or subtitle_items_width(items) <= max_line_width:
+        return [items], True
+    best_split: int | None = None
+    best_score: tuple[int, int] | None = None
+    for index in range(1, len(items)):
+        left = items[:index]
+        right = items[index:]
+        left_width = subtitle_items_width(left)
+        right_width = subtitle_items_width(right)
+        if left_width > max_line_width or right_width > max_line_width:
+            continue
+        boundary_text = subtitle_item_text(left[-1])
+        punctuation_bonus = 0
+        if boundary_text.endswith((".", "!", "?")):
+            punctuation_bonus = -6
+        elif boundary_text.endswith((",", ";", ":")):
+            punctuation_bonus = -3
+        score = (abs(left_width - right_width) + punctuation_bonus, max(left_width, right_width))
+        if best_score is None or score < best_score:
+            best_score = score
+            best_split = index
+    if best_split is None:
+        return [items], False
+    return [items[:best_split], items[best_split:]], True
+
+
+def chunk_subtitle_items(
+    items: list[str] | list[dict[str, float | str]], max_line_width: int = SUBTITLE_MAX_LINE_WIDTH
+) -> list[list[str] | list[dict[str, float | str]]]:
+    chunks: list[list[str] | list[dict[str, float | str]]] = []
+    current: list[str] | list[dict[str, float | str]] = []
+    for item in items:
+        candidate = [*current, item]
+        _line_groups, fits = subtitle_line_groups(candidate, max_line_width=max_line_width)
+        if current and not fits:
+            chunks.append(current)
+            current = [item]
+            continue
+        current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def iter_segment_subtitle_cues(
+    segment: dict[str, float | str | list[dict[str, float | str]]]
+) -> list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]]:
+    words = [
+        {"start": float(word["start"]), "end": float(word["end"]), "word": subtitle_item_text(word)}
+        for word in segment.get("words", []) or []
+        if subtitle_item_text(word)
+    ]
+    cues: list[tuple[float, float, list[list[str] | list[dict[str, float | str]]]]] = []
+    if words:
+        for chunk in chunk_subtitle_items(words):
+            line_groups, _fits = subtitle_line_groups(chunk)
+            start = float(chunk[0]["start"])
+            end = max(float(chunk[-1]["end"]), start + 0.01)
+            cues.append((start, end, line_groups))
+        return cues
+    text = normalized_text(str(segment.get("text", "")))
+    if not text:
+        return cues
+    text_words = [word for word in text.split() if word]
+    chunks = chunk_subtitle_items(text_words)
+    duration = max((float(segment["end"]) - float(segment["start"])) / max(len(chunks), 1), 0.01)
+    for offset, chunk in enumerate(chunks):
+        line_groups, _fits = subtitle_line_groups(chunk)
+        start = float(segment["start"]) + offset * duration
+        raw_end = float(segment["end"]) if offset == len(chunks) - 1 else min(float(segment["end"]), start + duration)
+        end = max(raw_end, start + 0.01)
+        cues.append((start, end, line_groups))
+    return cues
 
 
 def format_srt_time(value: float) -> str:
@@ -1604,40 +1685,35 @@ def write_ass(path: Path, segments, font_name: str, karaoke: bool) -> None:
         handle.write(f"Style: Default,{font_name},30,&H00FFFFFF,&H0000FFFF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1\n\n")
         handle.write("[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
         for segment in segments:
-            words = segment.get("words")
-            if not words:
-                text = normalized_text(segment.get("text", ""))
-                if text:
-                    handle.write(f"Dialogue: 0,{format_ass_time(segment['start'])},{format_ass_time(segment['end'])},Default,,0,0,0,,{text}\n")
-                continue
-            chunks = []
-            for word in words:
-                word_text = normalized_text(word["word"])
-                if not word_text:
-                    continue
-                if karaoke:
-                    duration = max(1, int(round((word["end"] - word["start"]) * 100)))
-                    chunks.append(f"{{\\k{duration}}}{word_text}")
+            for start, end, line_groups in iter_segment_subtitle_cues(segment):
+                has_word_timings = bool(line_groups and isinstance(line_groups[0][0], dict))
+                if karaoke and has_word_timings:
+                    rendered_lines = []
+                    for line in line_groups:
+                        chunks = []
+                        for word in line:
+                            duration = max(1, int(round((float(word["end"]) - float(word["start"])) * 100)))
+                            chunks.append(f"{{\\k{duration}}}{subtitle_item_text(word)}")
+                        rendered_lines.append(" ".join(chunks))
+                    text = r"\N".join(rendered_lines)
                 else:
-                    chunks.append(word_text)
-            if chunks:
-                handle.write(f"Dialogue: 0,{format_ass_time(words[0]['start'])},{format_ass_time(words[-1]['end'])},Default,,0,0,0,,{' '.join(chunks)}\n")
+                    text = r"\N".join(
+                        " ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line
+                    )
+                if text:
+                    handle.write(f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},Default,,0,0,0,,{text}\n")
 
 
 def write_srt(path: Path, segments) -> None:
     index = 1
     with path.open("w", encoding="utf-8") as handle:
         for segment in segments:
-            text = normalized_text(segment.get("text", ""))
-            if not text:
-                continue
-            sentences = split_sentences(text) or [text]
-            duration = max((segment["end"] - segment["start"]) / max(len(sentences), 1), 0.01)
-            for offset, sentence in enumerate(sentences):
-                start = segment["start"] + offset * duration
-                end = min(segment["end"], start + duration)
+            for start, end, line_groups in iter_segment_subtitle_cues(segment):
+                lines = [" ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line]
+                if not lines:
+                    continue
                 handle.write(f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n")
-                for line in split_lines(sentence):
+                for line in lines:
                     handle.write(f"{line}\n")
                 handle.write("\n")
                 index += 1

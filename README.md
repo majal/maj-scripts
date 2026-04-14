@@ -158,7 +158,7 @@ On first run, `whisper` will:
 - inspect the host
 - choose a managed runtime
 - install required Python packages into that runtime
-- prompt before downloading packages unless `--yes` is used
+- prompt before downloading packages unless `-y` / `--yes` is used
 
 #### Common Usage Examples
 
