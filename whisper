@@ -871,7 +871,7 @@ def choose_runtime_builder_python(
         return cached_python, cached["python_version"], True, "cached"
     launcher_python = Path(sys.executable).resolve()
     candidates = discover_mlx_python_candidates(launcher_python)
-    should_probe = not args.doctor and bool(args.target or args.setup_only or args.update or args.stable_mlx_python)
+    should_probe = not args.doctor and bool(args.targets or args.setup_only or args.update or args.stable_mlx_python)
     if should_probe:
         for candidate in candidates:
             if probe_mlx_python_candidate(candidate):
@@ -1200,7 +1200,7 @@ def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], packa
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False, prog=Path(sys.argv[0]).name)
-    parser.add_argument("target", nargs="?")
+    parser.add_argument("targets", nargs="*")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--setup-only", action="store_true")
@@ -1257,6 +1257,7 @@ def print_help() -> None:
     quick_examples = format_help_rows(
         (
             (f"{name} clip.mp4", "Transcribe one file and write subtitles next to it."),
+            (f"{name} *.mp4", "Transcribe multiple explicit files from shell expansion."),
             (f"{name} folder --recursive --jobs=4", "Walk a folder and process discovered media in parallel."),
             (f"{name} video.mp4 --embed", "Transcribe, then mux a soft subtitle track into the output video."),
             (f"{name} video.mp4 -f edited.srt -i", "Reuse an existing subtitle file and replace the source video after muxing."),
@@ -1272,7 +1273,7 @@ def print_help() -> None:
             ("--jobs=N", "Number of files to process in parallel."),
             ("--no-bible-reference-normalization", "Skip the default Bible reference cleanup pass."),
             ("--no-speech-trim", "Skip the default speech-onset VAD pass for subtitle cue starts."),
-            ("--recursive", "Recurse into folders when the target is a directory."),
+            ("--recursive", "Recurse into folders when a target is a directory."),
         )
     )
     output_rows = format_help_rows(
@@ -1313,9 +1314,9 @@ def print_help() -> None:
         f"""{name} {DIM}— self-bootstrapping subtitle + transcription CLI{RESET}
 
 {BOLD}Usage{RESET}
-  {name} <file-or-folder> [options]
-  python {name} <file-or-folder> [options]
-  py {name} <file-or-folder> [options]   {DIM}(Windows){RESET}
+  {name} <file-or-folder> [more-files-or-folders ...] [options]
+  python {name} <file-or-folder> [more-files-or-folders ...] [options]
+  py {name} <file-or-folder> [more-files-or-folders ...] [options]   {DIM}(Windows){RESET}
   {name} --doctor
   {name} --setup-only
 
@@ -1339,6 +1340,7 @@ def print_help() -> None:
   First run shows an install summary before downloading packages.
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
+  Multiple explicit files are supported, so shell-expanded commands such as {name} *.mp4 work as expected.
   Bible references such as Psalm 83 18 are normalized by default; use --no-bible-reference-normalization to disable.
   Subtitle cue starts are speech-trimmed by default; use --no-speech-trim to disable.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
@@ -1448,7 +1450,7 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
 
 def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
     return {
-        "WHISPER_TARGET": str(args.target or ""),
+        "WHISPER_TARGETS": json.dumps(list(args.targets or [])),
         "WHISPER_LANG": args.lang,
         "WHISPER_JOBS": str(args.jobs),
         "WHISPER_OUTDIR": args.outdir,
@@ -2084,6 +2086,35 @@ def discover_files(target: Path, recursive: bool) -> list[Path]:
         return []
     iterator = target.rglob("*") if recursive else target.iterdir()
     return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS)
+
+
+def discover_target_files(targets: list[Path], recursive: bool) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for target in targets:
+        for path in discover_files(target.expanduser(), recursive):
+            try:
+                key = path.resolve()
+            except OSError:
+                key = path.expanduser().absolute()
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+    return files
+
+
+def load_env_targets(env: dict[str, str]) -> list[Path]:
+    encoded_targets = env.get("WHISPER_TARGETS", "")
+    if encoded_targets:
+        try:
+            values = json.loads(encoded_targets)
+        except json.JSONDecodeError:
+            values = []
+        if isinstance(values, list):
+            return [Path(str(value)).expanduser() for value in values if str(value).strip()]
+    legacy_target = env.get("WHISPER_TARGET", "")
+    return [Path(legacy_target).expanduser()] if legacy_target else []
 
 
 def probe_duration_seconds(media_path: Path) -> float | None:
@@ -2726,9 +2757,9 @@ def process_embed_files(files: list[Path], env: dict[str, str], jobs: int) -> No
             progress.close()
 
 
-def run_embed_file_mode(target: Path, env: dict[str, str], *, recursive: bool, jobs: int) -> int:
+def run_embed_file_mode(targets: list[Path], env: dict[str, str], *, recursive: bool, jobs: int) -> int:
     started_at = time.time()
-    files = discover_files(target, recursive)
+    files = discover_target_files(targets, recursive)
     files = [path for path in files if path.suffix.lower() in VIDEO_EXTENSIONS]
     if not files:
         print("❌ No supported video files found for --embed-file.", file=sys.stderr)
@@ -2757,10 +2788,10 @@ def install_backend_into_managed_runtime(backend: str) -> None:
 def managed_main() -> int:
     started_at = time.time()
     env = os.environ
-    target = Path(env["WHISPER_TARGET"]).expanduser()
+    targets = load_env_targets(env)
     if env["WHISPER_EMBED_FILE_MODE"] == "1":
-        return run_embed_file_mode(target, env, recursive=env["WHISPER_RECURSIVE"] == "1", jobs=int(env["WHISPER_JOBS"]))
-    files = discover_files(target, env["WHISPER_RECURSIVE"] == "1")
+        return run_embed_file_mode(targets, env, recursive=env["WHISPER_RECURSIVE"] == "1", jobs=int(env["WHISPER_JOBS"]))
+    files = discover_target_files(targets, env["WHISPER_RECURSIVE"] == "1")
     if not files:
         print("❌ No supported media files found.", file=sys.stderr)
         print(f"🕒 Total time: {format_elapsed_summary(time.time() - started_at)}", file=sys.stderr)
@@ -2881,11 +2912,16 @@ def outer_main() -> int:
         die("--jobs must be at least 1")
     runtime_management_requested = args.doctor or args.clean or args.reinstall or args.setup_only or args.update
     if args.embed_file is not None and not runtime_management_requested:
-        if not args.target:
+        if not args.targets:
             print_help()
             return 1
         ensure_system_prereqs(args, detect_os(), detect_pkg_manager())
-        return run_embed_file_mode(Path(args.target).expanduser(), build_processing_env(args), recursive=args.recursive, jobs=args.jobs)
+        return run_embed_file_mode(
+            [Path(target).expanduser() for target in args.targets],
+            build_processing_env(args),
+            recursive=args.recursive,
+            jobs=args.jobs,
+        )
     plan = build_runtime_plan(args)
     if args.doctor:
         print_doctor(plan)
@@ -2902,7 +2938,7 @@ def outer_main() -> int:
         shutil.rmtree(plan.venv_dir)
         success("Removed old runtime.")
         plan = build_runtime_plan(args)
-    selected_backend_required = bool((args.target and args.embed_file is None) or args.setup_only or args.update or not plan.venv_python.exists())
+    selected_backend_required = bool((args.targets and args.embed_file is None) or args.setup_only or args.update or not plan.venv_python.exists())
     install_needed = (
         not plan.venv_python.exists()
         or "tqdm" not in plan.installed_packages
@@ -2934,16 +2970,19 @@ def outer_main() -> int:
         success(f"Runtime is ready in {plan.state_dir}")
         success(f"Backend plan: primary={plan.selected_backend}, fallback={plan.fallback_backend}")
         return 0
-    if args.update and not args.target:
+    if args.update and not args.targets:
         success(f"Runtime updated in {plan.state_dir}")
         success(f"Installed packages: {', '.join(plan.installed_packages)}")
         return 0
-    if not args.target:
+    if not args.targets:
         if install_needed:
             success(f"Runtime is ready in {plan.state_dir}")
             success(f"Installed packages: {', '.join(plan.installed_packages)}")
             say("")
-            say(f"You're ready to go. Run {MAGENTA}{Path(sys.argv[0]).name} /path/to/file.mp4{RESET} to start transcribing.")
+            say(
+                f"You're ready to go. Run {MAGENTA}{Path(sys.argv[0]).name} /path/to/file.mp4{RESET} "
+                f"or {MAGENTA}{Path(sys.argv[0]).name} *.mp4{RESET} to start transcribing."
+            )
             say(f"On Windows, you can also run {MAGENTA}py {Path(sys.argv[0]).name} /path/to/file.mp4{RESET}.")
             return 0
         print_help()

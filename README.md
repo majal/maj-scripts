@@ -169,6 +169,13 @@ Transcribe one file:
 whisper /path/to/file.mp4
 ```
 
+Transcribe multiple explicit files from shell expansion:
+
+```bash
+whisper *.mkv
+whisper *.mp3 *.mp4
+```
+
 Choose a model explicitly:
 
 ```bash
@@ -225,6 +232,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
+- You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - Bible references such as `Psalm 83 18`, `Psalm 83-18`, `Psalm 83.18`, `Psalm 8318`, and range forms like `Psalm 83 18 19` are normalized by default. Use `--no-bible-reference-normalization` to opt out.
 - Subtitle cue starts are speech-trimmed by default to avoid long lead-ins over music or ambient audio. Use `--no-speech-trim` to opt out.
 - `--embed` keeps the original media streams and adds a soft subtitle track when the container supports it directly.
