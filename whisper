@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from functools import lru_cache
-import importlib
 import json
 import os
 import platform
@@ -27,7 +26,7 @@ APP_NAME = "whisper-cli"
 MANAGED_ENV_FLAG = "WHISPER_MANAGED_RUNTIME"
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov"}
-SHARED_RUNTIME_PACKAGES = ("tqdm>=4.66.0", "webrtcvad-wheels>=2.0.14")
+SHARED_RUNTIME_PACKAGES = ("webrtcvad-wheels>=2.0.14",)
 PIP_BOOTSTRAP_PACKAGES = ("pip>=26.0", "setuptools<82", "wheel>=0.46.0")
 BACKEND_PACKAGES = {
     "mlx": ("mlx-whisper>=0.4.2",),
@@ -1266,8 +1265,6 @@ def installed_packages(python_bin: Path) -> tuple[str, ...]:
     if not python_bin.exists():
         return ("runtime-not-built",)
     found: list[str] = []
-    if runtime_has_module(python_bin, "tqdm"):
-        found.append("tqdm")
     if runtime_has_module(python_bin, "webrtcvad"):
         found.append("webrtcvad")
     for backend in ("mlx", "faster-whisper"):
@@ -1317,7 +1314,7 @@ def ensure_venv(plan: RuntimePlan) -> None:
 
 def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> RuntimePlan:
     ensure_venv(plan)
-    missing_shared_runtime = not runtime_has_module(plan.venv_python, "tqdm") or not runtime_has_module(plan.venv_python, "webrtcvad")
+    missing_shared_runtime = not runtime_has_module(plan.venv_python, "webrtcvad")
     if update or missing_shared_runtime:
         install_packages(plan.venv_python, "Preparing pip in the local runtime", *PIP_BOOTSTRAP_PACKAGES)
         install_packages(plan.venv_python, "Installing shared Python packages", *SHARED_RUNTIME_PACKAGES)
@@ -1344,8 +1341,8 @@ def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required
 
 def packages_to_install_now(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> tuple[str, ...]:
     packages: list[str] = []
-    if update or "tqdm" not in plan.installed_packages or "webrtcvad" not in plan.installed_packages:
-        packages.extend(["pip", "setuptools", "wheel", "tqdm", "webrtcvad"])
+    if update or "webrtcvad" not in plan.installed_packages:
+        packages.extend(["pip", "setuptools", "wheel", "webrtcvad"])
     if selected_backend_required and plan.selected_backend not in plan.installed_backends:
         packages.extend(["mlx-whisper" if plan.selected_backend == "mlx" else "faster-whisper"])
     return tuple(dict.fromkeys(packages))
@@ -3304,11 +3301,7 @@ class EstimatedProgressReporter:
             return
         if self.last_percent < 100:
             self.last_percent = 100
-            if self.show_media_name:
-                message = f"⏳ {self.media_path.name} [{self.backend}] 100% | Finalizing output..."
-            else:
-                message = "⏳ 100% | Finalizing output..."
-            self.render_message(message)
+            self.clear_inline()
 
     def before_stage_message(self) -> None:
         if not self.enabled:
@@ -3682,18 +3675,17 @@ def process_file(
     env: dict[str, str],
     backend: str,
     *,
+    file_index: int,
+    total_files: int,
     inline_progress: bool,
     compact_status: bool,
     show_progress: bool = True,
     show_stage_messages: bool = True,
-    start_message_writer=None,
 ) -> str:
     started_at = time.time()
-    start_message = f"▶ Starting transcription: {media_path.name} [{backend}]"
-    if start_message_writer is not None:
-        start_message_writer(start_message)
-    else:
-        print(start_message, file=sys.stderr)
+    progress_prefix = f" [{file_index}/{total_files}]" if total_files > 1 else ""
+    start_message = f"▶ Starting transcription{progress_prefix}: {media_path.name} [{backend}]"
+    print(start_message, file=sys.stderr)
     wait_message = f"Waiting for {backend}" if compact_status else f"Waiting for {backend} on {media_path.name}"
     wait_spinner = Spinner(wait_message, enabled=show_stage_messages, delay_seconds=3.0)
     progress = EstimatedProgressReporter(
@@ -3829,8 +3821,6 @@ def process_file(
             )
         else:
             write_srt(subtitle_path, segments, speech_intervals=speech_intervals, style=subtitle_style)
-        if show_stage_messages:
-            print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
         apply_subtitle_outputs(
             media_path,
             subtitle_path,
@@ -3921,121 +3911,63 @@ def format_elapsed_precise(seconds: float) -> str:
     return f"{secs:.1f}s"
 
 
-def file_progress_bar(total: int):
-    try:
-        return importlib.import_module("tqdm").tqdm(
-            total=total,
-            desc="📦 Files",
-            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}{postfix}",
-        )
-    except ModuleNotFoundError:
-        warn("Files progress bar support is unavailable in this Python; continuing without it.")
-        return None
-
-
-def progress_message(progress, message: str) -> None:
-    if progress:
-        progress.write(message, file=sys.stderr)
-        return
-    print(message, file=sys.stderr)
-
-
-def update_parallel_progress_status(progress, *, total: int, completed: int, jobs: int, started_at: float) -> None:
-    if not progress:
-        return
-    remaining = max(0, total - completed)
-    active = min(jobs, remaining) if remaining else 0
-    status = f"{active} active"
-    elapsed = time.monotonic() - started_at
-    if completed and remaining and elapsed >= 1.0:
-        rate = completed / elapsed
-        if rate > 0:
-            status += f" | ETA {format_elapsed_summary(remaining / rate)}"
-    progress.set_postfix_str(status, refresh=True)
-
-
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
-    use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     inline_progress = jobs == 1 and sys.stderr.isatty()
     compact_status = jobs == 1
-    progress = file_progress_bar(len(files)) if use_progress_bar else None
-    try:
-        if jobs > 1:
-            batch_started_at = time.monotonic()
-            completed = 0
-            update_parallel_progress_status(progress, total=len(files), completed=completed, jobs=jobs, started_at=batch_started_at)
-            with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = {
-                    executor.submit(
-                        process_file,
-                        media_path,
-                        env,
-                        backend,
-                        inline_progress=False,
-                        compact_status=False,
-                        show_progress=False,
-                        show_stage_messages=False,
-                        start_message_writer=lambda message, progress=progress: progress_message(progress, message),
-                    ): media_path
-                    for media_path in files
-                }
-                for future in as_completed(futures):
-                    media_path = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception as exc:
-                        progress_message(progress, f"❌ Failed: {media_path.name}: {exc}")
-                        raise
-                    progress_message(progress, f"✅ {media_path.name} | {result}")
-                    completed += 1
-                    if progress:
-                        progress.update(1)
-                        update_parallel_progress_status(
-                            progress,
-                            total=len(files),
-                            completed=completed,
-                            jobs=jobs,
-                            started_at=batch_started_at,
-                        )
-        else:
-            for media_path in files:
-                print(file=sys.stderr)
-                if progress and inline_progress:
-                    progress.clear()
-                print(f"✅ {process_file(media_path, env, backend, inline_progress=inline_progress, compact_status=compact_status)}")
-                if progress:
-                    progress.update(1)
-                    if inline_progress:
-                        progress.refresh()
-    finally:
-        if progress:
-            progress.set_postfix_str("", refresh=False)
-            progress.close()
+    if jobs > 1:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = {
+                executor.submit(
+                    process_file,
+                    media_path,
+                    env,
+                    backend,
+                    file_index=index,
+                    total_files=len(files),
+                    inline_progress=False,
+                    compact_status=False,
+                    show_progress=False,
+                    show_stage_messages=False,
+                ): media_path
+                for index, media_path in enumerate(files, start=1)
+            }
+            for future in as_completed(futures):
+                media_path = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    print(f"❌ Failed: {media_path.name}: {exc}", file=sys.stderr)
+                    raise
+                print(f"✅ {media_path.name} | {result}", file=sys.stderr)
+        return
+    for index, media_path in enumerate(files, start=1):
+        print(file=sys.stderr)
+        print(
+            f"✅ {process_file(
+                media_path,
+                env,
+                backend,
+                file_index=index,
+                total_files=len(files),
+                inline_progress=inline_progress,
+                compact_status=compact_status,
+            )}"
+        )
 
 
 def process_embed_files(files: list[Path], env: dict[str, str], jobs: int) -> None:
     if env["WHISPER_EMBED_FILE"] and len(files) != 1:
         raise ValueError("--embed-file=/path/to/file requires exactly one video target.")
-    use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     compact_status = jobs == 1
-    progress = file_progress_bar(len(files)) if use_progress_bar else None
-    try:
-        if jobs > 1:
-            with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = [executor.submit(process_existing_subtitle_file, media_path, env, compact_status=False) for media_path in files]
-                for future in as_completed(futures):
-                    print(f"✅ {future.result()}")
-                    if progress:
-                        progress.update(1)
-        else:
-            for media_path in files:
-                print(file=sys.stderr)
-                print(f"✅ {process_existing_subtitle_file(media_path, env, compact_status=compact_status)}")
-                if progress:
-                    progress.update(1)
-    finally:
-        if progress:
-            progress.close()
+    if jobs > 1:
+        with ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = [executor.submit(process_existing_subtitle_file, media_path, env, compact_status=False) for media_path in files]
+            for future in as_completed(futures):
+                print(f"✅ {future.result()}")
+        return
+    for media_path in files:
+        print(file=sys.stderr)
+        print(f"✅ {process_existing_subtitle_file(media_path, env, compact_status=compact_status)}")
 
 
 def run_embed_file_mode(targets: list[Path], env: dict[str, str], *, recursive: bool, jobs: int) -> int:
@@ -4227,7 +4159,6 @@ def outer_main() -> int:
     selected_backend_required = bool((args.targets and args.embed_file is None) or args.setup_only or args.update or not plan.venv_python.exists())
     install_needed = (
         not plan.venv_python.exists()
-        or "tqdm" not in plan.installed_packages
         or "webrtcvad" not in plan.installed_packages
         or (selected_backend_required and plan.selected_backend not in plan.installed_backends)
         or args.update
