@@ -3206,12 +3206,13 @@ def resolve_subtitle_language(media_path: Path, requested_language: str, detecte
 
 
 class EstimatedProgressReporter:
-    def __init__(self, media_path: Path, backend: str, *, inline: bool, show_media_name: bool) -> None:
+    def __init__(self, media_path: Path, backend: str, *, inline: bool, show_media_name: bool, enabled: bool = True) -> None:
         self.media_path = media_path
         self.backend = backend
-        self.inline = inline and sys.stderr.isatty()
+        self.enabled = enabled
+        self.inline = enabled and inline and sys.stderr.isatty()
         self.show_media_name = show_media_name
-        self.duration = probe_duration_seconds(media_path)
+        self.duration = probe_duration_seconds(media_path) if enabled else None
         self.last_percent = -1
         self.last_reported_at = 0.0
         self.eta_started_at: float | None = None
@@ -3219,6 +3220,8 @@ class EstimatedProgressReporter:
         self.unknown_duration_noted = False
         self.inline_rendered = False
         self.last_render_width = 0
+        if not self.enabled:
+            return
         if self.duration is None:
             self.note_unknown_duration()
         else:
@@ -3226,6 +3229,8 @@ class EstimatedProgressReporter:
             print(f"⏱ Media length: {format_elapsed_summary(self.duration)}{suffix}", file=sys.stderr)
 
     def clear_inline(self) -> None:
+        if not self.enabled:
+            return
         if not self.inline_rendered:
             return
         print(f"\r{' ' * self.last_render_width}\r", end="", file=sys.stderr, flush=True)
@@ -3233,6 +3238,8 @@ class EstimatedProgressReporter:
         self.last_render_width = 0
 
     def note_unknown_duration(self) -> None:
+        if not self.enabled:
+            return
         if self.unknown_duration_noted:
             return
         self.clear_inline()
@@ -3269,6 +3276,8 @@ class EstimatedProgressReporter:
         return remaining_media / rate
 
     def report(self, current_end: float) -> None:
+        if not self.enabled:
+            return
         if self.duration is None:
             return
         now = time.monotonic()
@@ -3289,6 +3298,8 @@ class EstimatedProgressReporter:
         self.render_message(message)
 
     def finish(self) -> None:
+        if not self.enabled:
+            return
         if self.duration is None:
             return
         if self.last_percent < 100:
@@ -3300,6 +3311,8 @@ class EstimatedProgressReporter:
             self.render_message(message)
 
     def before_stage_message(self) -> None:
+        if not self.enabled:
+            return
         if not self.inline_rendered:
             return
         if self.inline:
@@ -3421,6 +3434,7 @@ def apply_subtitle_outputs(
     *,
     compact_status: bool,
     subtitle_language: str,
+    show_messages: bool = True,
 ) -> None:
     embed_requested = env["WHISPER_EMBED"] == "1"
     in_place = env["WHISPER_IN_PLACE"] == "1"
@@ -3432,16 +3446,18 @@ def apply_subtitle_outputs(
                     f"--in-place is not available for {media_path.suffix} with {subtitle_path.suffix} subtitles; use MKV/SRT or omit --in-place."
                 )
             embed_subtitles_in_place(media_path, subtitle_path, subtitle_codec=subtitle_codec, subtitle_language=subtitle_language)
-            if compact_status:
-                print("📦 Embedded subtitle track in place.", file=sys.stderr)
-            else:
-                print(f"📦 Embedded subtitle track in place: {media_path.name}", file=sys.stderr)
+            if show_messages:
+                if compact_status:
+                    print("📦 Embedded subtitle track in place.", file=sys.stderr)
+                else:
+                    print(f"📦 Embedded subtitle track in place: {media_path.name}", file=sys.stderr)
         else:
             embed_subtitles(media_path, subtitle_path, embedded_path, subtitle_codec=subtitle_codec, subtitle_language=subtitle_language)
-            if compact_status:
-                print("📦 Embedded subtitle track.", file=sys.stderr)
-            else:
-                print(f"📦 Embedded subtitle track: {media_path.name}", file=sys.stderr)
+            if show_messages:
+                if compact_status:
+                    print("📦 Embedded subtitle track.", file=sys.stderr)
+                else:
+                    print(f"📦 Embedded subtitle track: {media_path.name}", file=sys.stderr)
     if env["WHISPER_BURN"] == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
         burn_subtitles(
             media_path,
@@ -3449,10 +3465,11 @@ def apply_subtitle_outputs(
             output_root / f"{media_path.stem}_subbed.mp4",
             video_codec=env["WHISPER_BURN_VCODEC"],
         )
-        if compact_status:
-            print("🎞 Wrote burned-in video.", file=sys.stderr)
-        else:
-            print(f"🎞 Wrote burned-in video: {media_path.name}", file=sys.stderr)
+        if show_messages:
+            if compact_status:
+                print("🎞 Wrote burned-in video.", file=sys.stderr)
+            else:
+                print(f"🎞 Wrote burned-in video: {media_path.name}", file=sys.stderr)
 
 
 def write_ass(
@@ -3660,12 +3677,32 @@ def run_mlx_whisper(media_path: Path, model: str, language: str, report_progress
     return result
 
 
-def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_progress: bool, compact_status: bool) -> str:
+def process_file(
+    media_path: Path,
+    env: dict[str, str],
+    backend: str,
+    *,
+    inline_progress: bool,
+    compact_status: bool,
+    show_progress: bool = True,
+    show_stage_messages: bool = True,
+    start_message_writer=None,
+) -> str:
     started_at = time.time()
-    print(f"▶ Starting transcription: {media_path.name} [{backend}]", file=sys.stderr)
+    start_message = f"▶ Starting transcription: {media_path.name} [{backend}]"
+    if start_message_writer is not None:
+        start_message_writer(start_message)
+    else:
+        print(start_message, file=sys.stderr)
     wait_message = f"Waiting for {backend}" if compact_status else f"Waiting for {backend} on {media_path.name}"
-    wait_spinner = Spinner(wait_message, enabled=True, delay_seconds=3.0)
-    progress = EstimatedProgressReporter(media_path, backend, inline=inline_progress, show_media_name=not compact_status)
+    wait_spinner = Spinner(wait_message, enabled=show_stage_messages, delay_seconds=3.0)
+    progress = EstimatedProgressReporter(
+        media_path,
+        backend,
+        inline=inline_progress,
+        show_media_name=not compact_status,
+        enabled=show_progress,
+    )
     spinner_state = {"stopped": False}
     mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
     mlx_output_format = env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto")
@@ -3745,7 +3782,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
     speech_intervals: list[tuple[float, float]] | None = None
     if speech_trim_enabled:
         speech_trim_message = "Analyzing speech onset" if compact_status else f"Analyzing speech onset on {media_path.name}"
-        speech_trim_spinner = Spinner(speech_trim_message, enabled=True, delay_seconds=1.2)
+        speech_trim_spinner = Spinner(speech_trim_message, enabled=show_stage_messages, delay_seconds=1.2)
         speech_trim_spinner.start()
         try:
             speech_intervals = detect_speech_intervals(media_path)
@@ -3777,7 +3814,8 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
         if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources:
             plain_text = normalized_text(str(mlx_result.get("text", "")))
         write_txt(text_path, plain_text)
-        print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
+        if show_stage_messages:
+            print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
         if env["WHISPER_ASS"] == "1":
@@ -3791,7 +3829,8 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             )
         else:
             write_srt(subtitle_path, segments, speech_intervals=speech_intervals, style=subtitle_style)
-        print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
+        if show_stage_messages:
+            print("📝 Wrote subtitles." if compact_status else f"📝 Wrote subtitles: {media_path.name}", file=sys.stderr)
         apply_subtitle_outputs(
             media_path,
             subtitle_path,
@@ -3799,6 +3838,7 @@ def process_file(media_path: Path, env: dict[str, str], backend: str, *, inline_
             env,
             compact_status=compact_status,
             subtitle_language=subtitle_language,
+            show_messages=show_stage_messages,
         )
     if review_postprocessing:
         print_postprocess_review(
@@ -3889,6 +3929,27 @@ def file_progress_bar(total: int):
         return None
 
 
+def progress_message(progress, message: str) -> None:
+    if progress:
+        progress.write(message, file=sys.stderr)
+        return
+    print(message, file=sys.stderr)
+
+
+def update_parallel_progress_status(progress, *, total: int, completed: int, jobs: int, started_at: float) -> None:
+    if not progress:
+        return
+    remaining = max(0, total - completed)
+    active = min(jobs, remaining) if remaining else 0
+    status = f"{active} active"
+    elapsed = time.monotonic() - started_at
+    if completed and remaining and elapsed >= 1.0:
+        rate = completed / elapsed
+        if rate > 0:
+            status += f" | ETA {format_elapsed_summary(remaining / rate)}"
+    progress.set_postfix_str(status, refresh=True)
+
+
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
     inline_progress = jobs == 1 and sys.stderr.isatty()
@@ -3896,12 +3957,42 @@ def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: in
     progress = file_progress_bar(len(files)) if use_progress_bar else None
     try:
         if jobs > 1:
+            batch_started_at = time.monotonic()
+            completed = 0
+            update_parallel_progress_status(progress, total=len(files), completed=completed, jobs=jobs, started_at=batch_started_at)
             with ThreadPoolExecutor(max_workers=jobs) as executor:
-                futures = [executor.submit(process_file, media_path, env, backend, inline_progress=False, compact_status=False) for media_path in files]
+                futures = {
+                    executor.submit(
+                        process_file,
+                        media_path,
+                        env,
+                        backend,
+                        inline_progress=False,
+                        compact_status=False,
+                        show_progress=False,
+                        show_stage_messages=False,
+                        start_message_writer=lambda message, progress=progress: progress_message(progress, message),
+                    ): media_path
+                    for media_path in files
+                }
                 for future in as_completed(futures):
-                    print(f"✅ {future.result()}")
+                    media_path = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        progress_message(progress, f"❌ Failed: {media_path.name}: {exc}")
+                        raise
+                    progress_message(progress, f"✅ {media_path.name} | {result}")
+                    completed += 1
                     if progress:
                         progress.update(1)
+                        update_parallel_progress_status(
+                            progress,
+                            total=len(files),
+                            completed=completed,
+                            jobs=jobs,
+                            started_at=batch_started_at,
+                        )
         else:
             for media_path in files:
                 print(file=sys.stderr)
@@ -3914,6 +4005,7 @@ def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: in
                         progress.refresh()
     finally:
         if progress:
+            progress.set_postfix_str("", refresh=False)
             progress.close()
 
 
