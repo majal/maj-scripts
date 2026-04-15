@@ -3891,7 +3891,7 @@ def file_progress_bar(total: int):
 
 def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: int) -> None:
     use_progress_bar = len(files) > 1 and sys.stderr.isatty()
-    inline_progress = len(files) == 1 and jobs == 1 and not use_progress_bar
+    inline_progress = jobs == 1 and sys.stderr.isatty()
     compact_status = jobs == 1
     progress = file_progress_bar(len(files)) if use_progress_bar else None
     try:
@@ -3905,9 +3905,13 @@ def process_files(files: list[Path], env: dict[str, str], backend: str, jobs: in
         else:
             for media_path in files:
                 print(file=sys.stderr)
+                if progress and inline_progress:
+                    progress.clear()
                 print(f"✅ {process_file(media_path, env, backend, inline_progress=inline_progress, compact_status=compact_status)}")
                 if progress:
                     progress.update(1)
+                    if inline_progress:
+                        progress.refresh()
     finally:
         if progress:
             progress.close()
