@@ -218,6 +218,13 @@ whisper /path/to/file.mp4 -T
 whisper /path/to/file.mp4 --transcript-only
 ```
 
+Write a speaker-labeled transcript:
+
+```bash
+whisper /path/to/file.mp4 -T --speaker-labels --paragraphs
+whisper /path/to/file.mp4 -T --diarize
+```
+
 Preview the work plan without setup, installs, or transcription:
 
 ```bash
@@ -237,6 +244,7 @@ Keep repeated defaults in a project-local TOML config:
 # .maj-scripts-whisper.toml
 lang = "en"
 subtitle_style = "strict"
+speaker_labels = false
 glossary = ["./whisper-glossary.txt"]
 suppress_phrases = ["./whisper-suppress.txt"]
 ```
@@ -304,12 +312,15 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
-- `--plan` / `--dry-run` shows discovered files, selected backend/model, output paths, configured glossary and suppression files, embed/burn actions, and whether `ffmpeg` is required without installing packages or transcribing.
+- `--plan` / `--dry-run` shows discovered files, selected backend/model, output paths, configured glossary and suppression files, speaker-label status, embed/burn actions, and whether `ffmpeg` is required without installing packages or transcribing.
 - `--doctor --json` prints machine-readable diagnostics for scripts, CI, and support notes.
 - Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
 - `-t` / `--transcript` writes a `.txt` transcript alongside normal `.srt`/`.ass` output. If the expected sidecar subtitle already exists, it builds the transcript from that file instead of retranscribing unless `--force` is set.
 - `-T` / `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
 - `--paragraphs` formats transcript text with blank lines between likely paragraphs, based on timing gaps and sentence boundaries. It does not affect subtitle output.
+- `--speaker-labels` adds anonymous `Speaker 1`, `Speaker 2`, and similar labels to transcript output. It implies transcript output, leaves subtitles unlabeled, and has `--diarize` as a technical alias.
+- Speaker labels are fully optional. They install larger ML packages only when requested, show a size warning first, reuse an existing global Hugging Face speaker model cache when one is already present, and otherwise keep speaker model files in the managed runtime area.
+- `--clean-speaker-labels` removes optional speaker-label packages and the app-owned speaker-label model cache. It does not touch global Hugging Face caches.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.
@@ -339,6 +350,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 #### Notes / Caveats
 
 - First-run setup can take longer because packages and models may need to be installed or downloaded.
+- Speaker labels depend on pyannote and may require accepting model terms on Hugging Face plus setting `HF_TOKEN` or `HUGGINGFACE_TOKEN`.
 - Soft subtitle embedding and burn-in both require `ffmpeg`, and the default speech-onset trim uses it when available.
 - In-place embedding only works when the embedded output can stay in the same container; cases that need an MKV fallback still require plain `--embed`.
 - MLX behavior can vary by machine, Python version, and model choice.

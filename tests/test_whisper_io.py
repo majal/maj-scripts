@@ -4,7 +4,7 @@ import argparse
 import io
 import os
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -28,6 +28,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             speech_trim=False,
             review_postprocessing=True,
             paragraphs=False,
+            speaker_labels=False,
             subtitle_style="strict",
             glossary=["/tmp/glossary.txt"],
             suppress_phrases=["/tmp/suppress.txt"],
@@ -55,6 +56,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_SPEECH_TRIM"], "0")
         self.assertEqual(env["WHISPER_REVIEW_POSTPROCESSING"], "1")
         self.assertEqual(env["WHISPER_PARAGRAPHS"], "0")
+        self.assertEqual(env["WHISPER_SPEAKER_LABELS"], "0")
         self.assertEqual(env["WHISPER_SUBTITLE_STYLE"], "strict")
         self.assertEqual(env["WHISPER_GLOSSARY_FILES"], '["/tmp/glossary.txt"]')
         self.assertEqual(env["WHISPER_SUPPRESSION_FILES"], '["/tmp/suppress.txt"]')
@@ -96,6 +98,15 @@ class WhisperOutputPlanningTest(unittest.TestCase):
 
         self.assertTrue(args.transcript_only)
 
+    def test_speaker_label_flags_match_diarize_alias_and_imply_transcript(self) -> None:
+        speaker_args = self.whisper.build_parser().parse_args(["clip.mp4", "--speaker-labels"])
+        diarize_args = self.whisper.build_parser().parse_args(["clip.mp4", "--diarize"])
+
+        self.assertTrue(speaker_args.speaker_labels)
+        self.assertTrue(diarize_args.speaker_labels)
+        self.assertEqual(self.whisper.build_processing_env(speaker_args)["WHISPER_TRANSCRIPT"], "1")
+        self.assertEqual(self.whisper.build_processing_env(speaker_args)["WHISPER_SPEAKER_LABELS"], "1")
+
     def test_paragraphs_config_and_cli_flag_are_supported(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -111,6 +122,22 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                 os.chdir(previous_cwd)
 
         self.assertTrue(args.paragraphs)
+
+    def test_speaker_labels_config_is_supported(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            (root / self.whisper.PROJECT_CONFIG_FILENAME).write_text("speaker_labels = true\n", encoding="utf-8")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(self.whisper, "GLOBAL_CONFIG_PATH", root / "missing-global.toml"):
+                    args = self.whisper.parse_args_with_config(self.whisper.build_parser(), ["clip.mp4"])
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertTrue(args.speaker_labels)
 
     def test_project_config_applies_defaults_but_cli_wins(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -271,6 +298,31 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             self.assertFalse(self.whisper.output_plan_can_derive_transcript_from_subtitle(plan))
             self.assertTrue(self.whisper.output_plan_resume_from_subtitle(plan))
 
+    def test_speaker_labels_do_not_derive_transcript_from_existing_subtitles(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            subtitle = root / "clip.srt"
+            media.write_text("video", encoding="utf-8")
+            subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_TRANSCRIPT": "1",
+                "WHISPER_TRANSCRIPT_ONLY": "0",
+                "WHISPER_SPEAKER_LABELS": "1",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+            }
+
+            plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
+
+        self.assertIsNone(plan["transcript_source_subtitle_path"])
+        self.assertFalse(self.whisper.output_plan_can_derive_transcript_from_subtitle(plan))
+        self.assertIn("label-speakers", plan["actions"])
+
     def test_dry_run_payload_reports_outputs_and_ffmpeg_need(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -305,6 +357,77 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(payload["files"][0]["status"], "will transcribe")
         self.assertIn("clip.srt", payload["files"][0]["subtitle_path"])
         self.assertIn("clip_embedded.mp4", payload["files"][0]["embedded_path"])
+        self.assertFalse(payload["speaker_labels"]["requested"])
+
+    def test_dry_run_payload_reports_speaker_labels(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            args = self.whisper.parse_args_with_config(
+                self.whisper.build_parser(),
+                [
+                    str(media),
+                    "--plan",
+                    "--backend=faster-whisper",
+                    "--model=tiny",
+                    "--state-dir",
+                    str(root / "state"),
+                    "--speaker-labels",
+                    "--transcript-only",
+                    "--no-speech-trim",
+                ],
+            )
+            plan = self.whisper.build_runtime_plan(args)
+
+            payload = self.whisper.build_dry_run_payload(args, plan)
+
+        self.assertTrue(payload["speaker_labels"]["requested"])
+        self.assertTrue(payload["actions"]["speaker_labels"])
+        self.assertTrue(payload["defaults"]["transcript"])
+        self.assertIn("label-speakers", payload["files"][0]["actions"])
+
+    def test_speaker_label_packages_are_only_planned_when_requested(self) -> None:
+        plan = argparse.Namespace(
+            installed_packages=("webrtcvad",),
+            selected_backend="faster-whisper",
+            installed_backends=("faster-whisper",),
+        )
+
+        without_speakers = self.whisper.packages_to_install_now(
+            plan,
+            update=False,
+            selected_backend_required=True,
+            speaker_labels_required=False,
+        )
+        with_speakers = self.whisper.packages_to_install_now(
+            plan,
+            update=False,
+            selected_backend_required=True,
+            speaker_labels_required=True,
+        )
+
+        self.assertNotIn("speaker-labels", without_speakers)
+        self.assertIn("speaker-labels", with_speakers)
+
+    def test_speaker_label_cache_prefers_global_when_ready(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            global_hub = root / "global-hub"
+            state_dir = root / "state"
+            snapshot = global_hub / self.whisper.SPEAKER_LABEL_REPO_CACHE_NAME / "snapshots" / "abc123"
+            snapshot.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"HF_HUB_CACHE": str(global_hub)}, clear=False):
+                scope, cache_dir = self.whisper.speaker_label_cache_choice(state_dir)
+                self.assertEqual(scope, "global")
+                self.assertEqual(cache_dir, global_hub)
+
+                for child in snapshot.parent.iterdir():
+                    child.rmdir()
+                scope, cache_dir = self.whisper.speaker_label_cache_choice(state_dir)
+
+        self.assertEqual(scope, "app")
+        self.assertEqual(cache_dir, self.whisper.speaker_label_app_hub_cache_dir(state_dir))
 
     def test_process_file_skips_when_subtitle_already_exists(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -617,6 +740,91 @@ class WhisperOutputPlanningTest(unittest.TestCase):
 
             self.assertEqual((root / "clip.txt").read_text(encoding="utf-8"), "First paragraph.\n\nSecond paragraph.\n")
 
+    def test_apply_speaker_turns_labels_segments_by_overlap(self) -> None:
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "Hello.", "words": []},
+            {"start": 1.2, "end": 2.0, "text": "Hi.", "words": []},
+            {"start": 2.1, "end": 3.0, "text": "Again.", "words": []},
+        ]
+        turns = [
+            self.whisper.SpeakerTurn(0.0, 1.1, "SPEAKER_00"),
+            self.whisper.SpeakerTurn(1.1, 2.1, "SPEAKER_01"),
+            self.whisper.SpeakerTurn(2.1, 3.0, "SPEAKER_00"),
+        ]
+
+        labeled = self.whisper.apply_speaker_turns_to_segments(segments, turns)
+
+        self.assertEqual([segment["speaker"] for segment in labeled], ["Speaker 1", "Speaker 2", "Speaker 1"])
+
+    def test_process_file_can_write_speaker_labeled_paragraph_transcript(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_TRANSCRIPT": "1",
+                "WHISPER_TRANSCRIPT_ONLY": "1",
+                "WHISPER_PARAGRAPHS": "1",
+                "WHISPER_SPEAKER_LABELS": "1",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+                "WHISPER_FORCE": "0",
+                "WHISPER_LANG": "en",
+                "WHISPER_MODEL": "tiny",
+                "WHISPER_BACKEND": "faster-whisper",
+                "WHISPER_FALLBACK_BACKEND": "none",
+                "WHISPER_DEVICE": "cpu",
+                "WHISPER_COMPUTE_TYPE": "int8",
+                "WHISPER_FALLBACK_DEVICE": "none",
+                "WHISPER_FALLBACK_COMPUTE_TYPE": "none",
+                "WHISPER_BIBLE_REFERENCE_NORMALIZATION": "1",
+                "WHISPER_BIBLE_REFERENCE_PHRASES": "0",
+                "WHISPER_SPEECH_TRIM": "0",
+                "WHISPER_REVIEW_POSTPROCESSING": "0",
+                "WHISPER_SUBTITLE_STYLE": "balanced",
+                "WHISPER_GLOSSARY_FILES": "[]",
+                "WHISPER_SUPPRESSION_FILES": "[]",
+                "WHISPER_FONT": "Arial",
+                "WHISPER_KARAOKE": "0",
+                "WHISPER_STATE_DIR": str(root / "state"),
+            }
+            segments = [
+                {"start": 0.0, "end": 1.0, "text": "First thought.", "words": []},
+                {"start": 1.2, "end": 2.0, "text": "Second thought.", "words": []},
+                {"start": 3.8, "end": 4.4, "text": "Reply.", "words": []},
+            ]
+            labeled_segments = [
+                {**segments[0], "speaker": "Speaker 1"},
+                {**segments[1], "speaker": "Speaker 1"},
+                {**segments[2], "speaker": "Speaker 2"},
+            ]
+
+            with (
+                mock.patch.object(self.whisper, "run_faster_whisper", return_value=(segments, "en")),
+                mock.patch.object(self.whisper, "run_speaker_labeling", return_value=labeled_segments),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.whisper.process_file(
+                    media,
+                    env,
+                    "faster-whisper",
+                    file_index=1,
+                    total_files=1,
+                    inline_progress=False,
+                    compact_status=True,
+                    show_progress=False,
+                    show_stage_messages=False,
+                )
+
+            self.assertEqual(
+                (root / "clip.txt").read_text(encoding="utf-8"),
+                "Speaker 1: First thought. Second thought.\n\nSpeaker 2: Reply.\n",
+            )
+
     def test_ensure_system_prereqs_requires_ffmpeg_for_embed(self) -> None:
         args = argparse.Namespace(
             embed=True,
@@ -629,6 +837,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             transcript=False,
             transcript_only=False,
             paragraphs=False,
+            speaker_labels=False,
             in_place=False,
             burn_vcodec="auto",
         )
@@ -643,6 +852,29 @@ class WhisperOutputPlanningTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("ffmpeg is required for --embed/--embed-file", stderr.getvalue())
+
+    def test_clean_speaker_labels_removes_only_optional_runtime_and_app_cache(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            state_dir = root / "state"
+            cache_root = self.whisper.speaker_label_app_cache_root(state_dir)
+            cache_root.mkdir(parents=True)
+            (cache_root / "model.bin").write_text("cache", encoding="utf-8")
+            python_bin = state_dir / "venv" / "bin" / "python"
+            python_bin.parent.mkdir(parents=True)
+            python_bin.write_text("python", encoding="utf-8")
+            plan = argparse.Namespace(state_dir=state_dir, venv_python=python_bin)
+
+            with (
+                mock.patch.object(self.whisper, "runtime_has_speaker_labels", return_value=True),
+                mock.patch.object(self.whisper, "uninstall_packages") as uninstall,
+                redirect_stderr(io.StringIO()),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.whisper.clean_speaker_labels(plan, assume_yes=True)
+
+            uninstall.assert_called_once()
+            self.assertFalse(cache_root.exists())
 
     def test_embedded_subtitle_plan_uses_mov_text_for_mp4_srt(self) -> None:
         output_path, codec = self.whisper.embedded_subtitle_plan(

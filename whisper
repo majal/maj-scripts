@@ -38,10 +38,36 @@ BACKEND_PACKAGES = {
     "mlx": ("mlx-whisper>=0.4.2",),
     "faster-whisper": ("faster-whisper>=1.1.0",),
 }
+SPEAKER_LABEL_PACKAGES = ("pyannote.audio>=4.0.0",)
+SPEAKER_LABEL_CLEAN_PACKAGES = (
+    "pyannote.audio",
+    "pyannote.core",
+    "pyannote.database",
+    "pyannote.metrics",
+    "pyannote.pipeline",
+    "torch",
+    "torchaudio",
+    "torchcodec",
+    "torchmetrics",
+    "lightning",
+    "pytorch-lightning",
+    "speechbrain",
+    "asteroid-filterbanks",
+    "pytorch-metric-learning",
+    "scikit-learn",
+    "scipy",
+    "pandas",
+)
 BACKEND_MODULES = {
     "mlx": "mlx_whisper",
     "faster-whisper": "faster_whisper",
 }
+SPEAKER_LABEL_MODULE = "pyannote.audio"
+SPEAKER_LABEL_MODEL_ID = "pyannote/speaker-diarization-community-1"
+SPEAKER_LABEL_REPO_CACHE_NAME = "models--pyannote--speaker-diarization-community-1"
+SPEAKER_LABEL_MODEL_SIZE_ESTIMATE = "roughly 30-50 MB"
+SPEAKER_LABEL_PACKAGE_SIZE_ESTIMATE = "often 1.5-3 GB installed/cache footprint"
+SPEAKER_LABEL_CACHE_DIRNAME = "speaker-labels"
 MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
 MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
 SUBTITLE_MAX_LINE_WIDTH = 42
@@ -531,6 +557,14 @@ class TranscriptChunk:
     start: float
     end: float
     text: str
+    speaker: str = ""
+
+
+@dataclass(frozen=True)
+class SpeakerTurn:
+    start: float
+    end: float
+    speaker: str
 
 
 SUBTITLE_STYLE_PRESETS = {
@@ -966,6 +1000,87 @@ def default_state_dir(os_name: str) -> Path:
     return Path.home() / ".local" / "share" / APP_NAME
 
 
+def directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() or item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def global_huggingface_hub_cache_dir() -> Path:
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"]).expanduser()
+    if os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        return Path(os.environ["HUGGINGFACE_HUB_CACHE"]).expanduser()
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def speaker_label_repo_cache_dir(hub_cache_dir: Path) -> Path:
+    return hub_cache_dir / SPEAKER_LABEL_REPO_CACHE_NAME
+
+
+def speaker_label_repo_cache_ready(hub_cache_dir: Path) -> bool:
+    repo_dir = speaker_label_repo_cache_dir(hub_cache_dir)
+    snapshots_dir = repo_dir / "snapshots"
+    if not repo_dir.is_dir() or not snapshots_dir.is_dir():
+        return False
+    try:
+        return any(item.is_dir() for item in snapshots_dir.iterdir())
+    except OSError:
+        return False
+
+
+def speaker_label_app_cache_root(state_dir: Path) -> Path:
+    return state_dir / SPEAKER_LABEL_CACHE_DIRNAME
+
+
+def speaker_label_app_hub_cache_dir(state_dir: Path) -> Path:
+    return speaker_label_app_cache_root(state_dir) / "huggingface" / "hub"
+
+
+def speaker_label_cache_choice(state_dir: Path) -> tuple[str, Path]:
+    global_hub = global_huggingface_hub_cache_dir()
+    if speaker_label_repo_cache_ready(global_hub):
+        return "global", global_hub
+    return "app", speaker_label_app_hub_cache_dir(state_dir)
+
+
+def speaker_label_cache_diagnostics(state_dir: Path) -> dict[str, object]:
+    global_hub = global_huggingface_hub_cache_dir()
+    app_hub = speaker_label_app_hub_cache_dir(state_dir)
+    scope, selected_hub = speaker_label_cache_choice(state_dir)
+    global_repo = speaker_label_repo_cache_dir(global_hub)
+    app_repo = speaker_label_repo_cache_dir(app_hub)
+    return {
+        "model_id": SPEAKER_LABEL_MODEL_ID,
+        "selected_scope": scope,
+        "selected_hub_cache": str(selected_hub),
+        "global_hub_cache": str(global_hub),
+        "global_model_cache_found": speaker_label_repo_cache_ready(global_hub),
+        "global_model_cache_size": directory_size(global_repo),
+        "app_hub_cache": str(app_hub),
+        "app_model_cache_found": speaker_label_repo_cache_ready(app_hub),
+        "app_model_cache_size": directory_size(app_repo),
+    }
+
+
 def python_version(python_bin: Path) -> str:
     return subprocess.check_output(
         [str(python_bin), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"],
@@ -1275,6 +1390,10 @@ def runtime_has_backend(python_bin: Path, backend: str) -> bool:
     return runtime_has_module(python_bin, BACKEND_MODULES[backend])
 
 
+def runtime_has_speaker_labels(python_bin: Path) -> bool:
+    return runtime_has_module(python_bin, SPEAKER_LABEL_MODULE)
+
+
 def installed_backends(python_bin: Path) -> tuple[str, ...]:
     found = [backend for backend in ("mlx", "faster-whisper") if runtime_has_backend(python_bin, backend)]
     return tuple(found)
@@ -1289,11 +1408,17 @@ def installed_packages(python_bin: Path) -> tuple[str, ...]:
     for backend in ("mlx", "faster-whisper"):
         if runtime_has_backend(python_bin, backend):
             found.append("mlx-whisper" if backend == "mlx" else "faster-whisper")
+    if runtime_has_speaker_labels(python_bin):
+        found.append("speaker-labels")
     return tuple(found) if found else ("venv-created-no-backends",)
 
 
 def backend_packages(backend: str) -> tuple[str, ...]:
     return BACKEND_PACKAGES[backend]
+
+
+def speaker_label_packages() -> tuple[str, ...]:
+    return SPEAKER_LABEL_PACKAGES
 
 
 def install_packages(python_bin: Path, description: str, *packages: str) -> None:
@@ -1331,7 +1456,13 @@ def ensure_venv(plan: RuntimePlan) -> None:
             raise RuntimeError(f"Failed creating virtualenv with {plan.runtime_builder_python}")
 
 
-def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> RuntimePlan:
+def ensure_runtime(
+    plan: RuntimePlan,
+    *,
+    update: bool,
+    selected_backend_required: bool,
+    speaker_labels_required: bool = False,
+) -> RuntimePlan:
     ensure_venv(plan)
     missing_shared_runtime = not runtime_has_module(plan.venv_python, "webrtcvad")
     if update or missing_shared_runtime:
@@ -1347,6 +1478,12 @@ def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required
         if backend in backends_to_install:
             label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
             install_packages(plan.venv_python, f"Installing {label}", *backend_packages(backend))
+    if speaker_labels_required and (update or not runtime_has_speaker_labels(plan.venv_python)):
+        install_packages(
+            plan.venv_python,
+            "Installing optional speaker-label packages",
+            *speaker_label_packages(),
+        )
     if plan.selected_backend == "mlx" and plan.stable_mlx_python:
         if not runtime_has_backend(plan.venv_python, "mlx"):
             if plan.runtime_selection_source != "explicit":
@@ -1358,12 +1495,20 @@ def ensure_runtime(plan: RuntimePlan, *, update: bool, selected_backend_required
     return rebuild_plan(plan)
 
 
-def packages_to_install_now(plan: RuntimePlan, *, update: bool, selected_backend_required: bool) -> tuple[str, ...]:
+def packages_to_install_now(
+    plan: RuntimePlan,
+    *,
+    update: bool,
+    selected_backend_required: bool,
+    speaker_labels_required: bool = False,
+) -> tuple[str, ...]:
     packages: list[str] = []
     if update or "webrtcvad" not in plan.installed_packages:
         packages.extend(["pip", "setuptools", "wheel", "webrtcvad"])
     if selected_backend_required and plan.selected_backend not in plan.installed_backends:
         packages.extend(["mlx-whisper" if plan.selected_backend == "mlx" else "faster-whisper"])
+    if speaker_labels_required and (update or "speaker-labels" not in plan.installed_packages):
+        packages.append("speaker-labels")
     return tuple(dict.fromkeys(packages))
 
 
@@ -1417,6 +1562,47 @@ def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], packa
     )
 
 
+def print_speaker_label_install_warning(plan: RuntimePlan) -> None:
+    cache_info = speaker_label_cache_diagnostics(plan.state_dir)
+    global_found = bool(cache_info["global_model_cache_found"])
+    cache_line = (
+        "found; the existing global model cache will be reused"
+        if global_found
+        else f"not found; new model files will be stored under {cache_info['app_hub_cache']}"
+    )
+    model_download = "0 MB new model download expected" if global_found else SPEAKER_LABEL_MODEL_SIZE_ESTIMATE
+    say("")
+    warn("Speaker labels need optional ML packages and can use a lot more disk space.")
+    say("  Public flag:        --speaker-labels", err=True)
+    say("  Expert alias:       --diarize", err=True)
+    say(f"  Optional packages:  {SPEAKER_LABEL_PACKAGE_SIZE_ESTIMATE}", err=True)
+    say(f"  Speaker model:      {model_download}", err=True)
+    say(f"  Global model cache: {cache_line}", err=True)
+    say(f"  Cleanup later:      {Path(sys.argv[0]).name} --clean-speaker-labels", err=True)
+
+
+def clean_speaker_labels(plan: RuntimePlan, *, assume_yes: bool) -> None:
+    cache_root = speaker_label_app_cache_root(plan.state_dir)
+    cache_size = directory_size(cache_root)
+    package_status = "installed" if runtime_has_speaker_labels(plan.venv_python) else "not installed"
+    say(f"{BOLD}Speaker Label Cleanup{RESET}")
+    say(f"  Runtime:            {plan.venv_python if plan.venv_python.exists() else 'not built yet'}")
+    say(f"  Packages:           {package_status}")
+    say(f"  App-owned cache:    {cache_root}")
+    say(f"  App-owned size:     {format_bytes(cache_size)}")
+    say(f"  Global HF cache:    untouched")
+    if not plan.venv_python.exists() and not cache_root.exists():
+        success("Nothing to clean for speaker labels.")
+        return
+    if not confirm("Remove optional speaker-label packages and app-owned speaker-label cache?", assume_yes=assume_yes):
+        die("Speaker-label cleanup canceled. Everything is still in place.")
+    if plan.venv_python.exists():
+        uninstall_packages(plan.venv_python, *SPEAKER_LABEL_CLEAN_PACKAGES)
+    if cache_root.exists():
+        shutil.rmtree(cache_root)
+    success("Removed optional speaker-label packages and app-owned cache. Global Hugging Face caches were left alone.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False, prog=Path(sys.argv[0]).name)
     parser.add_argument("targets", nargs="*")
@@ -1428,6 +1614,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--clean-speaker-labels", action="store_true")
     parser.add_argument("-y", "--yes", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("-l", "--lang", default="auto")
@@ -1454,6 +1641,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--review-postprocessing", "--lint", dest="review_postprocessing", action="store_true")
     parser.add_argument("--paragraphs", action="store_true")
+    parser.add_argument("--speaker-labels", "--diarize", dest="speaker_labels", action="store_true")
     parser.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLE_PRESETS), default="balanced")
     parser.add_argument("--glossary", action="append", default=[], metavar="PATH")
     parser.add_argument("--suppress-phrases", action="append", default=[], metavar="PATH")
@@ -1490,6 +1678,7 @@ CONFIG_VALUE_TYPES: dict[str, object] = {
     "speech_trim": bool,
     "review_postprocessing": bool,
     "paragraphs": bool,
+    "speaker_labels": bool,
     "subtitle_style": str,
     "glossary": list,
     "extra_glossary": list,
@@ -1739,6 +1928,7 @@ def print_help() -> None:
             ("--suppress-phrases=PATH", "Load known intro/outro phrases to suppress; repeat to stack files."),
             ("--review-postprocessing, --lint", "Report suspicious leftovers such as spoken references or dense cues."),
             ("--paragraphs", "Format transcript output as readable paragraphs."),
+            ("--speaker-labels, --diarize", "Label anonymous speakers in transcript output."),
         )
     )
     output_rows = format_help_rows(
@@ -1767,6 +1957,7 @@ def print_help() -> None:
             ("--update", "Refresh packages in the managed runtime."),
             ("--reinstall", "Rebuild the managed runtime from scratch."),
             ("--clean", "Remove the managed runtime."),
+            ("--clean-speaker-labels", "Remove optional speaker-label packages and app-owned model cache."),
             ("-y, --yes", "Skip confirmation prompts."),
             ("--state-dir=PATH", "Store the managed runtime under PATH."),
             ("--python=/path/to/python", "Interpreter to use when building the managed runtime."),
@@ -1827,6 +2018,8 @@ def print_help() -> None:
   Use --transcript to add a .txt transcript, or --transcript-only when you do not need subtitle files.
   Existing sidecar .srt/.ass files can supply transcript text without retranscribing unless --force is set.
   Use --paragraphs with transcript output to split text on long timing gaps and sentence boundaries.
+  Use --speaker-labels to add Speaker 1/Speaker 2 labels to transcript output; subtitles stay unlabeled.
+  Speaker labels are optional and install larger ML packages only when requested.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1858,6 +2051,8 @@ def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) 
     effective_burn_requested = args.burn and not transcript_only
     if getattr(args, "transcript", False) and args.embed_file is not None and not transcript_only:
         warn("--transcript is ignored with --embed-file because that mode does not transcribe.")
+    if getattr(args, "speaker_labels", False) and args.embed_file is not None and not transcript_only:
+        warn("--speaker-labels is ignored with --embed-file because that mode does not transcribe.")
     if not shutil.which("ffmpeg") and (effective_burn_requested or effective_embed_requested):
         if not getattr(args, "dry_run", False):
             print_install_help(os_name, pkg_mgr)
@@ -1956,7 +2151,8 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
     transcript_only = getattr(args, "transcript_only", False)
     embed_file_mode = args.embed_file is not None and not transcript_only
     embed_requested = (args.embed or embed_file_mode) and not transcript_only
-    transcript_requested = getattr(args, "transcript", False) and not embed_file_mode
+    speaker_labels_requested = getattr(args, "speaker_labels", False) and not embed_file_mode
+    transcript_requested = (getattr(args, "transcript", False) or speaker_labels_requested) and not embed_file_mode
     return {
         "WHISPER_TARGETS": json.dumps(list(args.targets or [])),
         "WHISPER_LANG": args.lang,
@@ -1967,6 +2163,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
         "WHISPER_REVIEW_POSTPROCESSING": "1" if args.review_postprocessing else "0",
         "WHISPER_PARAGRAPHS": "1" if args.paragraphs else "0",
+        "WHISPER_SPEAKER_LABELS": "1" if speaker_labels_requested else "0",
         "WHISPER_SUBTITLE_STYLE": args.subtitle_style,
         "WHISPER_GLOSSARY_FILES": json.dumps(list(args.glossary or [])),
         "WHISPER_SUPPRESSION_FILES": json.dumps(list(args.suppress_phrases or [])),
@@ -2038,6 +2235,11 @@ def doctor_payload(plan: RuntimePlan, args: argparse.Namespace | None = None) ->
             "sources": [str(path) for path in getattr(args, "_config_sources", ())],
         },
         "ffmpeg": ffmpeg_diagnostics(args) if args else {"found": bool(shutil.which("ffmpeg")), "path": shutil.which("ffmpeg")},
+        "speaker_labels": {
+            "installed": runtime_has_speaker_labels(plan.venv_python),
+            "packages": list(SPEAKER_LABEL_PACKAGES),
+            "cache": speaker_label_cache_diagnostics(plan.state_dir),
+        },
         "runtime": json_safe(plan),
     }
 
@@ -2070,6 +2272,8 @@ def print_doctor(plan: RuntimePlan, args: argparse.Namespace | None = None) -> N
         ("Model reason", plan.model_reason),
         ("Installed backends", ", ".join(plan.installed_backends) if plan.installed_backends else "none"),
         ("Installed pkgs", ", ".join(plan.installed_packages)),
+        ("Speaker labels", "installed" if runtime_has_speaker_labels(plan.venv_python) else "not installed"),
+        ("Speaker cache", speaker_label_cache_diagnostics(plan.state_dir)["selected_scope"]),
         ("ffmpeg", shutil.which("ffmpeg") or "not found"),
     ]
     rows.extend(render_hardware_summary(plan.profile))
@@ -3890,39 +4094,71 @@ def strip_subtitle_inline_markup(text: str) -> str:
     return normalized_text(text)
 
 
-def transcript_text_from_chunks(chunks: list[TranscriptChunk], *, paragraphs: bool) -> str:
+def transcript_should_break_paragraph(
+    current_parts: list[str],
+    current_length: int,
+    previous_end: float | None,
+    chunk: TranscriptChunk,
+    *,
+    paragraphs: bool,
+) -> bool:
+    if not paragraphs or not current_parts:
+        return False
+    gap = None if previous_end is None else max(0.0, chunk.start - previous_end)
+    return bool(
+        (gap is not None and gap >= TRANSCRIPT_PARAGRAPH_GAP_SECONDS)
+        or (
+            current_length >= TRANSCRIPT_PARAGRAPH_SOFT_MAX_CHARS
+            and TRANSCRIPT_SENTENCE_END_RE.search(current_parts[-1])
+        )
+    )
+
+
+def transcript_text_from_chunks(chunks: list[TranscriptChunk], *, paragraphs: bool, speaker_labels: bool = False) -> str:
     if not chunks:
         return ""
-    if not paragraphs:
+    if not paragraphs and not speaker_labels:
         return normalized_text(" ".join(chunk.text for chunk in chunks if chunk.text))
     paragraph_texts: list[str] = []
     current_parts: list[str] = []
     current_length = 0
     previous_end: float | None = None
+    current_speaker = ""
+
+    def flush_current() -> None:
+        nonlocal current_parts, current_length, current_speaker
+        if not current_parts:
+            return
+        text = normalized_text(" ".join(current_parts))
+        if text:
+            if speaker_labels and current_speaker:
+                paragraph_texts.append(f"{current_speaker}: {text}")
+            else:
+                paragraph_texts.append(text)
+        current_parts = []
+        current_length = 0
+
     for chunk in chunks:
         text = normalized_text(chunk.text)
         if not text:
             continue
-        gap = None if previous_end is None else max(0.0, chunk.start - previous_end)
-        should_break = bool(
-            current_parts
-            and (
-                (gap is not None and gap >= TRANSCRIPT_PARAGRAPH_GAP_SECONDS)
-                or (
-                    current_length >= TRANSCRIPT_PARAGRAPH_SOFT_MAX_CHARS
-                    and TRANSCRIPT_SENTENCE_END_RE.search(current_parts[-1])
-                )
-            )
+        speaker = normalized_text(chunk.speaker)
+        speaker_changed = bool(speaker_labels and current_parts and speaker != current_speaker)
+        should_break = speaker_changed or transcript_should_break_paragraph(
+            current_parts,
+            current_length,
+            previous_end,
+            chunk,
+            paragraphs=paragraphs,
         )
         if should_break:
-            paragraph_texts.append(normalized_text(" ".join(current_parts)))
-            current_parts = []
-            current_length = 0
+            flush_current()
+        if speaker_labels and not current_parts:
+            current_speaker = speaker
         current_parts.append(text)
         current_length += len(text) + 1
         previous_end = chunk.end
-    if current_parts:
-        paragraph_texts.append(normalized_text(" ".join(current_parts)))
+    flush_current()
     return "\n\n".join(paragraph for paragraph in paragraph_texts if paragraph)
 
 
@@ -3934,7 +4170,14 @@ def transcript_chunks_from_segments(
         text = normalized_text(str(segment.get("text", "")))
         if not text:
             continue
-        chunks.append(TranscriptChunk(float(segment.get("start", 0.0)), float(segment.get("end", 0.0)), text))
+        chunks.append(
+            TranscriptChunk(
+                float(segment.get("start", 0.0)),
+                float(segment.get("end", 0.0)),
+                text,
+                normalized_text(str(segment.get("speaker", ""))),
+            )
+        )
     return chunks
 
 
@@ -4043,6 +4286,7 @@ def should_write_transcript(env: dict[str, str], backend: str) -> bool:
     return (
         env.get("WHISPER_TRANSCRIPT", "0") == "1"
         or env.get("WHISPER_TRANSCRIPT_ONLY", "0") == "1"
+        or env.get("WHISPER_SPEAKER_LABELS", "0") == "1"
         or legacy_mlx_text_output_requested(env, backend)
     )
 
@@ -4055,6 +4299,7 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
     output_root = output_root_for_media(media_path, env)
     output_txt = should_write_text_output(env, backend)
     transcript_requested = should_write_transcript(env, backend)
+    speaker_labels_requested = env.get("WHISPER_SPEAKER_LABELS", "0") == "1"
     actions: list[str] = ["transcribe"]
     expected_outputs: list[Path] = []
     subtitle_path: Path | None = None
@@ -4067,13 +4312,16 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
     in_place_action = False
     if transcript_requested:
         text_path = output_root / f"{media_path.stem}.txt"
-        transcript_source_subtitle_path = existing_transcript_source_subtitle_path(
-            media_path,
-            output_root,
-            ".ass" if env.get("WHISPER_ASS", "0") == "1" else ".srt",
-        )
+        if not speaker_labels_requested:
+            transcript_source_subtitle_path = existing_transcript_source_subtitle_path(
+                media_path,
+                output_root,
+                ".ass" if env.get("WHISPER_ASS", "0") == "1" else ".srt",
+            )
         expected_outputs.append(text_path)
         actions.append("write-transcript")
+        if speaker_labels_requested:
+            actions.append("label-speakers")
     if output_txt:
         actions.append("transcript-only")
     else:
@@ -4203,10 +4451,15 @@ def write_transcript_output(
     compact_status: bool,
     show_stage_messages: bool,
     paragraphs: bool = False,
+    speaker_labels: bool = False,
     mlx_result: dict | None = None,
 ) -> Path:
     text_path = output_root / f"{media_path.stem}.txt"
-    plain_text = transcript_text_from_chunks(transcript_chunks_from_segments(segments), paragraphs=paragraphs)
+    plain_text = transcript_text_from_chunks(
+        transcript_chunks_from_segments(segments),
+        paragraphs=paragraphs,
+        speaker_labels=speaker_labels,
+    )
     if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources and mlx_result:
         plain_text = normalized_text(str(mlx_result.get("text", "")))
     write_txt(text_path, plain_text)
@@ -4247,7 +4500,8 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
     env = build_runtime_processing_env(args, plan)
     files = discover_planned_files(args)
     force = getattr(args, "force", False)
-    effective_transcript = args.transcript and not (args.embed_file is not None and not args.transcript_only)
+    effective_speaker_labels = args.speaker_labels and not (args.embed_file is not None and not args.transcript_only)
+    effective_transcript = (args.transcript or effective_speaker_labels) and not (args.embed_file is not None and not args.transcript_only)
     file_entries: list[dict[str, object]] = []
     for media_path in files:
         try:
@@ -4299,6 +4553,7 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
             "transcript": effective_transcript,
             "transcript_only": args.transcript_only,
             "paragraphs": args.paragraphs,
+            "speaker_labels": effective_speaker_labels,
             "speech_trim": args.speech_trim,
             "glossary_files": list(args.glossary or []),
             "suppression_files": list(args.suppress_phrases or []),
@@ -4310,7 +4565,16 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
             "burn": args.burn and not args.transcript_only,
             "transcript": effective_transcript,
             "transcript_only": args.transcript_only,
+            "speaker_labels": effective_speaker_labels,
             "force": force,
+        },
+        "speaker_labels": {
+            "requested": effective_speaker_labels,
+            "installed": runtime_has_speaker_labels(plan.venv_python),
+            "packages": list(SPEAKER_LABEL_PACKAGES),
+            "package_size_estimate": SPEAKER_LABEL_PACKAGE_SIZE_ESTIMATE,
+            "model_size_estimate": SPEAKER_LABEL_MODEL_SIZE_ESTIMATE,
+            "cache": speaker_label_cache_diagnostics(plan.state_dir),
         },
         "ffmpeg": ffmpeg_diagnostics(args),
         "files": file_entries,
@@ -4330,6 +4594,12 @@ def print_dry_run(args: argparse.Namespace, plan: RuntimePlan) -> None:
     say(f"  Config files:       {', '.join(payload['config']['sources']) or 'none'}")
     say(f"  Glossary files:     {', '.join(payload['defaults']['glossary_files']) or 'none'}")
     say(f"  Suppression files:  {', '.join(payload['defaults']['suppression_files']) or 'none'}")
+    speaker_info = payload["speaker_labels"]
+    speaker_status = "enabled" if speaker_info["requested"] else "disabled"
+    if speaker_info["requested"]:
+        cache_info = speaker_info["cache"]
+        speaker_status += f" | packages: {'installed' if speaker_info['installed'] else 'need install'} | cache: {cache_info['selected_scope']}"
+    say(f"  Speaker labels:     {speaker_status}")
     ffmpeg_info = payload["ffmpeg"]
     required_for = ", ".join(ffmpeg_info["required_for"]) or "not required"
     optional_for = ", ".join(ffmpeg_info["optional_for"]) or "none"
@@ -4440,6 +4710,140 @@ def print_postprocess_review(
         return
     for note in notes:
         print(f"   - {note}", file=sys.stderr)
+
+
+def speaker_label_token() -> str | None:
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+
+
+def load_speaker_label_pipeline(cache_dir: Path):
+    from pyannote.audio import Pipeline
+
+    token = speaker_label_token()
+    kwargs = {"cache_dir": str(cache_dir)}
+    if token:
+        kwargs["token"] = token
+    try:
+        return Pipeline.from_pretrained(SPEAKER_LABEL_MODEL_ID, **kwargs)
+    except TypeError:
+        kwargs.pop("token", None)
+        if token:
+            kwargs["use_auth_token"] = token
+        return Pipeline.from_pretrained(SPEAKER_LABEL_MODEL_ID, **kwargs)
+
+
+def iter_annotation_speaker_turns(annotation) -> list[SpeakerTurn]:
+    turns: list[SpeakerTurn] = []
+    if hasattr(annotation, "itertracks"):
+        for item in annotation.itertracks(yield_label=True):
+            if len(item) == 3:
+                turn, _track, speaker = item
+            elif len(item) == 2:
+                turn, speaker = item
+            else:
+                continue
+            turns.append(SpeakerTurn(float(turn.start), float(turn.end), str(speaker)))
+        return turns
+    for item in annotation:
+        try:
+            if len(item) == 3:
+                turn, _track, speaker = item
+            elif len(item) == 2:
+                turn, speaker = item
+            else:
+                continue
+            turns.append(SpeakerTurn(float(turn.start), float(turn.end), str(speaker)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return turns
+
+
+def extract_speaker_turns(output) -> list[SpeakerTurn]:
+    annotation = (
+        getattr(output, "exclusive_speaker_diarization", None)
+        or getattr(output, "speaker_diarization", None)
+        or output
+    )
+    turns = iter_annotation_speaker_turns(annotation)
+    return sorted((turn for turn in turns if turn.end > turn.start and turn.speaker), key=lambda turn: (turn.start, turn.end))
+
+
+def speaker_overlap_seconds(segment_start: float, segment_end: float, turn: SpeakerTurn) -> float:
+    return max(0.0, min(segment_end, turn.end) - max(segment_start, turn.start))
+
+
+def speaker_for_segment(
+    segment: dict[str, float | str | list[dict[str, float | str]]],
+    turns: list[SpeakerTurn],
+) -> str:
+    if not turns:
+        return ""
+    segment_start = float(segment.get("start", 0.0))
+    segment_end = float(segment.get("end", segment_start))
+    best_speaker = ""
+    best_overlap = 0.0
+    for turn in turns:
+        if turn.end <= segment_start:
+            continue
+        if turn.start >= segment_end:
+            break
+        overlap = speaker_overlap_seconds(segment_start, segment_end, turn)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = turn.speaker
+    if best_speaker:
+        return best_speaker
+    midpoint = segment_start + max(0.0, segment_end - segment_start) / 2
+    for turn in turns:
+        if turn.start <= midpoint <= turn.end:
+            return turn.speaker
+    return ""
+
+
+def apply_speaker_turns_to_segments(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    turns: list[SpeakerTurn],
+) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
+    speaker_names: dict[str, str] = {}
+    labeled: list[dict[str, float | str | list[dict[str, float | str]]]] = []
+    for segment in segments:
+        raw_speaker = speaker_for_segment(segment, turns)
+        public_speaker = ""
+        if raw_speaker:
+            if raw_speaker not in speaker_names:
+                speaker_names[raw_speaker] = f"Speaker {len(speaker_names) + 1}"
+            public_speaker = speaker_names[raw_speaker]
+        labeled.append({**segment, "speaker": public_speaker})
+    return labeled
+
+
+def run_speaker_labeling(
+    media_path: Path,
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    *,
+    state_dir: Path,
+    compact_status: bool,
+    show_stage_messages: bool,
+) -> list[dict[str, float | str | list[dict[str, float | str]]]]:
+    scope, cache_dir = speaker_label_cache_choice(state_dir)
+    if scope == "app":
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    if show_stage_messages:
+        message = "Labeling speakers" if compact_status else f"Labeling speakers in {media_path.name}"
+        print(f"👥 {message}...", file=sys.stderr)
+    try:
+        pipeline = load_speaker_label_pipeline(cache_dir)
+        output = pipeline(str(media_path))
+    except Exception as exc:
+        raise RuntimeError(
+            "Speaker labeling failed. The pyannote model may need accepted Hugging Face terms "
+            "and an HF_TOKEN/HUGGINGFACE_TOKEN environment variable."
+        ) from exc
+    turns = extract_speaker_turns(output)
+    if not turns:
+        warn("Speaker labeling finished, but no speaker turns were returned. Transcript text will stay unlabeled.")
+        return segments
+    return apply_speaker_turns_to_segments(segments, turns)
 
 
 def normalize_faster_segments(segments_iter, report_progress):
@@ -4655,6 +5059,14 @@ def process_file(
             speech_trim_spinner.stop()
     segments, speech_prune_stats = prune_segments_to_speech(segments, speech_intervals if speech_trim_enabled else None)
     segments, suppression_stats = apply_suppression_rules_to_segments(segments, suppression_rules)
+    if env.get("WHISPER_SPEAKER_LABELS", "0") == "1":
+        segments = run_speaker_labeling(
+            media_path,
+            segments,
+            state_dir=Path(env.get("WHISPER_STATE_DIR", "")) if env.get("WHISPER_STATE_DIR") else default_state_dir(detect_os()),
+            compact_status=compact_status,
+            show_stage_messages=show_stage_messages,
+        )
     spoken_phrase_candidates = (
         count_spoken_bible_reference_phrase_candidates(segments)
         if review_postprocessing and not bible_reference_phrase_normalization_enabled
@@ -4684,6 +5096,7 @@ def process_file(
             compact_status=compact_status,
             show_stage_messages=show_stage_messages,
             paragraphs=env.get("WHISPER_PARAGRAPHS", "0") == "1",
+            speaker_labels=env.get("WHISPER_SPEAKER_LABELS", "0") == "1",
             mlx_result=mlx_result if backend == "mlx" else None,
         )
     if not output_txt:
@@ -4975,6 +5388,7 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--suppress-phrases=/path/to/whisper-suppress.txt{RESET}")
     say(f"  {MAGENTA}--review-postprocessing{RESET}")
     say(f"  {MAGENTA}--transcript-only{RESET}")
+    say(f"  {MAGENTA}--speaker-labels{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
@@ -5033,7 +5447,14 @@ def outer_main() -> int:
         die("--json is only supported with --doctor or --plan/--dry-run")
     if args.jobs < 1:
         die("--jobs must be at least 1")
-    runtime_management_requested = args.doctor or args.clean or args.reinstall or args.setup_only or args.update
+    runtime_management_requested = (
+        args.doctor
+        or args.clean
+        or args.clean_speaker_labels
+        or args.reinstall
+        or args.setup_only
+        or args.update
+    )
     if args.embed_file is not None and not args.transcript_only and not runtime_management_requested and not args.dry_run:
         if not args.targets:
             print_help()
@@ -5064,6 +5485,9 @@ def outer_main() -> int:
             return 0
         maybe_remove_runtime(plan, assume_yes=args.yes)
         return 0
+    if args.clean_speaker_labels:
+        clean_speaker_labels(plan, assume_yes=args.yes)
+        return 0
     if args.reinstall and plan.venv_dir.exists():
         if not confirm(f"Remove and rebuild the runtime in {plan.state_dir}?", assume_yes=args.yes):
             die("reinstall cancelled")
@@ -5078,13 +5502,24 @@ def outer_main() -> int:
             process_files(files, env, plan.selected_backend, args.jobs)
             return 0
     selected_backend_required = bool((args.targets and (args.embed_file is None or args.transcript_only)) or args.setup_only or args.update or not plan.venv_python.exists())
+    speaker_labels_required = bool(
+        args.speaker_labels
+        and ((args.targets and (args.embed_file is None or args.transcript_only)) or args.setup_only or args.update)
+    )
+    speaker_label_install_needed = speaker_labels_required and (args.update or "speaker-labels" not in plan.installed_packages)
     install_needed = (
         not plan.venv_python.exists()
         or "webrtcvad" not in plan.installed_packages
         or (selected_backend_required and plan.selected_backend not in plan.installed_backends)
+        or speaker_label_install_needed
         or args.update
     )
-    install_now = packages_to_install_now(plan, update=args.update, selected_backend_required=selected_backend_required)
+    install_now = packages_to_install_now(
+        plan,
+        update=args.update,
+        selected_backend_required=selected_backend_required,
+        speaker_labels_required=speaker_labels_required,
+    )
     install_later = packages_for_possible_fallback(plan)
     if install_needed and not os.environ.get(MANAGED_ENV_FLAG):
         print_install_summary(plan, install_now, install_later)
@@ -5094,7 +5529,15 @@ def outer_main() -> int:
         say(f"  {MAGENTA}{Path(sys.argv[0]).name} --doctor{RESET}")
         say(f"  {MAGENTA}{Path(sys.argv[0]).name} --setup-only{RESET}")
         say("")
-        action = prompt_install_action(args.yes)
+        if speaker_label_install_needed:
+            print_speaker_label_install_warning(plan)
+            if not confirm("Install optional speaker-label dependencies now?", assume_yes=args.yes):
+                say("")
+                say("No changes made. Speaker labels are still available later with --speaker-labels.")
+                return 0
+            action = "yes"
+        else:
+            action = prompt_install_action(args.yes)
         if action == "modify":
             print_modify_examples()
             return 0
@@ -5103,7 +5546,12 @@ def outer_main() -> int:
             say("No changes made. You're all set to come back to this later.")
             return 0
     if install_needed:
-        plan = ensure_runtime(plan, update=args.update, selected_backend_required=selected_backend_required)
+        plan = ensure_runtime(
+            plan,
+            update=args.update,
+            selected_backend_required=selected_backend_required,
+            speaker_labels_required=speaker_labels_required,
+        )
     if args.setup_only:
         success(f"Runtime is ready in {plan.state_dir}")
         success(f"Backend plan: primary={plan.selected_backend}, fallback={plan.fallback_backend}")
