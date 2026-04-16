@@ -1532,9 +1532,16 @@ def render_hardware_summary(profile: HardwareProfile) -> list[tuple[str, object]
     ]
 
 
+def print_label_rows(rows: list[tuple[str, object]], *, indent: int = 2) -> None:
+    label_width = max((len(label) + 1 for label, _value in rows), default=0)
+    prefix = " " * indent
+    for label, value in rows:
+        say(f"{prefix}{label + ':':<{label_width}} {value}")
+
+
 def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], package_later: tuple[str, ...]) -> None:
     say(f"{BOLD}Install Summary{RESET}")
-    for label, value in [
+    rows = [
         ("Launcher Python", plan.launcher_python),
         ("Runtime builder", f"{plan.runtime_builder_python} ({plan.runtime_builder_version})"),
         ("Runtime selection", plan.runtime_selection_source),
@@ -1551,15 +1558,15 @@ def print_install_summary(plan: RuntimePlan, package_now: tuple[str, ...], packa
         ("Fallback compute", plan.fallback_compute),
         ("Model", plan.selected_model),
         ("Model reason", plan.model_reason),
-    ]:
-        say(f"  {label + ':':18} {value}")
-    for label, value in render_hardware_summary(plan.profile):
-        say(f"  {label + ':':18} {value}")
-    say(f"  {'Install now:':18} {', '.join(package_now) if package_now else 'nothing new'}")
-    say(
-        f"  {'Install later:':18} "
-        f"{', '.join(package_later) if package_later else 'no fallback packages planned'}"
+    ]
+    rows.extend(render_hardware_summary(plan.profile))
+    rows.extend(
+        [
+            ("Install now", ", ".join(package_now) if package_now else "nothing new"),
+            ("Install later", ", ".join(package_later) if package_later else "no fallback packages planned"),
+        ]
     )
+    print_label_rows(rows)
 
 
 def print_speaker_label_install_warning(plan: RuntimePlan) -> None:
@@ -2277,8 +2284,7 @@ def print_doctor(plan: RuntimePlan, args: argparse.Namespace | None = None) -> N
         ("ffmpeg", shutil.which("ffmpeg") or "not found"),
     ]
     rows.extend(render_hardware_summary(plan.profile))
-    for label, value in rows:
-        say(f"  {label + ':':18} {value}")
+    print_label_rows(rows)
 
 
 def subtitle_item_text(item: str | dict[str, float | str]) -> str:

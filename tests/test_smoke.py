@@ -39,6 +39,18 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Whisper Doctor", result.stdout)
         self.assertIn("Selected backend", result.stdout)
+        doctor_rows = [
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("  ") and ":" in line
+        ]
+        value_columns = set()
+        for line in doctor_rows:
+            value_start = line.index(":") + 1
+            while value_start < len(line) and line[value_start] == " ":
+                value_start += 1
+            value_columns.add(value_start)
+        self.assertEqual(len(value_columns), 1, result.stdout)
 
     def test_whisper_doctor_json(self) -> None:
         result = self.run_script("whisper", "--doctor", "--json")
