@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -79,6 +80,22 @@ class WhisperCoreTest(unittest.TestCase):
             self.assertEqual(json_rules.start, ("Opening Song",))
             self.assertEqual(json_rules.any, ("Midroll Reminder",))
             self.assertEqual(json_rules.end, ("Final Prayer",))
+
+    def test_load_glossary_replacement_items_rejects_non_mapping_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "glossary.json"
+            path.write_text(json.dumps(["not", "a", "mapping"]), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "JSON object of string replacements"):
+                self.whisper.load_glossary_replacement_items(path)
+
+    def test_load_suppression_rules_rejects_non_string_json_values(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "suppress.json"
+            path.write_text(json.dumps({"any": ["ok", 123]}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "string or list of strings"):
+                self.whisper.load_suppression_rules(path)
 
     def test_postprocess_segments_normalizes_bible_refs_and_glossary_terms(self) -> None:
         segments = [

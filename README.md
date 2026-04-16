@@ -2,6 +2,8 @@
 
 LLMs have changed the way the programming world works. Welcome to the machine-made code era! 🤖
 
+[![Tests](https://github.com/majal/maj-scripts-vibe/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/majal/maj-scripts-vibe/actions/workflows/tests.yml)
+
 ## Overview
 
 `maj-scripts-vibe` is a home for utility scripts, all vibe-coded. 😎
@@ -476,6 +478,7 @@ Keep `Platform Setup` generic and reusable. Script-specific requirements, caveat
 For quick repo checks, run the lightweight test harness before or after changes:
 
 ```bash
+make test
 python3 -m tests
 ```
 

@@ -45,6 +45,10 @@ When adding a new top-level script to the repo:
 
 Do not add a new script without updating the README.
 
+## Test Rules
+
+Run `python3 -m tests` before pushing changes that affect scripts, tests, or README/AGENTS documentation. On Windows, use `py -m tests`.
+
 ## Script Section Template
 
 Each script subsection under `## Scripts` in `README.md` should include:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from tests.support import load_script_module
 
@@ -60,6 +63,30 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_BURN_VCODEC"], "libx264")
         self.assertEqual(env["WHISPER_FONT"], "Aptos")
         self.assertEqual(env["WHISPER_KARAOKE"], "1")
+
+    def test_ensure_system_prereqs_requires_ffmpeg_for_embed(self) -> None:
+        args = argparse.Namespace(
+            embed=True,
+            embed_file=None,
+            burn=False,
+            backend="auto",
+            mlx_word_timestamps="auto",
+            mlx_output_format="auto",
+            mlx_model_default="wrapper",
+            in_place=False,
+            burn_vcodec="auto",
+        )
+
+        with (
+            mock.patch.object(self.whisper.shutil, "which", return_value=None),
+            mock.patch.object(self.whisper, "print_install_help"),
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                self.whisper.ensure_system_prereqs(args, "linux", "apt-get")
+
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("ffmpeg is required for --embed/--embed-file", stderr.getvalue())
 
     def test_embedded_subtitle_plan_uses_mov_text_for_mp4_srt(self) -> None:
         output_path, codec = self.whisper.embedded_subtitle_plan(
