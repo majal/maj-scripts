@@ -13,6 +13,16 @@ The documentation model is:
 - `README.md` is the user-facing index and navigation hub
 - `AGENTS.md` defines how scripts and docs should be added in the future
 
+## Agent Permission Rules
+
+Normal file edits inside `/home/maj/dig/maj-scripts-vibe` are pre-approved. Do not ask for user permission before creating or modifying files in this repo as part of the requested work.
+
+If the agent workflow requires a brief note before editing, phrase it as a progress update, not as an approval request.
+
+This repo guidance does not override Codex CLI runtime approval prompts. If normal in-repo edits still trigger approval UI, adjust the Codex CLI approval policy in the user-level config rather than adding more repo instructions.
+
+Still ask for approval before escalated actions, including destructive commands, writes outside this repo or the configured writable roots, GUI/system-level actions, or network-dependent commands that the sandbox blocks.
+
 Recommended top-level README order:
 
 1. Title
