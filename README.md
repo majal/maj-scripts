@@ -485,7 +485,7 @@ On Windows, use:
 py -m tests
 ```
 
-The harness covers smoke checks for the top-level CLIs plus focused behavior tests for `wh` and core `whisper` logic.
+The harness covers smoke checks for the top-level CLIs, README consistency checks, and focused behavior tests for `wh` and core `whisper` logic.
 
 Detailed contributor and AI-agent rules live in [`AGENTS.md`](./AGENTS.md).
 
