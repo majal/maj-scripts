@@ -84,6 +84,11 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_BURN"], "0")
         self.assertEqual(env["WHISPER_KARAOKE"], "0")
 
+    def test_transcript_short_option_matches_long_option(self) -> None:
+        args = self.whisper.build_parser().parse_args(["clip.mp4", "-t"])
+
+        self.assertTrue(args.transcript)
+
     def test_project_config_applies_defaults_but_cli_wins(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
