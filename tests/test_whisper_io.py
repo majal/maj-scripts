@@ -27,6 +27,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             bible_reference_phrases=True,
             speech_trim=False,
             review_postprocessing=True,
+            paragraphs=False,
             subtitle_style="strict",
             glossary=["/tmp/glossary.txt"],
             suppress_phrases=["/tmp/suppress.txt"],
@@ -53,6 +54,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_BIBLE_REFERENCE_PHRASES"], "1")
         self.assertEqual(env["WHISPER_SPEECH_TRIM"], "0")
         self.assertEqual(env["WHISPER_REVIEW_POSTPROCESSING"], "1")
+        self.assertEqual(env["WHISPER_PARAGRAPHS"], "0")
         self.assertEqual(env["WHISPER_SUBTITLE_STYLE"], "strict")
         self.assertEqual(env["WHISPER_GLOSSARY_FILES"], '["/tmp/glossary.txt"]')
         self.assertEqual(env["WHISPER_SUPPRESSION_FILES"], '["/tmp/suppress.txt"]')
@@ -93,6 +95,22 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         args = self.whisper.build_parser().parse_args(["clip.mp4", "-T"])
 
         self.assertTrue(args.transcript_only)
+
+    def test_paragraphs_config_and_cli_flag_are_supported(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            (root / self.whisper.PROJECT_CONFIG_FILENAME).write_text("paragraphs = true\n", encoding="utf-8")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(self.whisper, "GLOBAL_CONFIG_PATH", root / "missing-global.toml"):
+                    args = self.whisper.parse_args_with_config(self.whisper.build_parser(), ["clip.mp4"])
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertTrue(args.paragraphs)
 
     def test_project_config_applies_defaults_but_cli_wins(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -369,6 +387,50 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             self.assertIn("Resumed", result)
             self.assertEqual(transcript.read_text(encoding="utf-8"), "Hello world\n")
 
+    def test_transcript_from_existing_srt_can_format_paragraphs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            subtitle = root / "clip.srt"
+            transcript = root / "clip.txt"
+            media.write_text("video", encoding="utf-8")
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nFirst thought.\n\n"
+                "2\n00:00:03,000 --> 00:00:04,000\nSecond thought.\n\n",
+                encoding="utf-8",
+            )
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_TRANSCRIPT": "1",
+                "WHISPER_TRANSCRIPT_ONLY": "0",
+                "WHISPER_PARAGRAPHS": "1",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+                "WHISPER_FORCE": "0",
+                "WHISPER_LANG": "en",
+            }
+
+            with (
+                mock.patch.object(self.whisper, "run_faster_whisper", side_effect=AssertionError("should not transcribe")),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.whisper.process_file(
+                    media,
+                    env,
+                    "faster-whisper",
+                    file_index=1,
+                    total_files=1,
+                    inline_progress=False,
+                    compact_status=True,
+                    show_progress=False,
+                    show_stage_messages=False,
+                )
+
+            self.assertEqual(transcript.read_text(encoding="utf-8"), "First thought.\n\nSecond thought.\n")
+
     def test_process_file_writes_transcript_and_subtitles(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -396,6 +458,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                 "WHISPER_BIBLE_REFERENCE_PHRASES": "0",
                 "WHISPER_SPEECH_TRIM": "0",
                 "WHISPER_REVIEW_POSTPROCESSING": "0",
+                "WHISPER_PARAGRAPHS": "0",
                 "WHISPER_SUBTITLE_STYLE": "balanced",
                 "WHISPER_GLOSSARY_FILES": "[]",
                 "WHISPER_SUPPRESSION_FILES": "[]",
@@ -466,6 +529,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                 "WHISPER_BIBLE_REFERENCE_PHRASES": "0",
                 "WHISPER_SPEECH_TRIM": "0",
                 "WHISPER_REVIEW_POSTPROCESSING": "0",
+                "WHISPER_PARAGRAPHS": "0",
                 "WHISPER_SUBTITLE_STYLE": "balanced",
                 "WHISPER_GLOSSARY_FILES": "[]",
                 "WHISPER_SUPPRESSION_FILES": "[]",
@@ -496,6 +560,63 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             self.assertTrue((root / "clip.txt").is_file())
             self.assertFalse((root / "clip.srt").exists())
 
+    def test_process_file_can_write_paragraph_transcript_from_segments(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_TRANSCRIPT": "1",
+                "WHISPER_TRANSCRIPT_ONLY": "1",
+                "WHISPER_PARAGRAPHS": "1",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+                "WHISPER_FORCE": "0",
+                "WHISPER_LANG": "en",
+                "WHISPER_MODEL": "tiny",
+                "WHISPER_BACKEND": "faster-whisper",
+                "WHISPER_FALLBACK_BACKEND": "none",
+                "WHISPER_DEVICE": "cpu",
+                "WHISPER_COMPUTE_TYPE": "int8",
+                "WHISPER_FALLBACK_DEVICE": "none",
+                "WHISPER_FALLBACK_COMPUTE_TYPE": "none",
+                "WHISPER_BIBLE_REFERENCE_NORMALIZATION": "1",
+                "WHISPER_BIBLE_REFERENCE_PHRASES": "0",
+                "WHISPER_SPEECH_TRIM": "0",
+                "WHISPER_REVIEW_POSTPROCESSING": "0",
+                "WHISPER_SUBTITLE_STYLE": "balanced",
+                "WHISPER_GLOSSARY_FILES": "[]",
+                "WHISPER_SUPPRESSION_FILES": "[]",
+                "WHISPER_FONT": "Arial",
+                "WHISPER_KARAOKE": "0",
+            }
+            segments = [
+                {"start": 0.0, "end": 1.0, "text": "First paragraph.", "words": []},
+                {"start": 3.0, "end": 4.0, "text": "Second paragraph.", "words": []},
+            ]
+
+            with (
+                mock.patch.object(self.whisper, "run_faster_whisper", return_value=(segments, "en")),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.whisper.process_file(
+                    media,
+                    env,
+                    "faster-whisper",
+                    file_index=1,
+                    total_files=1,
+                    inline_progress=False,
+                    compact_status=True,
+                    show_progress=False,
+                    show_stage_messages=False,
+                )
+
+            self.assertEqual((root / "clip.txt").read_text(encoding="utf-8"), "First paragraph.\n\nSecond paragraph.\n")
+
     def test_ensure_system_prereqs_requires_ffmpeg_for_embed(self) -> None:
         args = argparse.Namespace(
             embed=True,
@@ -505,6 +626,9 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             mlx_word_timestamps="auto",
             mlx_output_format="auto",
             mlx_model_default="wrapper",
+            transcript=False,
+            transcript_only=False,
+            paragraphs=False,
             in_place=False,
             burn_vcodec="auto",
         )

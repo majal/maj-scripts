@@ -208,6 +208,7 @@ Write a plain-text transcript next to the normal subtitle output:
 ```bash
 whisper /path/to/file.mp4 -t
 whisper /path/to/file.mp4 --transcript
+whisper /path/to/file.mp4 -t --paragraphs
 ```
 
 Write only the transcript:
@@ -308,6 +309,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
 - `-t` / `--transcript` writes a `.txt` transcript alongside normal `.srt`/`.ass` output. If the expected sidecar subtitle already exists, it builds the transcript from that file instead of retranscribing unless `--force` is set.
 - `-T` / `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
+- `--paragraphs` formats transcript text with blank lines between likely paragraphs, based on timing gaps and sentence boundaries. It does not affect subtitle output.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.

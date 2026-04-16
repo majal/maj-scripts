@@ -62,6 +62,12 @@ SUBTITLE_MAX_CHARS_PER_SECOND = 22.0
 SUBTITLE_MAX_MERGED_CUE_DURATION_SECONDS = 7.0
 SUBTITLE_MAX_MERGE_GAP_SECONDS = 0.2
 SUBTITLE_SPEECH_PRUNE_MARGIN_SECONDS = 0.08
+TRANSCRIPT_PARAGRAPH_GAP_SECONDS = 1.5
+TRANSCRIPT_PARAGRAPH_SOFT_MAX_CHARS = 700
+TRANSCRIPT_SENTENCE_END_RE = re.compile(r"""[.!?]["')\]}”’]*$""")
+SRT_TIMESTAMP_RE = re.compile(
+    r"(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s+-->\s+(?P<end>\d{2}:\d{2}:\d{2}[,.]\d{3})"
+)
 SUBTITLE_PROTECTED_ABBREVIATIONS = frozenset(
     {
         "dr.",
@@ -518,6 +524,13 @@ class SuppressionStats:
     leading_segments: int = 0
     trailing_segments: int = 0
     anywhere_segments: int = 0
+
+
+@dataclass(frozen=True)
+class TranscriptChunk:
+    start: float
+    end: float
+    text: str
 
 
 SUBTITLE_STYLE_PRESETS = {
@@ -1440,6 +1453,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speech-trim", dest="speech_trim", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--review-postprocessing", "--lint", dest="review_postprocessing", action="store_true")
+    parser.add_argument("--paragraphs", action="store_true")
     parser.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLE_PRESETS), default="balanced")
     parser.add_argument("--glossary", action="append", default=[], metavar="PATH")
     parser.add_argument("--suppress-phrases", action="append", default=[], metavar="PATH")
@@ -1475,6 +1489,7 @@ CONFIG_VALUE_TYPES: dict[str, object] = {
     "bible_reference_phrases": bool,
     "speech_trim": bool,
     "review_postprocessing": bool,
+    "paragraphs": bool,
     "subtitle_style": str,
     "glossary": list,
     "extra_glossary": list,
@@ -1723,6 +1738,7 @@ def print_help() -> None:
             ("--glossary=PATH", "Load a custom capitalization/replacement glossary; repeat to stack files."),
             ("--suppress-phrases=PATH", "Load known intro/outro phrases to suppress; repeat to stack files."),
             ("--review-postprocessing, --lint", "Report suspicious leftovers such as spoken references or dense cues."),
+            ("--paragraphs", "Format transcript output as readable paragraphs."),
         )
     )
     output_rows = format_help_rows(
@@ -1810,6 +1826,7 @@ def print_help() -> None:
   Existing expected outputs are skipped by default; pass --force to retranscribe.
   Use --transcript to add a .txt transcript, or --transcript-only when you do not need subtitle files.
   Existing sidecar .srt/.ass files can supply transcript text without retranscribing unless --force is set.
+  Use --paragraphs with transcript output to split text on long timing gaps and sentence boundaries.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1949,6 +1966,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_BIBLE_REFERENCE_PHRASES": "1" if args.bible_reference_phrases else "0",
         "WHISPER_SPEECH_TRIM": "1" if args.speech_trim else "0",
         "WHISPER_REVIEW_POSTPROCESSING": "1" if args.review_postprocessing else "0",
+        "WHISPER_PARAGRAPHS": "1" if args.paragraphs else "0",
         "WHISPER_SUBTITLE_STYLE": args.subtitle_style,
         "WHISPER_GLOSSARY_FILES": json.dumps(list(args.glossary or [])),
         "WHISPER_SUPPRESSION_FILES": json.dumps(list(args.suppress_phrases or [])),
@@ -3854,6 +3872,17 @@ def write_txt(path: Path, text: str) -> None:
         handle.write("\n")
 
 
+def parse_srt_timecode(value: str) -> float:
+    hours_text, minutes_text, seconds_text = value.replace(",", ".").split(":")
+    seconds_value = float(seconds_text)
+    return int(hours_text) * 3600 + int(minutes_text) * 60 + seconds_value
+
+
+def parse_ass_timecode(value: str) -> float:
+    hours_text, minutes_text, seconds_text = value.split(":")
+    return int(hours_text) * 3600 + int(minutes_text) * 60 + float(seconds_text)
+
+
 def strip_subtitle_inline_markup(text: str) -> str:
     text = text.replace(r"\N", " ").replace(r"\n", " ").replace(r"\h", " ")
     text = re.sub(r"\{[^{}]*\}", "", text)
@@ -3861,29 +3890,98 @@ def strip_subtitle_inline_markup(text: str) -> str:
     return normalized_text(text)
 
 
-def transcript_text_from_srt(text: str) -> str:
-    lines: list[str] = []
+def transcript_text_from_chunks(chunks: list[TranscriptChunk], *, paragraphs: bool) -> str:
+    if not chunks:
+        return ""
+    if not paragraphs:
+        return normalized_text(" ".join(chunk.text for chunk in chunks if chunk.text))
+    paragraph_texts: list[str] = []
+    current_parts: list[str] = []
+    current_length = 0
+    previous_end: float | None = None
+    for chunk in chunks:
+        text = normalized_text(chunk.text)
+        if not text:
+            continue
+        gap = None if previous_end is None else max(0.0, chunk.start - previous_end)
+        should_break = bool(
+            current_parts
+            and (
+                (gap is not None and gap >= TRANSCRIPT_PARAGRAPH_GAP_SECONDS)
+                or (
+                    current_length >= TRANSCRIPT_PARAGRAPH_SOFT_MAX_CHARS
+                    and TRANSCRIPT_SENTENCE_END_RE.search(current_parts[-1])
+                )
+            )
+        )
+        if should_break:
+            paragraph_texts.append(normalized_text(" ".join(current_parts)))
+            current_parts = []
+            current_length = 0
+        current_parts.append(text)
+        current_length += len(text) + 1
+        previous_end = chunk.end
+    if current_parts:
+        paragraph_texts.append(normalized_text(" ".join(current_parts)))
+    return "\n\n".join(paragraph for paragraph in paragraph_texts if paragraph)
+
+
+def transcript_chunks_from_segments(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+) -> list[TranscriptChunk]:
+    chunks: list[TranscriptChunk] = []
+    for segment in segments:
+        text = normalized_text(str(segment.get("text", "")))
+        if not text:
+            continue
+        chunks.append(TranscriptChunk(float(segment.get("start", 0.0)), float(segment.get("end", 0.0)), text))
+    return chunks
+
+
+def transcript_chunks_from_srt(text: str) -> list[TranscriptChunk]:
+    chunks: list[TranscriptChunk] = []
     skip_note = False
+    current_start: float | None = None
+    current_end: float | None = None
+    current_lines: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current_start, current_end, current_lines
+        if current_start is not None and current_end is not None and current_lines:
+            chunk_text = normalized_text(" ".join(current_lines))
+            if chunk_text:
+                chunks.append(TranscriptChunk(current_start, current_end, chunk_text))
+        current_start = None
+        current_end = None
+        current_lines = []
+
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
+            flush_current()
             skip_note = False
             continue
         if skip_note:
             continue
         if line.isdigit() or "-->" in line:
+            if "-->" in line:
+                match = SRT_TIMESTAMP_RE.search(line)
+                if match:
+                    current_start = parse_srt_timecode(match.group("start"))
+                    current_end = parse_srt_timecode(match.group("end"))
             continue
         if line.startswith("NOTE"):
             skip_note = True
             continue
         cleaned = strip_subtitle_inline_markup(line)
         if cleaned:
-            lines.append(cleaned)
-    return normalized_text(" ".join(lines))
+            current_lines.append(cleaned)
+    flush_current()
+    return chunks
 
 
-def transcript_text_from_ass(text: str) -> str:
-    lines: list[str] = []
+def transcript_chunks_from_ass(text: str) -> list[TranscriptChunk]:
+    chunks: list[TranscriptChunk] = []
     for raw_line in text.splitlines():
         if not raw_line.startswith("Dialogue:"):
             continue
@@ -3893,19 +3991,27 @@ def transcript_text_from_ass(text: str) -> str:
             continue
         cleaned = strip_subtitle_inline_markup(parts[9])
         if cleaned:
-            lines.append(cleaned)
-    return normalized_text(" ".join(lines))
+            chunks.append(TranscriptChunk(parse_ass_timecode(parts[1]), parse_ass_timecode(parts[2]), cleaned))
+    return chunks
 
 
-def transcript_text_from_subtitle_path(path: Path) -> str:
+def transcript_text_from_srt(text: str, *, paragraphs: bool = False) -> str:
+    return transcript_text_from_chunks(transcript_chunks_from_srt(text), paragraphs=paragraphs)
+
+
+def transcript_text_from_ass(text: str, *, paragraphs: bool = False) -> str:
+    return transcript_text_from_chunks(transcript_chunks_from_ass(text), paragraphs=paragraphs)
+
+
+def transcript_text_from_subtitle_path(path: Path, *, paragraphs: bool = False) -> str:
     text = path.read_text(encoding="utf-8-sig")
     if path.suffix.lower() == ".ass":
-        return transcript_text_from_ass(text)
-    return transcript_text_from_srt(text)
+        return transcript_text_from_ass(text, paragraphs=paragraphs)
+    return transcript_text_from_srt(text, paragraphs=paragraphs)
 
 
-def write_transcript_from_subtitle(subtitle_path: Path, text_path: Path) -> None:
-    write_txt(text_path, transcript_text_from_subtitle_path(subtitle_path))
+def write_transcript_from_subtitle(subtitle_path: Path, text_path: Path, *, paragraphs: bool = False) -> None:
+    write_txt(text_path, transcript_text_from_subtitle_path(subtitle_path, paragraphs=paragraphs))
 
 
 def output_root_for_media(media_path: Path, env: dict[str, str]) -> Path:
@@ -4096,10 +4202,11 @@ def write_transcript_output(
     suppression_sources: tuple[Path, ...],
     compact_status: bool,
     show_stage_messages: bool,
+    paragraphs: bool = False,
     mlx_result: dict | None = None,
 ) -> Path:
     text_path = output_root / f"{media_path.stem}.txt"
-    plain_text = segments_to_plain_text(segments)
+    plain_text = transcript_text_from_chunks(transcript_chunks_from_segments(segments), paragraphs=paragraphs)
     if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources and mlx_result:
         plain_text = normalized_text(str(mlx_result.get("text", "")))
     write_txt(text_path, plain_text)
@@ -4191,6 +4298,7 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
             "karaoke": args.karaoke,
             "transcript": effective_transcript,
             "transcript_only": args.transcript_only,
+            "paragraphs": args.paragraphs,
             "speech_trim": args.speech_trim,
             "glossary_files": list(args.glossary or []),
             "suppression_files": list(args.suppress_phrases or []),
@@ -4427,7 +4535,11 @@ def process_file(
             raise ValueError("Unable to reuse existing subtitles because the output plan is incomplete.")
         output_root.mkdir(parents=True, exist_ok=True)
         if isinstance(text_path, Path) and isinstance(transcript_source_path, Path) and transcript_source_path.exists() and not text_path.exists():
-            write_transcript_from_subtitle(transcript_source_path, text_path)
+            write_transcript_from_subtitle(
+                transcript_source_path,
+                text_path,
+                paragraphs=env.get("WHISPER_PARAGRAPHS", "0") == "1",
+            )
             if show_stage_messages:
                 if compact_status:
                     print("📝 Wrote transcript from existing subtitles.", file=sys.stderr)
@@ -4571,6 +4683,7 @@ def process_file(
             suppression_sources=suppression_sources,
             compact_status=compact_status,
             show_stage_messages=show_stage_messages,
+            paragraphs=env.get("WHISPER_PARAGRAPHS", "0") == "1",
             mlx_result=mlx_result if backend == "mlx" else None,
         )
     if not output_txt:
