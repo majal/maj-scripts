@@ -1450,6 +1450,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlx-output-format", choices=("auto", "subtitle", "text"), default="auto")
     parser.add_argument("--mlx-model-default", choices=("wrapper", "official"), default="wrapper")
     parser.add_argument("--recursive", action="store_true")
+    parser.add_argument("--transcript", action="store_true")
+    parser.add_argument("--transcript-only", action="store_true")
     parser.add_argument("--ass", action="store_true")
     parser.add_argument("-e", "--embed", action="store_true")
     parser.add_argument("-f", "--embed-file", nargs="?", const="", default=None, metavar="PATH")
@@ -1485,6 +1487,8 @@ CONFIG_VALUE_TYPES: dict[str, object] = {
     "mlx_output_format": str,
     "mlx_model_default": str,
     "recursive": bool,
+    "transcript": bool,
+    "transcript_only": bool,
     "ass": bool,
     "font": str,
     "karaoke": bool,
@@ -1725,6 +1729,8 @@ def print_help() -> None:
         (
             ("--outdir=PATH", "Write outputs to PATH instead of next to the source."),
             ("--force", "Retranscribe even when expected outputs already exist."),
+            ("--transcript", "Write a .txt transcript alongside the normal subtitle output."),
+            ("--transcript-only", "Write only the .txt transcript and skip subtitle/video outputs."),
             ("--ass", "Write ASS subtitles instead of SRT."),
             ("--karaoke", "Add karaoke timing to ASS output."),
             ("-e, --embed", "Mux a soft subtitle track after transcription."),
@@ -1802,6 +1808,7 @@ def print_help() -> None:
   Reusable defaults can live in {PROJECT_CONFIG_FILENAME} near a project or {GLOBAL_CONFIG_PATH}.
   Config precedence is built-ins, global config, nearest project config, then CLI flags.
   Existing expected outputs are skipped by default; pass --force to retranscribe.
+  Use --transcript to add a .txt transcript, or --transcript-only when you do not need subtitle files.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1814,14 +1821,33 @@ def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) 
     embed_requested = args.embed or args.embed_file is not None
     if args.embed and args.embed_file is not None:
         warn("--embed is ignored when --embed-file is set.")
-    if not shutil.which("ffmpeg") and (args.burn or embed_requested):
+    transcript_only = getattr(args, "transcript_only", False)
+    if transcript_only:
+        ignored_flags = [
+            flag
+            for enabled, flag in (
+                (args.ass, "--ass"),
+                (args.karaoke, "--karaoke"),
+                (args.embed or args.embed_file is not None, "--embed/--embed-file"),
+                (args.in_place, "--in-place"),
+                (args.burn, "--burn"),
+            )
+            if enabled
+        ]
+        if ignored_flags:
+            warn(f"{', '.join(ignored_flags)} ignored because --transcript-only does not write subtitles or video outputs.")
+    effective_embed_requested = embed_requested and not transcript_only
+    effective_burn_requested = args.burn and not transcript_only
+    if getattr(args, "transcript", False) and args.embed_file is not None and not transcript_only:
+        warn("--transcript is ignored with --embed-file because that mode does not transcribe.")
+    if not shutil.which("ffmpeg") and (effective_burn_requested or effective_embed_requested):
         if not getattr(args, "dry_run", False):
             print_install_help(os_name, pkg_mgr)
             required_flags = " and ".join(
                 flag
                 for enabled, flag in (
-                    (args.burn, "--burn"),
-                    (embed_requested, "--embed/--embed-file"),
+                    (effective_burn_requested, "--burn"),
+                    (effective_embed_requested, "--embed/--embed-file"),
                 )
                 if enabled
             )
@@ -1909,6 +1935,10 @@ def build_runtime_plan(args: argparse.Namespace) -> RuntimePlan:
 
 
 def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
+    transcript_only = getattr(args, "transcript_only", False)
+    embed_file_mode = args.embed_file is not None and not transcript_only
+    embed_requested = (args.embed or embed_file_mode) and not transcript_only
+    transcript_requested = getattr(args, "transcript", False) and not embed_file_mode
     return {
         "WHISPER_TARGETS": json.dumps(list(args.targets or [])),
         "WHISPER_LANG": args.lang,
@@ -1922,15 +1952,17 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_GLOSSARY_FILES": json.dumps(list(args.glossary or [])),
         "WHISPER_SUPPRESSION_FILES": json.dumps(list(args.suppress_phrases or [])),
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
-        "WHISPER_ASS": "1" if args.ass else "0",
-        "WHISPER_EMBED": "1" if (args.embed or args.embed_file is not None) else "0",
-        "WHISPER_EMBED_FILE_MODE": "1" if args.embed_file is not None else "0",
-        "WHISPER_EMBED_FILE": args.embed_file or "",
-        "WHISPER_IN_PLACE": "1" if args.in_place else "0",
-        "WHISPER_BURN": "1" if args.burn else "0",
+        "WHISPER_TRANSCRIPT": "1" if transcript_requested else "0",
+        "WHISPER_TRANSCRIPT_ONLY": "1" if transcript_only else "0",
+        "WHISPER_ASS": "1" if args.ass and not transcript_only else "0",
+        "WHISPER_EMBED": "1" if embed_requested else "0",
+        "WHISPER_EMBED_FILE_MODE": "1" if embed_file_mode else "0",
+        "WHISPER_EMBED_FILE": args.embed_file if embed_file_mode else "",
+        "WHISPER_IN_PLACE": "1" if args.in_place and embed_requested else "0",
+        "WHISPER_BURN": "1" if args.burn and not transcript_only else "0",
         "WHISPER_BURN_VCODEC": args.burn_vcodec,
         "WHISPER_FONT": args.font,
-        "WHISPER_KARAOKE": "1" if args.karaoke else "0",
+        "WHISPER_KARAOKE": "1" if args.karaoke and not transcript_only else "0",
         "WHISPER_FORCE": "1" if getattr(args, "force", False) else "0",
     }
 
@@ -1956,11 +1988,12 @@ def json_safe(value):
 
 
 def ffmpeg_diagnostics(args: argparse.Namespace) -> dict[str, object]:
-    embed_requested = args.embed or args.embed_file is not None
+    transcript_only = getattr(args, "transcript_only", False)
+    embed_requested = (args.embed or args.embed_file is not None) and not transcript_only
     required_for = []
     if embed_requested:
         required_for.append("--embed/--embed-file")
-    if args.burn:
+    if args.burn and not transcript_only:
         required_for.append("--burn")
     optional_for = []
     if getattr(args, "speech_trim", True):
@@ -3824,7 +3857,7 @@ def output_root_for_media(media_path: Path, env: dict[str, str]) -> Path:
     return Path(env.get("WHISPER_OUTDIR", "")).expanduser() if env.get("WHISPER_OUTDIR", "") else media_path.parent
 
 
-def should_write_text_output(env: dict[str, str], backend: str) -> bool:
+def legacy_mlx_text_output_requested(env: dict[str, str], backend: str) -> bool:
     return (
         backend == "mlx"
         and env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto") == "text"
@@ -3834,9 +3867,22 @@ def should_write_text_output(env: dict[str, str], backend: str) -> bool:
     )
 
 
+def should_write_transcript(env: dict[str, str], backend: str) -> bool:
+    return (
+        env.get("WHISPER_TRANSCRIPT", "0") == "1"
+        or env.get("WHISPER_TRANSCRIPT_ONLY", "0") == "1"
+        or legacy_mlx_text_output_requested(env, backend)
+    )
+
+
+def should_write_text_output(env: dict[str, str], backend: str) -> bool:
+    return env.get("WHISPER_TRANSCRIPT_ONLY", "0") == "1" or legacy_mlx_text_output_requested(env, backend)
+
+
 def transcription_output_plan(media_path: Path, env: dict[str, str], backend: str) -> dict[str, object]:
     output_root = output_root_for_media(media_path, env)
     output_txt = should_write_text_output(env, backend)
+    transcript_requested = should_write_transcript(env, backend)
     actions: list[str] = ["transcribe"]
     expected_outputs: list[Path] = []
     subtitle_path: Path | None = None
@@ -3846,10 +3892,12 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
     burn_path: Path | None = None
     postprocess_actions = False
     in_place_action = False
-    if output_txt:
+    if transcript_requested:
         text_path = output_root / f"{media_path.stem}.txt"
         expected_outputs.append(text_path)
-        actions.append("write-text")
+        actions.append("write-transcript")
+    if output_txt:
+        actions.append("transcript-only")
     else:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env.get('WHISPER_ASS', '0') == '1' else 'srt'}"
         expected_outputs.append(subtitle_path)
@@ -3932,9 +3980,11 @@ def output_plan_complete(plan: dict[str, object]) -> bool:
 
 def output_plan_resume_from_subtitle(plan: dict[str, object]) -> bool:
     subtitle_path = plan.get("subtitle_path")
+    text_path = plan.get("text_path")
     return (
         isinstance(subtitle_path, Path)
         and subtitle_path.exists()
+        and not (isinstance(text_path, Path) and not text_path.exists())
         and bool(plan.get("postprocess_actions"))
         and not output_plan_complete(plan)
     )
@@ -3950,6 +4000,28 @@ def output_plan_status(plan: dict[str, object], *, force: bool) -> str:
     if plan.get("mode") == "embed-file":
         return "will embed existing subtitles"
     return "will transcribe"
+
+
+def write_transcript_output(
+    media_path: Path,
+    output_root: Path,
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    backend: str,
+    *,
+    speech_trim_enabled: bool,
+    suppression_sources: tuple[Path, ...],
+    compact_status: bool,
+    show_stage_messages: bool,
+    mlx_result: dict | None = None,
+) -> Path:
+    text_path = output_root / f"{media_path.stem}.txt"
+    plain_text = segments_to_plain_text(segments)
+    if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources and mlx_result:
+        plain_text = normalized_text(str(mlx_result.get("text", "")))
+    write_txt(text_path, plain_text)
+    if show_stage_messages:
+        print("📝 Wrote transcript." if compact_status else f"📝 Wrote transcript: {media_path.name}", file=sys.stderr)
+    return text_path
 
 
 def output_plan_to_jsonable(plan: dict[str, object], *, force: bool) -> dict[str, object]:
@@ -3974,7 +4046,7 @@ def effective_source_paths_for_plan(media_path: Path, env: dict[str, str]) -> tu
 
 def discover_planned_files(args: argparse.Namespace) -> list[Path]:
     files = discover_target_files([Path(target).expanduser() for target in args.targets], args.recursive)
-    if args.embed_file is not None:
+    if args.embed_file is not None and not getattr(args, "transcript_only", False):
         files = [path for path in files if path.suffix.lower() in VIDEO_EXTENSIONS]
     return files
 
@@ -3983,10 +4055,11 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
     env = build_runtime_processing_env(args, plan)
     files = discover_planned_files(args)
     force = getattr(args, "force", False)
+    effective_transcript = args.transcript and not (args.embed_file is not None and not args.transcript_only)
     file_entries: list[dict[str, object]] = []
     for media_path in files:
         try:
-            if args.embed_file is not None:
+            if args.embed_file is not None and not args.transcript_only:
                 entry = output_plan_to_jsonable(embed_file_output_plan(media_path, env), force=force)
             else:
                 planned = transcription_output_plan(media_path, env, plan.selected_backend)
@@ -3997,7 +4070,7 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
         except Exception as exc:
             entry = {
                 "media_path": str(media_path),
-                "mode": "embed-file" if args.embed_file is not None else "transcribe",
+                "mode": "embed-file" if args.embed_file is not None and not args.transcript_only else "transcribe",
                 "error": str(exc),
                 "status": "cannot plan this file until the error is fixed",
             }
@@ -4031,15 +4104,19 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
             "subtitle_style": args.subtitle_style,
             "ass": args.ass,
             "karaoke": args.karaoke,
+            "transcript": effective_transcript,
+            "transcript_only": args.transcript_only,
             "speech_trim": args.speech_trim,
             "glossary_files": list(args.glossary or []),
             "suppression_files": list(args.suppress_phrases or []),
         },
         "actions": {
-            "embed": bool(args.embed or args.embed_file is not None),
-            "embed_file": args.embed_file is not None,
-            "in_place": args.in_place,
-            "burn": args.burn,
+            "embed": bool((args.embed or args.embed_file is not None) and not args.transcript_only),
+            "embed_file": args.embed_file is not None and not args.transcript_only,
+            "in_place": args.in_place and not args.transcript_only,
+            "burn": args.burn and not args.transcript_only,
+            "transcript": effective_transcript,
+            "transcript_only": args.transcript_only,
             "force": force,
         },
         "ffmpeg": ffmpeg_diagnostics(args),
@@ -4384,15 +4461,19 @@ def process_file(
             speech_intervals=speech_intervals,
             style=subtitle_style,
         )
-    if output_txt:
-        text_path = output_root / f"{media_path.stem}.txt"
-        plain_text = segments_to_plain_text(segments)
-        if not plain_text and backend == "mlx" and not speech_trim_enabled and not suppression_sources:
-            plain_text = normalized_text(str(mlx_result.get("text", "")))
-        write_txt(text_path, plain_text)
-        if show_stage_messages:
-            print("📝 Wrote text output." if compact_status else f"📝 Wrote text output: {media_path.name}", file=sys.stderr)
-    else:
+    if should_write_transcript(env, backend):
+        write_transcript_output(
+            media_path,
+            output_root,
+            segments,
+            backend,
+            speech_trim_enabled=speech_trim_enabled,
+            suppression_sources=suppression_sources,
+            compact_status=compact_status,
+            show_stage_messages=show_stage_messages,
+            mlx_result=mlx_result if backend == "mlx" else None,
+        )
+    if not output_txt:
         subtitle_path = output_root / f"{media_path.stem}.{'ass' if env['WHISPER_ASS'] == '1' else 'srt'}"
         if env["WHISPER_ASS"] == "1":
             write_ass(
@@ -4675,6 +4756,7 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--glossary=/path/to/whisper-glossary.txt{RESET}")
     say(f"  {MAGENTA}--suppress-phrases=/path/to/whisper-suppress.txt{RESET}")
     say(f"  {MAGENTA}--review-postprocessing{RESET}")
+    say(f"  {MAGENTA}--transcript-only{RESET}")
     say(f"  {MAGENTA}--state-dir=/custom/path{RESET}")
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
@@ -4708,14 +4790,14 @@ def build_runtime_processing_env(args: argparse.Namespace, plan: RuntimePlan) ->
 def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
     env = os.environ.copy()
     env.update(build_runtime_processing_env(args, plan))
-    if args.embed_file is not None:
+    if args.embed_file is not None and not args.transcript_only:
         info(f"OS: {plan.os_name} | arch: {plan.arch_name} | mode: embed-file")
     else:
         info(f"OS: {plan.os_name} | arch: {plan.arch_name} | backend: {plan.selected_backend} | model: {plan.selected_model}")
     info(f"Launcher Python: {plan.launcher_python}")
     info(f"Runtime builder: {plan.runtime_builder_python} ({plan.runtime_builder_version})")
     info(f"Runtime selection: {plan.runtime_selection_source}")
-    if args.embed_file is None:
+    if args.embed_file is None or args.transcript_only:
         info(f"Fallback backend: {plan.fallback_backend} | device: {plan.fallback_device}")
     info(f"Using runtime: {plan.state_dir}")
     say("", err=True)
@@ -4734,7 +4816,7 @@ def outer_main() -> int:
     if args.jobs < 1:
         die("--jobs must be at least 1")
     runtime_management_requested = args.doctor or args.clean or args.reinstall or args.setup_only or args.update
-    if args.embed_file is not None and not runtime_management_requested and not args.dry_run:
+    if args.embed_file is not None and not args.transcript_only and not runtime_management_requested and not args.dry_run:
         if not args.targets:
             print_help()
             return 1
@@ -4770,14 +4852,14 @@ def outer_main() -> int:
         shutil.rmtree(plan.venv_dir)
         success("Removed old runtime.")
         plan = build_runtime_plan(args)
-    if args.targets and args.embed_file is None and not (args.setup_only or args.update or args.reinstall):
+    if args.targets and (args.embed_file is None or args.transcript_only) and not (args.setup_only or args.update or args.reinstall):
         env = build_runtime_processing_env(args, plan)
         files = discover_planned_files(args)
         if can_finish_without_transcription(files, env, plan.selected_backend):
-            print("♻ Existing subtitles/outputs are enough; no transcription backend needed.", file=sys.stderr)
+            print("♻ Existing transcript/subtitle outputs are enough; no transcription backend needed.", file=sys.stderr)
             process_files(files, env, plan.selected_backend, args.jobs)
             return 0
-    selected_backend_required = bool((args.targets and args.embed_file is None) or args.setup_only or args.update or not plan.venv_python.exists())
+    selected_backend_required = bool((args.targets and (args.embed_file is None or args.transcript_only)) or args.setup_only or args.update or not plan.venv_python.exists())
     install_needed = (
         not plan.venv_python.exists()
         or "webrtcvad" not in plan.installed_packages

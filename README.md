@@ -116,7 +116,7 @@ wh help
 - builds and manages its own Python runtime
 - selects a backend based on the host, including MLX on Apple Silicon
 - normalizes common Bible-reference formatting mistakes by default, such as `Psalm 83 18` to `Psalm 83:18`
-- writes subtitles by default, can mux soft subtitle tracks into video containers, and can also write text output for MLX diagnostics
+- writes subtitles by default, can also write plain-text transcripts, and can mux soft subtitle tracks into video containers
 
 #### Supported Platforms
 
@@ -201,6 +201,18 @@ Suppress a known intro or outro from a shared phrase list:
 
 ```bash
 whisper /path/to/file.mp4 --suppress-phrases=/path/to/whisper-suppress.txt
+```
+
+Write a plain-text transcript next to the normal subtitle output:
+
+```bash
+whisper /path/to/file.mp4 --transcript
+```
+
+Write only the transcript:
+
+```bash
+whisper /path/to/file.mp4 --transcript-only
 ```
 
 Preview the work plan without setup, installs, or transcription:
@@ -292,6 +304,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - `--plan` / `--dry-run` shows discovered files, selected backend/model, output paths, configured glossary and suppression files, embed/burn actions, and whether `ffmpeg` is required without installing packages or transcribing.
 - `--doctor --json` prints machine-readable diagnostics for scripts, CI, and support notes.
 - Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
+- `--transcript` writes a `.txt` transcript alongside normal `.srt`/`.ass` output. `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.
