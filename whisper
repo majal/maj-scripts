@@ -1809,6 +1809,7 @@ def print_help() -> None:
   Config precedence is built-ins, global config, nearest project config, then CLI flags.
   Existing expected outputs are skipped by default; pass --force to retranscribe.
   Use --transcript to add a .txt transcript, or --transcript-only when you do not need subtitle files.
+  Existing sidecar .srt/.ass files can supply transcript text without retranscribing unless --force is set.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -3853,8 +3854,73 @@ def write_txt(path: Path, text: str) -> None:
         handle.write("\n")
 
 
+def strip_subtitle_inline_markup(text: str) -> str:
+    text = text.replace(r"\N", " ").replace(r"\n", " ").replace(r"\h", " ")
+    text = re.sub(r"\{[^{}]*\}", "", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return normalized_text(text)
+
+
+def transcript_text_from_srt(text: str) -> str:
+    lines: list[str] = []
+    skip_note = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            skip_note = False
+            continue
+        if skip_note:
+            continue
+        if line.isdigit() or "-->" in line:
+            continue
+        if line.startswith("NOTE"):
+            skip_note = True
+            continue
+        cleaned = strip_subtitle_inline_markup(line)
+        if cleaned:
+            lines.append(cleaned)
+    return normalized_text(" ".join(lines))
+
+
+def transcript_text_from_ass(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        if not raw_line.startswith("Dialogue:"):
+            continue
+        _prefix, _separator, payload = raw_line.partition(":")
+        parts = payload.lstrip().split(",", 9)
+        if len(parts) < 10:
+            continue
+        cleaned = strip_subtitle_inline_markup(parts[9])
+        if cleaned:
+            lines.append(cleaned)
+    return normalized_text(" ".join(lines))
+
+
+def transcript_text_from_subtitle_path(path: Path) -> str:
+    text = path.read_text(encoding="utf-8-sig")
+    if path.suffix.lower() == ".ass":
+        return transcript_text_from_ass(text)
+    return transcript_text_from_srt(text)
+
+
+def write_transcript_from_subtitle(subtitle_path: Path, text_path: Path) -> None:
+    write_txt(text_path, transcript_text_from_subtitle_path(subtitle_path))
+
+
 def output_root_for_media(media_path: Path, env: dict[str, str]) -> Path:
     return Path(env.get("WHISPER_OUTDIR", "")).expanduser() if env.get("WHISPER_OUTDIR", "") else media_path.parent
+
+
+def existing_transcript_source_subtitle_path(media_path: Path, output_root: Path, preferred_suffix: str) -> Path | None:
+    preferred = output_root / f"{media_path.stem}{preferred_suffix}"
+    if preferred.exists() and preferred.is_file():
+        return preferred
+    for suffix in (".srt", ".ass"):
+        candidate = output_root / f"{media_path.stem}{suffix}"
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
 def legacy_mlx_text_output_requested(env: dict[str, str], backend: str) -> bool:
@@ -3887,6 +3953,7 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
     expected_outputs: list[Path] = []
     subtitle_path: Path | None = None
     text_path: Path | None = None
+    transcript_source_subtitle_path: Path | None = None
     embedded_path: Path | None = None
     embedded_codec: str | None = None
     burn_path: Path | None = None
@@ -3894,6 +3961,11 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
     in_place_action = False
     if transcript_requested:
         text_path = output_root / f"{media_path.stem}.txt"
+        transcript_source_subtitle_path = existing_transcript_source_subtitle_path(
+            media_path,
+            output_root,
+            ".ass" if env.get("WHISPER_ASS", "0") == "1" else ".srt",
+        )
         expected_outputs.append(text_path)
         actions.append("write-transcript")
     if output_txt:
@@ -3925,6 +3997,7 @@ def transcription_output_plan(media_path: Path, env: dict[str, str], backend: st
         "expected_outputs": tuple(expected_outputs),
         "subtitle_path": subtitle_path,
         "text_path": text_path,
+        "transcript_source_subtitle_path": transcript_source_subtitle_path,
         "embedded_path": embedded_path,
         "embedded_codec": embedded_codec,
         "burn_path": burn_path,
@@ -3980,13 +4053,22 @@ def output_plan_complete(plan: dict[str, object]) -> bool:
 
 def output_plan_resume_from_subtitle(plan: dict[str, object]) -> bool:
     subtitle_path = plan.get("subtitle_path")
-    text_path = plan.get("text_path")
     return (
         isinstance(subtitle_path, Path)
         and subtitle_path.exists()
-        and not (isinstance(text_path, Path) and not text_path.exists())
         and bool(plan.get("postprocess_actions"))
         and not output_plan_complete(plan)
+    )
+
+
+def output_plan_can_derive_transcript_from_subtitle(plan: dict[str, object]) -> bool:
+    text_path = plan.get("text_path")
+    source_path = plan.get("transcript_source_subtitle_path")
+    return (
+        isinstance(text_path, Path)
+        and not text_path.exists()
+        and isinstance(source_path, Path)
+        and source_path.exists()
     )
 
 
@@ -3995,6 +4077,8 @@ def output_plan_status(plan: dict[str, object], *, force: bool) -> str:
         return "will run because --force is set"
     if output_plan_complete(plan):
         return "will skip because expected outputs already exist"
+    if output_plan_can_derive_transcript_from_subtitle(plan):
+        return "will write transcript from existing subtitles"
     if plan.get("mode") == "transcribe" and output_plan_resume_from_subtitle(plan):
         return "will reuse existing subtitles and finish requested video outputs"
     if plan.get("mode") == "embed-file":
@@ -4029,6 +4113,7 @@ def output_plan_to_jsonable(plan: dict[str, object], *, force: bool) -> dict[str
     encoded["status"] = output_plan_status(plan, force=force)
     encoded["complete"] = output_plan_complete(plan)
     encoded["resume_from_subtitle"] = output_plan_resume_from_subtitle(plan)
+    encoded["derive_transcript_from_subtitle"] = output_plan_can_derive_transcript_from_subtitle(plan)
     return json_safe(encoded)
 
 
@@ -4157,6 +4242,8 @@ def print_dry_run(args: argparse.Namespace, plan: RuntimePlan) -> None:
             say(f"    subtitle:         {entry['subtitle_path']}")
         if entry.get("text_path"):
             say(f"    text:             {entry['text_path']}")
+        if entry.get("transcript_source_subtitle_path"):
+            say(f"    transcript source:{entry['transcript_source_subtitle_path']}")
         if entry.get("embedded_path"):
             codec = f" ({entry['embedded_codec']})" if entry.get("embedded_codec") else ""
             say(f"    embedded video:   {entry['embedded_path']}{codec}")
@@ -4331,12 +4418,25 @@ def process_file(
         else:
             print(f"⏭ Skipping existing output: {media_path.name}", file=sys.stderr)
         return "Skipped; expected output already exists"
-    if not force and output_plan_resume_from_subtitle(planned_outputs):
+    if not force and (output_plan_can_derive_transcript_from_subtitle(planned_outputs) or output_plan_resume_from_subtitle(planned_outputs)):
         subtitle_path = planned_outputs["subtitle_path"]
+        transcript_source_path = planned_outputs.get("transcript_source_subtitle_path")
+        text_path = planned_outputs.get("text_path")
         output_root = planned_outputs["output_root"]
-        if not isinstance(subtitle_path, Path) or not isinstance(output_root, Path):
-            raise ValueError("Unable to resume from existing subtitles because the output plan is incomplete.")
+        if not isinstance(output_root, Path):
+            raise ValueError("Unable to reuse existing subtitles because the output plan is incomplete.")
         output_root.mkdir(parents=True, exist_ok=True)
+        if isinstance(text_path, Path) and isinstance(transcript_source_path, Path) and transcript_source_path.exists() and not text_path.exists():
+            write_transcript_from_subtitle(transcript_source_path, text_path)
+            if show_stage_messages:
+                if compact_status:
+                    print("📝 Wrote transcript from existing subtitles.", file=sys.stderr)
+                else:
+                    print(f"📝 Wrote transcript from existing subtitles: {transcript_source_path.name}", file=sys.stderr)
+        if not isinstance(subtitle_path, Path):
+            return "Reused existing subtitles for transcript"
+        if not subtitle_path.exists():
+            raise ValueError("Unable to finish requested video outputs because the planned subtitle file is missing.")
         if compact_status:
             print("⏭ Reusing existing subtitles.", file=sys.stderr)
         else:
@@ -4669,7 +4769,12 @@ def can_finish_without_transcription(files: list[Path], env: dict[str, str], bac
     if not files or env.get("WHISPER_FORCE", "0") == "1":
         return False
     plans = [transcription_output_plan(media_path, env, backend) for media_path in files]
-    return all(output_plan_complete(plan) or output_plan_resume_from_subtitle(plan) for plan in plans)
+    return all(
+        output_plan_complete(plan)
+        or output_plan_resume_from_subtitle(plan)
+        or output_plan_can_derive_transcript_from_subtitle(plan)
+        for plan in plans
+    )
 
 
 def install_backend_into_managed_runtime(backend: str) -> None:

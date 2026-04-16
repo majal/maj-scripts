@@ -214,7 +214,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(plan["expected_outputs"], (root / "clip.txt",))
         self.assertIn("transcript-only", plan["actions"])
 
-    def test_resume_from_subtitle_requires_existing_transcript_when_requested(self) -> None:
+    def test_existing_subtitle_can_supply_missing_transcript(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             media = root / "clip.mp4"
@@ -234,11 +234,13 @@ class WhisperOutputPlanningTest(unittest.TestCase):
             }
 
             plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
-            self.assertFalse(self.whisper.output_plan_resume_from_subtitle(plan))
+            self.assertTrue(self.whisper.output_plan_can_derive_transcript_from_subtitle(plan))
+            self.assertTrue(self.whisper.output_plan_resume_from_subtitle(plan))
 
             transcript.write_text("Hello\n", encoding="utf-8")
             plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
 
+            self.assertFalse(self.whisper.output_plan_can_derive_transcript_from_subtitle(plan))
             self.assertTrue(self.whisper.output_plan_resume_from_subtitle(plan))
 
     def test_dry_run_payload_reports_outputs_and_ffmpeg_need(self) -> None:
@@ -313,6 +315,49 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                 )
 
         self.assertIn("Skipped", result)
+
+    def test_process_file_writes_missing_transcript_from_existing_srt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            subtitle = root / "clip.srt"
+            transcript = root / "clip.txt"
+            media.write_text("video", encoding="utf-8")
+            subtitle.write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\nHello world\n\n",
+                encoding="utf-8",
+            )
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_TRANSCRIPT": "1",
+                "WHISPER_TRANSCRIPT_ONLY": "0",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+                "WHISPER_FORCE": "0",
+                "WHISPER_LANG": "en",
+            }
+
+            with (
+                mock.patch.object(self.whisper, "run_faster_whisper", side_effect=AssertionError("should not transcribe")),
+                redirect_stderr(io.StringIO()),
+            ):
+                result = self.whisper.process_file(
+                    media,
+                    env,
+                    "faster-whisper",
+                    file_index=1,
+                    total_files=1,
+                    inline_progress=False,
+                    compact_status=True,
+                    show_progress=False,
+                    show_stage_messages=False,
+                )
+
+            self.assertIn("Resumed", result)
+            self.assertEqual(transcript.read_text(encoding="utf-8"), "Hello world\n")
 
     def test_process_file_writes_transcript_and_subtitles(self) -> None:
         with TemporaryDirectory() as temp_dir:
