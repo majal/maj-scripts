@@ -473,6 +473,20 @@ When future scripts are added, keep this README as the main navigation page and 
 
 Keep `Platform Setup` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
 
+For quick repo checks, run the lightweight test harness before or after changes:
+
+```bash
+python3 -m tests
+```
+
+On Windows, use:
+
+```powershell
+py -m tests
+```
+
+The harness covers smoke checks for the top-level CLIs plus focused behavior tests for `wh` and core `whisper` logic.
+
 Detailed contributor and AI-agent rules live in [`AGENTS.md`](./AGENTS.md).
 
 [↑ TOC](#table-of-contents)

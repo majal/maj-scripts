@@ -15,6 +15,7 @@ env/
 ENV/
 .env
 .env.*
+.codex
 .DS_Store
 .vscode/
 .idea/
