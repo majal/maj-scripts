@@ -213,6 +213,7 @@ whisper /path/to/file.mp4 --transcript
 Write only the transcript:
 
 ```bash
+whisper /path/to/file.mp4 -T
 whisper /path/to/file.mp4 --transcript-only
 ```
 
@@ -306,7 +307,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - `--doctor --json` prints machine-readable diagnostics for scripts, CI, and support notes.
 - Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
 - `-t` / `--transcript` writes a `.txt` transcript alongside normal `.srt`/`.ass` output. If the expected sidecar subtitle already exists, it builds the transcript from that file instead of retranscribing unless `--force` is set.
-- `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
+- `-T` / `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.

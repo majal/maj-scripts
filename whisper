@@ -1451,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mlx-model-default", choices=("wrapper", "official"), default="wrapper")
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("-t", "--transcript", action="store_true")
-    parser.add_argument("--transcript-only", action="store_true")
+    parser.add_argument("-T", "--transcript-only", action="store_true")
     parser.add_argument("--ass", action="store_true")
     parser.add_argument("-e", "--embed", action="store_true")
     parser.add_argument("-f", "--embed-file", nargs="?", const="", default=None, metavar="PATH")
@@ -1730,7 +1730,7 @@ def print_help() -> None:
             ("--outdir=PATH", "Write outputs to PATH instead of next to the source."),
             ("--force", "Retranscribe even when expected outputs already exist."),
             ("-t, --transcript", "Write a .txt transcript alongside the normal subtitle output."),
-            ("--transcript-only", "Write only the .txt transcript and skip subtitle/video outputs."),
+            ("-T, --transcript-only", "Write only the .txt transcript and skip subtitle/video outputs."),
             ("--ass", "Write ASS subtitles instead of SRT."),
             ("--karaoke", "Add karaoke timing to ASS output."),
             ("-e, --embed", "Mux a soft subtitle track after transcription."),

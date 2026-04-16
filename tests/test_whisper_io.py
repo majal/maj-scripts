@@ -89,6 +89,11 @@ class WhisperOutputPlanningTest(unittest.TestCase):
 
         self.assertTrue(args.transcript)
 
+    def test_transcript_only_short_option_matches_long_option(self) -> None:
+        args = self.whisper.build_parser().parse_args(["clip.mp4", "-T"])
+
+        self.assertTrue(args.transcript_only)
+
     def test_project_config_applies_defaults_but_cli_wins(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
