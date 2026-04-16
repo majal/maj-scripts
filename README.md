@@ -153,6 +153,7 @@ Useful inspection/setup commands:
 
 ```bash
 whisper --doctor
+whisper --doctor --json
 whisper --setup-only
 ```
 
@@ -200,6 +201,29 @@ Suppress a known intro or outro from a shared phrase list:
 
 ```bash
 whisper /path/to/file.mp4 --suppress-phrases=/path/to/whisper-suppress.txt
+```
+
+Preview the work plan without setup, installs, or transcription:
+
+```bash
+whisper /path/to/file.mp4 --plan
+whisper /path/to/folder --recursive --plan --json
+```
+
+Retranscribe even when the expected subtitle or video output already exists:
+
+```bash
+whisper /path/to/file.mp4 --force
+```
+
+Keep repeated defaults in a project-local TOML config:
+
+```toml
+# .maj-scripts-whisper.toml
+lang = "en"
+subtitle_style = "strict"
+glossary = ["./whisper-glossary.txt"]
+suppress_phrases = ["./whisper-suppress.txt"]
 ```
 
 Transcribe recursive matches in batches instead of starting one `whisper` process per file:
@@ -265,8 +289,13 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - The script self-manages its runtime instead of requiring a manually prepared virtualenv.
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
+- `--plan` / `--dry-run` shows discovered files, selected backend/model, output paths, configured glossary and suppression files, embed/burn actions, and whether `ffmpeg` is required without installing packages or transcribing.
+- `--doctor --json` prints machine-readable diagnostics for scripts, CI, and support notes.
+- Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
+- Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.
+- Config files use TOML. Use `glossary = [...]` or `suppress_phrases = [...]` to replace earlier config-layer lists, and `extra_glossary = [...]` or `extra_suppress_phrases = [...]` to append to them.
 - Common JW/Bible and general capitalization such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `Bible`, `jw.org`, `OpenAI`, `ChatGPT`, `YouTube`, and `Wi-Fi` is normalized by default.
 - Project glossary files named `.whisper-glossary.json`, `.whisper-glossary.txt`, `whisper-glossary.json`, or `whisper-glossary.txt` are auto-loaded from parent folders when present. You can stack extra glossary files explicitly with repeated `--glossary=PATH`.
 - Text glossary files use `source => Replacement` lines, while JSON glossary files can be a plain object of string replacements. Suppression text files accept optional `start:`, `end:`, or `any:` prefixes per line, and JSON suppression files can use matching `start`, `end`, and `any` keys.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -63,6 +64,157 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_BURN_VCODEC"], "libx264")
         self.assertEqual(env["WHISPER_FONT"], "Aptos")
         self.assertEqual(env["WHISPER_KARAOKE"], "1")
+        self.assertEqual(env["WHISPER_FORCE"], "0")
+
+    def test_project_config_applies_defaults_but_cli_wins(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project_config = root / self.whisper.PROJECT_CONFIG_FILENAME
+            global_config = root / "global-config.toml"
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            global_config.write_text(
+                """
+                lang = "tl"
+                glossary = ["global-glossary.txt"]
+                speech_trim = false
+                """,
+                encoding="utf-8",
+            )
+            project_config.write_text(
+                """
+                [defaults]
+                subtitle-style = "strict"
+                extra_glossary = ["project-glossary.txt"]
+                suppress_phrases = ["project-suppress.txt"]
+                jobs = 2
+                """,
+                encoding="utf-8",
+            )
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(self.whisper, "GLOBAL_CONFIG_PATH", global_config):
+                    args = self.whisper.parse_args_with_config(
+                        self.whisper.build_parser(),
+                        ["clip.mp4", "--lang=en"],
+                    )
+                    cli_args = self.whisper.parse_args_with_config(
+                        self.whisper.build_parser(),
+                        ["clip.mp4", "--glossary=cli-glossary.txt"],
+                    )
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(args.lang, "en")
+        self.assertEqual(args.subtitle_style, "strict")
+        self.assertEqual(args.glossary, ["global-glossary.txt", "project-glossary.txt"])
+        self.assertEqual(args.suppress_phrases, ["project-suppress.txt"])
+        self.assertFalse(args.speech_trim)
+        self.assertEqual(args.jobs, 2)
+        self.assertEqual(cli_args.glossary, ["cli-glossary.txt"])
+
+    def test_output_plan_detects_existing_outputs_and_resume_subtitles(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "1",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+            }
+
+            plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
+            self.assertFalse(self.whisper.output_plan_complete(plan))
+            self.assertFalse(self.whisper.output_plan_resume_from_subtitle(plan))
+
+            subtitle = root / "clip.srt"
+            subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+            plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
+
+            self.assertFalse(self.whisper.output_plan_complete(plan))
+            self.assertTrue(self.whisper.output_plan_resume_from_subtitle(plan))
+
+            embedded = root / "clip_embedded.mp4"
+            embedded.write_text("embedded", encoding="utf-8")
+            plan = self.whisper.transcription_output_plan(media, env, "faster-whisper")
+
+            self.assertTrue(self.whisper.output_plan_complete(plan))
+
+    def test_dry_run_payload_reports_outputs_and_ffmpeg_need(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            media.write_text("video", encoding="utf-8")
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.object(self.whisper, "GLOBAL_CONFIG_PATH", root / "missing-global.toml"):
+                    args = self.whisper.parse_args_with_config(
+                        self.whisper.build_parser(),
+                        [
+                            str(media),
+                            "--plan",
+                            "--backend=faster-whisper",
+                            "--model=tiny",
+                            "--state-dir",
+                            str(root / "state"),
+                            "--embed",
+                            "--no-speech-trim",
+                        ],
+                    )
+                    plan = self.whisper.build_runtime_plan(args)
+                    payload = self.whisper.build_dry_run_payload(args, plan)
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(payload["mode"], "plan")
+        self.assertTrue(payload["actions"]["embed"])
+        self.assertTrue(payload["ffmpeg"]["required"])
+        self.assertEqual(payload["inputs"]["files_discovered"], 1)
+        self.assertEqual(payload["files"][0]["status"], "will transcribe")
+        self.assertIn("clip.srt", payload["files"][0]["subtitle_path"])
+        self.assertIn("clip_embedded.mp4", payload["files"][0]["embedded_path"])
+
+    def test_process_file_skips_when_subtitle_already_exists(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            media = root / "clip.mp4"
+            subtitle = root / "clip.srt"
+            media.write_text("video", encoding="utf-8")
+            subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+            env = {
+                "WHISPER_OUTDIR": "",
+                "WHISPER_MLX_OUTPUT_FORMAT": "auto",
+                "WHISPER_ASS": "0",
+                "WHISPER_EMBED": "0",
+                "WHISPER_IN_PLACE": "0",
+                "WHISPER_BURN": "0",
+                "WHISPER_FORCE": "0",
+                "WHISPER_LANG": "en",
+            }
+
+            with (
+                mock.patch.object(self.whisper, "run_faster_whisper", side_effect=AssertionError("should not transcribe")),
+                redirect_stderr(io.StringIO()),
+            ):
+                result = self.whisper.process_file(
+                    media,
+                    env,
+                    "faster-whisper",
+                    file_index=1,
+                    total_files=1,
+                    inline_progress=False,
+                    compact_status=True,
+                    show_progress=False,
+                    show_stage_messages=False,
+                )
+
+        self.assertIn("Skipped", result)
 
     def test_ensure_system_prereqs_requires_ffmpeg_for_embed(self) -> None:
         args = argparse.Namespace(

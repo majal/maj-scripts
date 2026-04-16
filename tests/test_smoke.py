@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import py_compile
 import subprocess
 import sys
@@ -38,3 +39,11 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Whisper Doctor", result.stdout)
         self.assertIn("Selected backend", result.stdout)
+
+    def test_whisper_doctor_json(self) -> None:
+        result = self.run_script("whisper", "--doctor", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["mode"], "doctor")
+        self.assertIn("runtime", payload)
+        self.assertIn("ffmpeg", payload)

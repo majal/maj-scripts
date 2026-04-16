@@ -18,12 +18,18 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 and older fallback
+    tomllib = None
 
 
 APP_NAME = "whisper-cli"
 MANAGED_ENV_FLAG = "WHISPER_MANAGED_RUNTIME"
+GLOBAL_CONFIG_PATH = Path.home() / ".config" / "maj-scripts" / "whisper" / "config.toml"
+PROJECT_CONFIG_FILENAME = ".maj-scripts-whisper.toml"
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov"}
 SHARED_RUNTIME_PACKAGES = ("webrtcvad-wheels>=2.0.14",)
@@ -1073,7 +1079,7 @@ def choose_runtime_builder_python(
         return cached_python, cached["python_version"], True, "cached"
     launcher_python = Path(sys.executable).resolve()
     candidates = discover_mlx_python_candidates(launcher_python)
-    should_probe = not args.doctor and bool(args.targets or args.setup_only or args.update or args.stable_mlx_python)
+    should_probe = not args.doctor and not getattr(args, "dry_run", False) and bool(args.targets or args.setup_only or args.update or args.stable_mlx_python)
     if should_probe:
         for candidate in candidates:
             if probe_mlx_python_candidate(candidate):
@@ -1403,11 +1409,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("targets", nargs="*")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--json", dest="json_output", action="store_true")
+    parser.add_argument("--dry-run", "--plan", dest="dry_run", action="store_true")
     parser.add_argument("--setup-only", action="store_true")
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--reinstall", action="store_true")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("-y", "--yes", action="store_true")
+    parser.add_argument("--force", action="store_true")
     parser.add_argument("-l", "--lang", default="auto")
     parser.add_argument("--model", default="")
     parser.add_argument("--backend", default="auto")
@@ -1416,12 +1425,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--outdir", default="")
     parser.add_argument(
+        "--bible-reference-normalization",
+        dest="bible_reference_normalization",
+        action="store_true",
+        default=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--no-bible-reference-normalization",
         dest="bible_reference_normalization",
         action="store_false",
         default=True,
     )
     parser.add_argument("--bible-reference-phrases", action="store_true")
+    parser.add_argument("--speech-trim", dest="speech_trim", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--no-speech-trim", dest="speech_trim", action="store_false", default=True)
     parser.add_argument("--review-postprocessing", "--lint", dest="review_postprocessing", action="store_true")
     parser.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLE_PRESETS), default="balanced")
@@ -1445,6 +1461,219 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+CONFIG_VALUE_TYPES: dict[str, object] = {
+    "lang": str,
+    "model": str,
+    "backend": str,
+    "device": str,
+    "compute_type": str,
+    "jobs": int,
+    "outdir": str,
+    "bible_reference_normalization": bool,
+    "bible_reference_phrases": bool,
+    "speech_trim": bool,
+    "review_postprocessing": bool,
+    "subtitle_style": str,
+    "glossary": list,
+    "extra_glossary": list,
+    "suppress_phrases": list,
+    "extra_suppress_phrases": list,
+    "state_dir": str,
+    "python": str,
+    "stable_mlx_python": bool,
+    "mlx_word_timestamps": str,
+    "mlx_output_format": str,
+    "mlx_model_default": str,
+    "recursive": bool,
+    "ass": bool,
+    "font": str,
+    "karaoke": bool,
+}
+
+CONFIG_CHOICES = {
+    "backend": {"auto", "mlx", "faster-whisper", "faster_whisper"},
+    "mlx_word_timestamps": {"auto", "on", "off"},
+    "mlx_output_format": {"auto", "subtitle", "text"},
+    "mlx_model_default": {"wrapper", "official"},
+    "subtitle_style": set(SUBTITLE_STYLE_PRESETS),
+}
+
+
+def normalize_config_key(key: str) -> str:
+    return key.strip().replace("-", "_")
+
+
+def coerce_config_value(key: str, value: object, path: Path) -> object:
+    expected_type = CONFIG_VALUE_TYPES[key]
+    if expected_type is bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false")
+        return value
+    if expected_type is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be an integer")
+        if key == "jobs" and value < 1:
+            raise ValueError("jobs must be at least 1")
+        return value
+    if expected_type is str:
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        if key in CONFIG_CHOICES and value not in CONFIG_CHOICES[key]:
+            choices = ", ".join(sorted(CONFIG_CHOICES[key]))
+            raise ValueError(f"{key} must be one of: {choices}")
+        return value
+    if expected_type is list:
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"{key} must be a string or list of strings")
+        return list(value)
+    raise ValueError(f"{key} has an unsupported config type in {path}")
+
+
+def load_whisper_config(path: Path) -> dict[str, object]:
+    if tomllib is None:
+        raise ValueError("TOML config requires Python 3.11 or newer")
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise ValueError("config must be a TOML table")
+    raw_settings: dict[str, object] = {}
+    for key, value in payload.items():
+        if key == "defaults":
+            continue
+        normalized_key = normalize_config_key(key)
+        if isinstance(value, dict):
+            raise ValueError(f"unknown config section [{key}]")
+        raw_settings[normalized_key] = value
+    defaults = payload.get("defaults")
+    if defaults is not None:
+        if not isinstance(defaults, dict):
+            raise ValueError("[defaults] must be a TOML table")
+        for key, value in defaults.items():
+            raw_settings[normalize_config_key(key)] = value
+    unknown_keys = [key for key in raw_settings if key not in CONFIG_VALUE_TYPES]
+    if unknown_keys:
+        names = ", ".join(sorted(unknown_keys))
+        raise ValueError(f"unknown config key(s): {names}")
+    return {key: coerce_config_value(key, value, path) for key, value in raw_settings.items()}
+
+
+def config_search_base_for_target(target: str) -> Path:
+    path = Path(target).expanduser()
+    if path.exists():
+        return path if path.is_dir() else path.parent
+    return path.parent if path.suffix else path
+
+
+def find_project_config_from_base(base: Path) -> Path | None:
+    search_base = base.expanduser()
+    if not search_base.is_absolute():
+        search_base = Path.cwd() / search_base
+    try:
+        search_base = search_base.resolve()
+    except OSError:
+        search_base = search_base.absolute()
+    for directory in (search_base, *search_base.parents):
+        candidate = directory / PROJECT_CONFIG_FILENAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def discover_project_config_path(targets: list[str]) -> Path | None:
+    bases = [config_search_base_for_target(target) for target in targets] or [Path.cwd()]
+    discovered: list[Path] = []
+    for base in bases:
+        config_path = find_project_config_from_base(base)
+        if config_path and config_path not in discovered:
+            discovered.append(config_path)
+    if not discovered and targets:
+        fallback = find_project_config_from_base(Path.cwd())
+        if fallback:
+            discovered.append(fallback)
+    if len(discovered) > 1:
+        ignored = ", ".join(str(path) for path in discovered[1:])
+        warn(f"Multiple project whisper configs found; using {discovered[0]} and ignoring {ignored}.")
+    return discovered[0] if discovered else None
+
+
+def whisper_config_sources(targets: list[str]) -> tuple[Path, ...]:
+    sources: list[Path] = []
+    if GLOBAL_CONFIG_PATH.is_file():
+        sources.append(GLOBAL_CONFIG_PATH)
+    project_config = discover_project_config_path(targets)
+    if project_config and project_config not in sources:
+        sources.append(project_config)
+    return tuple(sources)
+
+
+def merge_config_sources(paths: tuple[Path, ...]) -> dict[str, object]:
+    merged: dict[str, object] = {}
+    for path in paths:
+        try:
+            settings = load_whisper_config(path)
+        except Exception as exc:
+            die(f"Invalid whisper config {path}: {exc}")
+        for key, value in settings.items():
+            if key == "glossary":
+                merged["glossary"] = list(value)
+            elif key == "extra_glossary":
+                merged["glossary"] = [*list(merged.get("glossary", [])), *list(value)]
+            elif key == "suppress_phrases":
+                merged["suppress_phrases"] = list(value)
+            elif key == "extra_suppress_phrases":
+                merged["suppress_phrases"] = [*list(merged.get("suppress_phrases", [])), *list(value)]
+            else:
+                merged[key] = value
+    return merged
+
+
+def cli_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    option_dests: dict[str, str] = {}
+    for action in parser._actions:
+        if not action.dest or action.dest == argparse.SUPPRESS:
+            continue
+        for option in action.option_strings:
+            option_dests[option] = action.dest
+    provided: set[str] = set()
+    for token in argv:
+        if token == "--":
+            break
+        if token.startswith("--"):
+            option = token.split("=", 1)[0]
+            dest = option_dests.get(option)
+            if dest:
+                provided.add(dest)
+            continue
+        if token.startswith("-") and token != "-":
+            if token in option_dests:
+                provided.add(option_dests[token])
+                continue
+            short_option = token[:2]
+            if short_option in option_dests:
+                provided.add(option_dests[short_option])
+    return provided
+
+
+def parse_args_with_config(parser: argparse.ArgumentParser, argv: list[str] | None = None) -> argparse.Namespace:
+    arg_list = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(arg_list)
+    args._config_sources = ()
+    if args.help:
+        return args
+    config_sources = whisper_config_sources(list(args.targets or []))
+    config_values = merge_config_sources(config_sources)
+    provided_dests = cli_provided_dests(parser, arg_list)
+    for dest, value in config_values.items():
+        if dest not in provided_dests:
+            setattr(args, dest, value)
+    args._config_sources = config_sources
+    return args
+
+
 def print_help() -> None:
     name = Path(sys.argv[0]).name
     option_width = 40
@@ -1465,6 +1694,7 @@ def print_help() -> None:
             (f"{name} *.mp4", "Transcribe multiple explicit files from shell expansion."),
             (f"find . -type f -name '*.mp4' -exec {name} '{{}}' +", "Batch recursive matches into one whisper run instead of one run per file."),
             (f"{name} folder --recursive --jobs=4", "Walk a folder and process discovered media in parallel."),
+            (f"{name} clip.mp4 --plan", "Preview discovered files, output paths, and required tools without transcribing."),
             (f"{name} video.mp4 --embed", "Transcribe, then mux a soft subtitle track into the output video."),
             (f"{name} video.mp4 -f edited.srt -i", "Reuse an existing subtitle file and replace the source video after muxing."),
         )
@@ -1494,6 +1724,7 @@ def print_help() -> None:
     output_rows = format_help_rows(
         (
             ("--outdir=PATH", "Write outputs to PATH instead of next to the source."),
+            ("--force", "Retranscribe even when expected outputs already exist."),
             ("--ass", "Write ASS subtitles instead of SRT."),
             ("--karaoke", "Add karaoke timing to ASS output."),
             ("-e, --embed", "Mux a soft subtitle track after transcription."),
@@ -1507,6 +1738,9 @@ def print_help() -> None:
     runtime_rows = format_help_rows(
         (
             ("--doctor", "Show detected hardware and runtime choices."),
+            ("--doctor --json", "Print machine-readable diagnostics for scripts and support."),
+            ("--dry-run, --plan", "Show selected backend, model, files, outputs, and ffmpeg needs without setup or transcription."),
+            ("--json", "Use JSON output with --doctor or --plan."),
             ("--setup-only", "Prepare the managed runtime and stop."),
             ("--update", "Refresh packages in the managed runtime."),
             ("--reinstall", "Rebuild the managed runtime from scratch."),
@@ -1565,6 +1799,9 @@ def print_help() -> None:
   Spoken forms such as Psalm 83 verse 18 are available as an opt-in with --bible-reference-phrases.
   Subtitle cue starts and ends are speech-trimmed by default, out-of-speech timed-word edges are pruned conservatively, and cue timing is smoothed for readability; use --no-speech-trim to disable.
   Project glossary files named .whisper-glossary.json/.txt and suppression files named .whisper-suppress.json/.txt are auto-loaded from parent folders when present.
+  Reusable defaults can live in {PROJECT_CONFIG_FILENAME} near a project or {GLOBAL_CONFIG_PATH}.
+  Config precedence is built-ins, global config, nearest project config, then CLI flags.
+  Existing expected outputs are skipped by default; pass --force to retranscribe.
   Speech-onset trimming uses ffmpeg when available; --embed, --embed-file, and --burn require it.
   --embed-file can reuse an existing subtitle file without loading a transcription backend.
 """
@@ -1578,16 +1815,17 @@ def ensure_system_prereqs(args: argparse.Namespace, os_name: str, pkg_mgr: str) 
     if args.embed and args.embed_file is not None:
         warn("--embed is ignored when --embed-file is set.")
     if not shutil.which("ffmpeg") and (args.burn or embed_requested):
-        print_install_help(os_name, pkg_mgr)
-        required_flags = " and ".join(
-            flag
-            for enabled, flag in (
-                (args.burn, "--burn"),
-                (embed_requested, "--embed/--embed-file"),
+        if not getattr(args, "dry_run", False):
+            print_install_help(os_name, pkg_mgr)
+            required_flags = " and ".join(
+                flag
+                for enabled, flag in (
+                    (args.burn, "--burn"),
+                    (embed_requested, "--embed/--embed-file"),
+                )
+                if enabled
             )
-            if enabled
-        )
-        die(f"ffmpeg is required for {required_flags}.")
+            die(f"ffmpeg is required for {required_flags}.")
     if args.backend == "faster-whisper":
         mlx_flags_used = (
             args.mlx_word_timestamps != "auto" or args.mlx_output_format != "auto" or args.mlx_model_default != "wrapper"
@@ -1693,19 +1931,74 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_BURN_VCODEC": args.burn_vcodec,
         "WHISPER_FONT": args.font,
         "WHISPER_KARAOKE": "1" if args.karaoke else "0",
+        "WHISPER_FORCE": "1" if getattr(args, "force", False) else "0",
     }
 
 
 def rebuild_plan(plan: RuntimePlan) -> RuntimePlan:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_args_with_config(parser)
     return build_runtime_plan(args)
 
 
-def print_doctor(plan: RuntimePlan) -> None:
+def json_safe(value):
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: json_safe(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    return value
+
+
+def ffmpeg_diagnostics(args: argparse.Namespace) -> dict[str, object]:
+    embed_requested = args.embed or args.embed_file is not None
+    required_for = []
+    if embed_requested:
+        required_for.append("--embed/--embed-file")
+    if args.burn:
+        required_for.append("--burn")
+    optional_for = []
+    if getattr(args, "speech_trim", True):
+        optional_for.append("speech-onset trimming")
+    ffmpeg_path = shutil.which("ffmpeg")
+    return {
+        "found": bool(ffmpeg_path),
+        "path": ffmpeg_path,
+        "required": bool(required_for),
+        "required_for": required_for,
+        "optional_for": optional_for,
+    }
+
+
+def doctor_payload(plan: RuntimePlan, args: argparse.Namespace | None = None) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": "doctor",
+        "ok": True,
+        "config": {
+            "global_path": str(GLOBAL_CONFIG_PATH),
+            "project_filename": PROJECT_CONFIG_FILENAME,
+            "sources": [str(path) for path in getattr(args, "_config_sources", ())],
+        },
+        "ffmpeg": ffmpeg_diagnostics(args) if args else {"found": bool(shutil.which("ffmpeg")), "path": shutil.which("ffmpeg")},
+        "runtime": json_safe(plan),
+    }
+
+
+def print_doctor_json(plan: RuntimePlan, args: argparse.Namespace) -> None:
+    say(json.dumps(doctor_payload(plan, args), indent=2, sort_keys=True))
+
+
+def print_doctor(plan: RuntimePlan, args: argparse.Namespace | None = None) -> None:
     say(f"{BOLD}Whisper Doctor{RESET}")
     rows = [
         ("Script", plan.script_path),
+        ("Config files", ", ".join(str(path) for path in getattr(args, "_config_sources", ())) or "none"),
         ("Package mgr", plan.pkg_manager),
         ("Launcher Python", plan.launcher_python),
         ("Runtime builder", f"{plan.runtime_builder_python} ({plan.runtime_builder_version})"),
@@ -3527,6 +3820,275 @@ def write_txt(path: Path, text: str) -> None:
         handle.write("\n")
 
 
+def output_root_for_media(media_path: Path, env: dict[str, str]) -> Path:
+    return Path(env.get("WHISPER_OUTDIR", "")).expanduser() if env.get("WHISPER_OUTDIR", "") else media_path.parent
+
+
+def should_write_text_output(env: dict[str, str], backend: str) -> bool:
+    return (
+        backend == "mlx"
+        and env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto") == "text"
+        and env.get("WHISPER_ASS", "0") != "1"
+        and env.get("WHISPER_BURN", "0") != "1"
+        and env.get("WHISPER_EMBED", "0") != "1"
+    )
+
+
+def transcription_output_plan(media_path: Path, env: dict[str, str], backend: str) -> dict[str, object]:
+    output_root = output_root_for_media(media_path, env)
+    output_txt = should_write_text_output(env, backend)
+    actions: list[str] = ["transcribe"]
+    expected_outputs: list[Path] = []
+    subtitle_path: Path | None = None
+    text_path: Path | None = None
+    embedded_path: Path | None = None
+    embedded_codec: str | None = None
+    burn_path: Path | None = None
+    postprocess_actions = False
+    in_place_action = False
+    if output_txt:
+        text_path = output_root / f"{media_path.stem}.txt"
+        expected_outputs.append(text_path)
+        actions.append("write-text")
+    else:
+        subtitle_path = output_root / f"{media_path.stem}.{'ass' if env.get('WHISPER_ASS', '0') == '1' else 'srt'}"
+        expected_outputs.append(subtitle_path)
+        actions.append("write-ass" if env.get("WHISPER_ASS", "0") == "1" else "write-srt")
+        if env.get("WHISPER_EMBED", "0") == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
+            embedded_path, embedded_codec = embedded_subtitle_plan(media_path, subtitle_path, output_root)
+            postprocess_actions = True
+            if env.get("WHISPER_IN_PLACE", "0") == "1":
+                in_place_action = True
+                actions.append("embed-in-place")
+            else:
+                expected_outputs.append(embedded_path)
+                actions.append("embed")
+        if env.get("WHISPER_BURN", "0") == "1" and media_path.suffix.lower() in VIDEO_EXTENSIONS:
+            burn_path = output_root / f"{media_path.stem}_subbed.mp4"
+            expected_outputs.append(burn_path)
+            postprocess_actions = True
+            actions.append("burn")
+    return {
+        "media_path": media_path,
+        "mode": "transcribe",
+        "backend": backend,
+        "output_root": output_root,
+        "actions": tuple(actions),
+        "expected_outputs": tuple(expected_outputs),
+        "subtitle_path": subtitle_path,
+        "text_path": text_path,
+        "embedded_path": embedded_path,
+        "embedded_codec": embedded_codec,
+        "burn_path": burn_path,
+        "postprocess_actions": postprocess_actions,
+        "in_place_action": in_place_action,
+    }
+
+
+def embed_file_output_plan(media_path: Path, env: dict[str, str], subtitle_path: Path | None = None) -> dict[str, object]:
+    output_root = output_root_for_media(media_path, env)
+    subtitle_path = subtitle_path or resolve_embed_subtitle_path(media_path, env.get("WHISPER_EMBED_FILE", ""))
+    actions: list[str] = ["embed-existing-subtitle"]
+    expected_outputs: list[Path] = []
+    embedded_path: Path | None = None
+    embedded_codec: str | None = None
+    burn_path: Path | None = None
+    in_place_action = False
+    if media_path.suffix.lower() in VIDEO_EXTENSIONS:
+        if env.get("WHISPER_EMBED", "0") == "1":
+            embedded_path, embedded_codec = embedded_subtitle_plan(media_path, subtitle_path, output_root)
+            if env.get("WHISPER_IN_PLACE", "0") == "1":
+                in_place_action = True
+                actions.append("embed-in-place")
+            else:
+                expected_outputs.append(embedded_path)
+                actions.append("embed")
+        if env.get("WHISPER_BURN", "0") == "1":
+            burn_path = output_root / f"{media_path.stem}_subbed.mp4"
+            expected_outputs.append(burn_path)
+            actions.append("burn")
+    return {
+        "media_path": media_path,
+        "mode": "embed-file",
+        "output_root": output_root,
+        "actions": tuple(actions),
+        "expected_outputs": tuple(expected_outputs),
+        "subtitle_path": subtitle_path,
+        "text_path": None,
+        "embedded_path": embedded_path,
+        "embedded_codec": embedded_codec,
+        "burn_path": burn_path,
+        "postprocess_actions": bool(embedded_path or burn_path or in_place_action),
+        "in_place_action": in_place_action,
+    }
+
+
+def output_plan_complete(plan: dict[str, object]) -> bool:
+    if plan.get("in_place_action"):
+        return False
+    expected_outputs = tuple(path for path in plan.get("expected_outputs", ()) if isinstance(path, Path))
+    return bool(expected_outputs) and all(path.exists() for path in expected_outputs)
+
+
+def output_plan_resume_from_subtitle(plan: dict[str, object]) -> bool:
+    subtitle_path = plan.get("subtitle_path")
+    return (
+        isinstance(subtitle_path, Path)
+        and subtitle_path.exists()
+        and bool(plan.get("postprocess_actions"))
+        and not output_plan_complete(plan)
+    )
+
+
+def output_plan_status(plan: dict[str, object], *, force: bool) -> str:
+    if force:
+        return "will run because --force is set"
+    if output_plan_complete(plan):
+        return "will skip because expected outputs already exist"
+    if plan.get("mode") == "transcribe" and output_plan_resume_from_subtitle(plan):
+        return "will reuse existing subtitles and finish requested video outputs"
+    if plan.get("mode") == "embed-file":
+        return "will embed existing subtitles"
+    return "will transcribe"
+
+
+def output_plan_to_jsonable(plan: dict[str, object], *, force: bool) -> dict[str, object]:
+    encoded = dict(plan)
+    encoded["status"] = output_plan_status(plan, force=force)
+    encoded["complete"] = output_plan_complete(plan)
+    encoded["resume_from_subtitle"] = output_plan_resume_from_subtitle(plan)
+    return json_safe(encoded)
+
+
+def effective_source_paths_for_plan(media_path: Path, env: dict[str, str]) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    _replacements, _lengths, glossary_sources = load_effective_glossary(
+        media_path,
+        load_env_paths(env, "WHISPER_GLOSSARY_FILES"),
+    )
+    _rules, suppression_sources = load_effective_suppression_rules(
+        media_path,
+        load_env_paths(env, "WHISPER_SUPPRESSION_FILES"),
+    )
+    return glossary_sources, suppression_sources
+
+
+def discover_planned_files(args: argparse.Namespace) -> list[Path]:
+    files = discover_target_files([Path(target).expanduser() for target in args.targets], args.recursive)
+    if args.embed_file is not None:
+        files = [path for path in files if path.suffix.lower() in VIDEO_EXTENSIONS]
+    return files
+
+
+def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[str, object]:
+    env = build_runtime_processing_env(args, plan)
+    files = discover_planned_files(args)
+    force = getattr(args, "force", False)
+    file_entries: list[dict[str, object]] = []
+    for media_path in files:
+        try:
+            if args.embed_file is not None:
+                entry = output_plan_to_jsonable(embed_file_output_plan(media_path, env), force=force)
+            else:
+                planned = transcription_output_plan(media_path, env, plan.selected_backend)
+                glossary_sources, suppression_sources = effective_source_paths_for_plan(media_path, env)
+                planned["glossary_sources"] = glossary_sources
+                planned["suppression_sources"] = suppression_sources
+                entry = output_plan_to_jsonable(planned, force=force)
+        except Exception as exc:
+            entry = {
+                "media_path": str(media_path),
+                "mode": "embed-file" if args.embed_file is not None else "transcribe",
+                "error": str(exc),
+                "status": "cannot plan this file until the error is fixed",
+            }
+        file_entries.append(entry)
+    return {
+        "schema_version": 1,
+        "mode": "plan",
+        "config": {
+            "global_path": str(GLOBAL_CONFIG_PATH),
+            "project_filename": PROJECT_CONFIG_FILENAME,
+            "sources": [str(path) for path in getattr(args, "_config_sources", ())],
+        },
+        "selection": {
+            "backend": plan.selected_backend,
+            "fallback_backend": plan.fallback_backend,
+            "device": plan.selected_device,
+            "compute_type": plan.selected_compute,
+            "model": plan.selected_model,
+            "model_reason": plan.model_reason,
+            "runtime_selection": plan.runtime_selection_source,
+        },
+        "inputs": {
+            "targets": list(args.targets or []),
+            "recursive": args.recursive,
+            "files_discovered": len(files),
+        },
+        "defaults": {
+            "lang": args.lang,
+            "jobs": args.jobs,
+            "outdir": args.outdir,
+            "subtitle_style": args.subtitle_style,
+            "ass": args.ass,
+            "karaoke": args.karaoke,
+            "speech_trim": args.speech_trim,
+            "glossary_files": list(args.glossary or []),
+            "suppression_files": list(args.suppress_phrases or []),
+        },
+        "actions": {
+            "embed": bool(args.embed or args.embed_file is not None),
+            "embed_file": args.embed_file is not None,
+            "in_place": args.in_place,
+            "burn": args.burn,
+            "force": force,
+        },
+        "ffmpeg": ffmpeg_diagnostics(args),
+        "files": file_entries,
+    }
+
+
+def print_dry_run_json(args: argparse.Namespace, plan: RuntimePlan) -> None:
+    say(json.dumps(build_dry_run_payload(args, plan), indent=2, sort_keys=True))
+
+
+def print_dry_run(args: argparse.Namespace, plan: RuntimePlan) -> None:
+    payload = build_dry_run_payload(args, plan)
+    say(f"{BOLD}Whisper Plan{RESET}")
+    say(f"  Backend:            {payload['selection']['backend']}")
+    say(f"  Model:              {payload['selection']['model']}")
+    say(f"  Device/compute:     {payload['selection']['device']} / {payload['selection']['compute_type']}")
+    say(f"  Config files:       {', '.join(payload['config']['sources']) or 'none'}")
+    say(f"  Glossary files:     {', '.join(payload['defaults']['glossary_files']) or 'none'}")
+    say(f"  Suppression files:  {', '.join(payload['defaults']['suppression_files']) or 'none'}")
+    ffmpeg_info = payload["ffmpeg"]
+    required_for = ", ".join(ffmpeg_info["required_for"]) or "not required"
+    optional_for = ", ".join(ffmpeg_info["optional_for"]) or "none"
+    ffmpeg_path = ffmpeg_info["path"] or "not found"
+    say(f"  ffmpeg:             {ffmpeg_path} | required for: {required_for} | optional for: {optional_for}")
+    say(f"  Files discovered:   {payload['inputs']['files_discovered']}")
+    for entry in payload["files"]:
+        say("")
+        say(f"  - {entry['media_path']}")
+        if "error" in entry:
+            say(f"    status:           {entry['status']}")
+            say(f"    error:            {entry['error']}")
+            continue
+        say(f"    status:           {entry['status']}")
+        say(f"    actions:          {', '.join(entry['actions'])}")
+        say(f"    output root:      {entry['output_root']}")
+        if entry.get("subtitle_path"):
+            say(f"    subtitle:         {entry['subtitle_path']}")
+        if entry.get("text_path"):
+            say(f"    text:             {entry['text_path']}")
+        if entry.get("embedded_path"):
+            codec = f" ({entry['embedded_codec']})" if entry.get("embedded_codec") else ""
+            say(f"    embedded video:   {entry['embedded_path']}{codec}")
+        if entry.get("burn_path"):
+            say(f"    burned video:     {entry['burn_path']}")
+        expected = entry.get("expected_outputs", [])
+        say(f"    expected outputs: {', '.join(expected) if expected else 'none'}")
+
+
 def count_high_cps_cues(
     segments: list[dict[str, float | str | list[dict[str, float | str]]]],
     *,
@@ -3684,6 +4246,35 @@ def process_file(
 ) -> str:
     started_at = time.time()
     progress_prefix = f" [{file_index}/{total_files}]" if total_files > 1 else ""
+    planned_outputs = transcription_output_plan(media_path, env, backend)
+    force = env.get("WHISPER_FORCE", "0") == "1"
+    if not force and output_plan_complete(planned_outputs):
+        if compact_status:
+            print("⏭ Skipping existing output.", file=sys.stderr)
+        else:
+            print(f"⏭ Skipping existing output: {media_path.name}", file=sys.stderr)
+        return "Skipped; expected output already exists"
+    if not force and output_plan_resume_from_subtitle(planned_outputs):
+        subtitle_path = planned_outputs["subtitle_path"]
+        output_root = planned_outputs["output_root"]
+        if not isinstance(subtitle_path, Path) or not isinstance(output_root, Path):
+            raise ValueError("Unable to resume from existing subtitles because the output plan is incomplete.")
+        output_root.mkdir(parents=True, exist_ok=True)
+        if compact_status:
+            print("⏭ Reusing existing subtitles.", file=sys.stderr)
+        else:
+            print(f"⏭ Reusing existing subtitles for video output: {subtitle_path.name}", file=sys.stderr)
+        apply_subtitle_outputs(
+            media_path,
+            subtitle_path,
+            output_root,
+            env,
+            compact_status=compact_status,
+            subtitle_language=resolve_subtitle_language(media_path, env["WHISPER_LANG"]),
+            show_messages=show_stage_messages,
+        )
+        elapsed = time.time() - started_at
+        return f"Resumed from existing subtitles in {format_elapsed_precise(elapsed)}"
     start_message = f"▶ Starting transcription{progress_prefix}: {media_path.name} [{backend}]"
     print(start_message, file=sys.stderr)
     wait_message = f"Waiting for {backend}" if compact_status else f"Waiting for {backend} on {media_path.name}"
@@ -3697,7 +4288,6 @@ def process_file(
     )
     spinner_state = {"stopped": False}
     mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
-    mlx_output_format = env.get("WHISPER_MLX_OUTPUT_FORMAT", "auto")
     subtitle_style = resolve_subtitle_style_profile(env.get("WHISPER_SUBTITLE_STYLE", "balanced"))
     review_postprocessing = env.get("WHISPER_REVIEW_POSTPROCESSING", "0") == "1"
     glossary_replacements, glossary_lengths, glossary_sources = load_effective_glossary(
@@ -3708,13 +4298,7 @@ def process_file(
         media_path,
         load_env_paths(env, "WHISPER_SUPPRESSION_FILES"),
     )
-    output_txt = (
-        backend == "mlx"
-        and mlx_output_format == "text"
-        and env["WHISPER_ASS"] != "1"
-        and env["WHISPER_BURN"] != "1"
-        and env["WHISPER_EMBED"] != "1"
-    )
+    output_txt = should_write_text_output(env, backend)
     mlx_word_timestamps_enabled = mlx_word_timestamps != "off"
     if mlx_word_timestamps == "on":
         mlx_word_timestamps_enabled = True
@@ -3753,7 +4337,7 @@ def process_file(
             stop_wait_spinner()
     progress.finish()
     progress.before_stage_message()
-    output_root = Path(env["WHISPER_OUTDIR"]).expanduser() if env["WHISPER_OUTDIR"] else media_path.parent
+    output_root = output_root_for_media(media_path, env)
     output_root.mkdir(parents=True, exist_ok=True)
     if backend == "mlx":
         segments = normalize_mlx_segments(mlx_result, lambda _current_end: None)
@@ -3856,6 +4440,13 @@ def process_existing_subtitle_file(media_path: Path, env: dict[str, str], *, com
     output_root = Path(env["WHISPER_OUTDIR"]).expanduser() if env["WHISPER_OUTDIR"] else media_path.parent
     output_root.mkdir(parents=True, exist_ok=True)
     subtitle_path = resolve_embed_subtitle_path(media_path, env["WHISPER_EMBED_FILE"])
+    planned_outputs = embed_file_output_plan(media_path, env, subtitle_path=subtitle_path)
+    if env.get("WHISPER_FORCE", "0") != "1" and output_plan_complete(planned_outputs):
+        if compact_status:
+            print("⏭ Skipping existing embedded output.", file=sys.stderr)
+        else:
+            print(f"⏭ Skipping existing embedded output: {media_path.name}", file=sys.stderr)
+        return "Skipped; expected output already exists"
     if compact_status:
         print("📝 Using existing subtitle file.", file=sys.stderr)
     else:
@@ -3993,6 +4584,13 @@ def run_embed_file_mode(targets: list[Path], env: dict[str, str], *, recursive: 
         return 1
 
 
+def can_finish_without_transcription(files: list[Path], env: dict[str, str], backend: str) -> bool:
+    if not files or env.get("WHISPER_FORCE", "0") == "1":
+        return False
+    plans = [transcription_output_plan(media_path, env, backend) for media_path in files]
+    return all(output_plan_complete(plan) or output_plan_resume_from_subtitle(plan) for plan in plans)
+
+
 def install_backend_into_managed_runtime(backend: str) -> None:
     label = "MLX Whisper packages" if backend == "mlx" else "faster-whisper packages"
     install_packages(Path(sys.executable), f"Installing {label}", *backend_packages(backend))
@@ -4081,9 +4679,8 @@ def print_modify_examples() -> None:
     say(f"  {MAGENTA}--stable-mlx-python{RESET}")
 
 
-def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
-    env = os.environ.copy()
-    env.update(build_processing_env(args))
+def build_runtime_processing_env(args: argparse.Namespace, plan: RuntimePlan) -> dict[str, str]:
+    env = build_processing_env(args)
     env.update(
         {
             MANAGED_ENV_FLAG: "1",
@@ -4105,6 +4702,12 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
         }
     )
+    return env
+
+
+def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
+    env = os.environ.copy()
+    env.update(build_runtime_processing_env(args, plan))
     if args.embed_file is not None:
         info(f"OS: {plan.os_name} | arch: {plan.arch_name} | mode: embed-file")
     else:
@@ -4122,14 +4725,16 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
 
 def outer_main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_args_with_config(parser)
     if args.help:
         print_help()
         return 0
+    if args.json_output and not (args.doctor or args.dry_run):
+        die("--json is only supported with --doctor or --plan/--dry-run")
     if args.jobs < 1:
         die("--jobs must be at least 1")
     runtime_management_requested = args.doctor or args.clean or args.reinstall or args.setup_only or args.update
-    if args.embed_file is not None and not runtime_management_requested:
+    if args.embed_file is not None and not runtime_management_requested and not args.dry_run:
         if not args.targets:
             print_help()
             return 1
@@ -4142,7 +4747,16 @@ def outer_main() -> int:
         )
     plan = build_runtime_plan(args)
     if args.doctor:
-        print_doctor(plan)
+        if args.json_output:
+            print_doctor_json(plan, args)
+        else:
+            print_doctor(plan, args)
+        return 0
+    if args.dry_run:
+        if args.json_output:
+            print_dry_run_json(args, plan)
+        else:
+            print_dry_run(args, plan)
         return 0
     if args.clean:
         if not plan.state_dir.exists():
@@ -4156,6 +4770,13 @@ def outer_main() -> int:
         shutil.rmtree(plan.venv_dir)
         success("Removed old runtime.")
         plan = build_runtime_plan(args)
+    if args.targets and args.embed_file is None and not (args.setup_only or args.update or args.reinstall):
+        env = build_runtime_processing_env(args, plan)
+        files = discover_planned_files(args)
+        if can_finish_without_transcription(files, env, plan.selected_backend):
+            print("♻ Existing subtitles/outputs are enough; no transcription backend needed.", file=sys.stderr)
+            process_files(files, env, plan.selected_backend, args.jobs)
+            return 0
     selected_backend_required = bool((args.targets and args.embed_file is None) or args.setup_only or args.update or not plan.venv_python.exists())
     install_needed = (
         not plan.venv_python.exists()
