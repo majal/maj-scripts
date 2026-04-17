@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from tests.support import load_script_module
 
@@ -28,6 +31,17 @@ class WhisperCoreTest(unittest.TestCase):
             files = self.whisper.discover_target_files([media, root], recursive=False)
 
             self.assertEqual(files, [media])
+
+    def test_runtime_has_module_discovers_without_importing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "crashy_probe_module.py").write_text(
+                "raise RuntimeError('module import should not run during discovery')\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(root)}, clear=False):
+                self.assertTrue(self.whisper.runtime_has_module(Path(sys.executable), "crashy_probe_module"))
 
     def test_parse_text_mapping_lines_reads_valid_entries(self) -> None:
         items = self.whisper.parse_text_mapping_lines(
