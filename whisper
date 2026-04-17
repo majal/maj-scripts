@@ -68,6 +68,10 @@ SPEAKER_LABEL_REPO_CACHE_NAME = "models--pyannote--speaker-diarization-community
 SPEAKER_LABEL_MODEL_SIZE_ESTIMATE = "roughly 30-50 MB"
 SPEAKER_LABEL_PACKAGE_SIZE_ESTIMATE = "often 1.5-3 GB installed/cache footprint"
 SPEAKER_LABEL_CACHE_DIRNAME = "speaker-labels"
+DEEP_DOCTOR_WARNING = (
+    "Deep doctor imports native runtime packages. On some machines, a broken native backend can still make macOS show a Python crash dialog."
+)
+SAMPLE_SUBTITLE_TEXT = "1\n00:00:00,000 --> 00:00:00,500\nHello from whisper sample media.\n"
 MLX_PREFERRED_PYTHONS = ("3.12", "3.13")
 MLX_RUNTIME_SELECTION_FILE = "mlx-runtime-selection.json"
 SUBTITLE_MAX_LINE_WIDTH = 42
@@ -1619,6 +1623,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("targets", nargs="*")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--deep", action="store_true")
     parser.add_argument("--json", dest="json_output", action="store_true")
     parser.add_argument("--dry-run", "--plan", dest="dry_run", action="store_true")
     parser.add_argument("--setup-only", action="store_true")
@@ -1673,6 +1678,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--burn-vcodec", default="auto")
     parser.add_argument("-F", "--font", default="Arial")
     parser.add_argument("--karaoke", action="store_true")
+    parser.add_argument("--make-sample-media", default="", metavar="PATH")
     return parser
 
 
@@ -1962,6 +1968,7 @@ def print_help() -> None:
         (
             ("--doctor", "Show detected hardware and runtime choices."),
             ("--doctor --json", "Print machine-readable diagnostics for scripts and support."),
+            ("--doctor --deep", "Explicitly import installed runtime backends for deeper diagnostics."),
             ("--dry-run, --plan", "Show selected backend, model, files, outputs, and ffmpeg needs without setup or transcription."),
             ("--json", "Use JSON output with --doctor or --plan."),
             ("--setup-only", "Prepare the managed runtime and stop."),
@@ -1973,6 +1980,7 @@ def print_help() -> None:
             ("--state-dir=PATH", "Store the managed runtime under PATH."),
             ("--python=/path/to/python", "Interpreter to use when building the managed runtime."),
             ("--stable-mlx-python", "Compatibility alias for validated Apple Silicon MLX Python selection."),
+            ("--make-sample-media=PATH", "Create a tiny video and .srt sidecar for manual embed tests."),
             ("-h, --help", "Show this help text."),
         )
     )
@@ -1991,6 +1999,8 @@ def print_help() -> None:
   python {name} <file-or-folder> [more-files-or-folders ...] [options]
   py {name} <file-or-folder> [more-files-or-folders ...] [options]   {DIM}(Windows){RESET}
   {name} --doctor
+  {name} --doctor --deep
+  {name} --make-sample-media=/tmp/whisper-sample.mp4
   {name} --setup-only
 
 {BOLD}Quick examples{RESET}
@@ -2014,6 +2024,7 @@ def print_help() -> None:
 
 {BOLD}Notes{RESET}
   First run shows an install summary before downloading packages.
+  Normal --doctor checks installed modules without importing native backends; --doctor --deep imports them explicitly.
   Defaults are chosen from detected hardware and OS capabilities.
   Per-file progress percentages and ETA are estimated from media length.
   Multiple explicit files are supported, so shell-expanded commands such as {name} *.mp4 work as expected.
@@ -2235,8 +2246,135 @@ def ffmpeg_diagnostics(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def doctor_payload(plan: RuntimePlan, args: argparse.Namespace | None = None) -> dict[str, object]:
+def returncode_summary(returncode: int | None) -> str:
+    if returncode is None:
+        return "unknown exit status"
+    if returncode < 0:
+        return f"signal {-returncode}"
+    return f"exit code {returncode}"
+
+
+def trim_probe_output(text: str, *, max_chars: int = 700) -> str:
+    value = text.strip()
+    if len(value) <= max_chars:
+        return value
+    return "..." + value[-max_chars:]
+
+
+def runtime_import_probe(python_bin: Path, module: str) -> dict[str, object]:
+    if not python_bin.exists():
+        return {
+            "module": module,
+            "attempted": False,
+            "ok": False,
+            "reason": "runtime-not-built",
+        }
+    proc = subprocess.run(
+        [str(python_bin), "-c", "import importlib, sys; importlib.import_module(sys.argv[1])", module],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
     return {
+        "module": module,
+        "attempted": True,
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "status": returncode_summary(proc.returncode),
+        "stdout": trim_probe_output(proc.stdout),
+        "stderr": trim_probe_output(proc.stderr),
+    }
+
+
+def module_deep_check(
+    *,
+    label: str,
+    module: str,
+    python_bin: Path,
+    installed: bool,
+    required: bool = False,
+) -> dict[str, object]:
+    base: dict[str, object] = {
+        "label": label,
+        "module": module,
+        "installed": installed,
+        "required": required,
+    }
+    if not installed:
+        return {
+            **base,
+            "attempted": False,
+            "ok": False,
+            "reason": "module-not-found",
+        }
+    return {**base, **runtime_import_probe(python_bin, module)}
+
+
+def deep_doctor_payload(plan: RuntimePlan) -> dict[str, object]:
+    backend_names: list[str] = []
+    for backend in (plan.selected_backend, plan.fallback_backend):
+        if backend != "none" and backend not in backend_names:
+            backend_names.append(backend)
+    backend_checks = [
+        module_deep_check(
+            label=backend,
+            module=BACKEND_MODULES[backend],
+            python_bin=plan.venv_python,
+            installed=backend in plan.installed_backends,
+            required=backend == plan.selected_backend,
+        )
+        for backend in backend_names
+    ]
+    speaker_label_check = module_deep_check(
+        label="speaker-labels",
+        module=SPEAKER_LABEL_MODULE,
+        python_bin=plan.venv_python,
+        installed=runtime_has_speaker_labels(plan.venv_python),
+        required=False,
+    )
+    required_checks = [check for check in backend_checks if check.get("required")]
+    ok = all(bool(check.get("ok")) for check in required_checks) if required_checks else True
+    return {
+        "ok": ok,
+        "warning": DEEP_DOCTOR_WARNING,
+        "backends": backend_checks,
+        "speaker_labels": speaker_label_check,
+    }
+
+
+def format_deep_check_status(check: dict[str, object]) -> str:
+    if not check.get("attempted"):
+        return f"skipped ({check.get('reason', 'not attempted')})"
+    if check.get("ok"):
+        return "ok"
+    status = str(check.get("status") or returncode_summary(check.get("returncode") if isinstance(check.get("returncode"), int) else None))
+    stderr = str(check.get("stderr") or "")
+    if stderr:
+        first_line = stderr.splitlines()[0]
+        return f"failed ({status}): {first_line}"
+    return f"failed ({status})"
+
+
+def print_deep_doctor(deep: dict[str, object]) -> None:
+    say("")
+    say(f"{BOLD}Deep Runtime Checks{RESET}")
+    say(f"  Warning: {deep.get('warning')}")
+    rows = [
+        (f"Backend {check['label']}", format_deep_check_status(check))
+        for check in deep.get("backends", [])
+        if isinstance(check, dict)
+    ]
+    speaker_check = deep.get("speaker_labels")
+    if isinstance(speaker_check, dict):
+        rows.append(("Speaker labels", format_deep_check_status(speaker_check)))
+    if rows:
+        print_label_rows(rows)
+    say(f"  Deep readiness: {'ok' if deep.get('ok') else 'needs attention'}")
+
+
+def doctor_payload(plan: RuntimePlan, args: argparse.Namespace | None = None) -> dict[str, object]:
+    payload = {
         "schema_version": 1,
         "mode": "doctor",
         "ok": True,
@@ -2253,6 +2391,11 @@ def doctor_payload(plan: RuntimePlan, args: argparse.Namespace | None = None) ->
         },
         "runtime": json_safe(plan),
     }
+    if args and getattr(args, "deep", False):
+        deep = deep_doctor_payload(plan)
+        payload["deep"] = deep
+        payload["ok"] = bool(deep["ok"])
+    return payload
 
 
 def print_doctor_json(plan: RuntimePlan, args: argparse.Namespace) -> None:
@@ -2289,6 +2432,8 @@ def print_doctor(plan: RuntimePlan, args: argparse.Namespace | None = None) -> N
     ]
     rows.extend(render_hardware_summary(plan.profile))
     print_label_rows(rows)
+    if args and getattr(args, "deep", False):
+        print_deep_doctor(deep_doctor_payload(plan))
 
 
 def subtitle_item_text(item: str | dict[str, float | str]) -> str:
@@ -3684,6 +3829,60 @@ def load_env_paths(env: dict[str, str], key: str) -> list[Path]:
     if not isinstance(values, list):
         return []
     return [Path(str(value)).expanduser() for value in values if str(value).strip()]
+
+
+def sample_media_paths(output_path: Path) -> tuple[Path, Path]:
+    media_path = output_path.expanduser()
+    if media_path.exists() and media_path.is_dir():
+        media_path = media_path / "whisper-sample.mp4"
+    if not media_path.suffix:
+        media_path = media_path.with_suffix(".mp4")
+    if media_path.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise ValueError("Sample media path must use a supported video extension such as .mp4 or .mkv.")
+    return media_path, media_path.with_suffix(".srt")
+
+
+def create_sample_media_fixture(output_path: Path) -> tuple[Path, Path]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to create sample media.")
+    media_path, subtitle_path = sample_media_paths(output_path)
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=32x32:r=1",
+            "-t",
+            "0.5",
+            "-c:v",
+            "mpeg4",
+            str(media_path),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else returncode_summary(result.returncode)
+        raise RuntimeError(f"ffmpeg could not create sample media: {detail}")
+    subtitle_path.write_text(SAMPLE_SUBTITLE_TEXT, encoding="utf-8")
+    return media_path, subtitle_path
+
+
+def run_make_sample_media(path_value: str) -> int:
+    try:
+        media_path, subtitle_path = create_sample_media_fixture(Path(path_value))
+    except Exception as exc:
+        die(str(exc))
+    success(f"Created sample media: {media_path}")
+    success(f"Created sample subtitles: {subtitle_path}")
+    say(f"Try it with: {MAGENTA}{Path(sys.argv[0]).name} {media_path} --embed-file{RESET}")
+    return 0
 
 
 def resolve_subtitle_style_profile(name: str) -> SubtitleStyleProfile:
@@ -5185,8 +5384,25 @@ def summarize_backend_error(backend: str, exc: Exception, env: dict[str, str]) -
     print(f"❌ Backend '{backend}' ran into a problem: {message}", file=sys.stderr)
     if backend == "mlx" and ("401" in message or "Repository Not Found" in message or "Invalid username or password" in message):
         print("💡 MLX couldn't download the model from Hugging Face. If you have a bad HF_TOKEN set, unset it and try again.", file=sys.stderr)
+    if backend == "mlx":
+        print("💡 If MLX keeps failing here, try --backend=faster-whisper to bypass MLX/Metal.", file=sys.stderr)
+        print("💡 Run --doctor --deep when you want to explicitly test native backend imports.", file=sys.stderr)
     if backend == "faster-whisper" and env.get("WHISPER_DEVICE") == "cuda":
         print("💡 If CUDA is unavailable on this machine, try again with --device=cpu.", file=sys.stderr)
+
+
+def print_backend_exit_guidance(plan: RuntimePlan, returncode: int) -> None:
+    if returncode == 0 or plan.selected_backend != "mlx":
+        return
+    print(f"💡 The MLX managed runtime exited with {returncode_summary(returncode)}.", file=sys.stderr)
+    print("💡 Try --backend=faster-whisper to bypass MLX/Metal on this machine.", file=sys.stderr)
+    print("💡 Run --doctor --deep to explicitly test native backend imports.", file=sys.stderr)
+    if plan.auto_backend and plan.fallback_backend != "none":
+        print(
+            f"💡 Native MLX failures can abort Python before auto fallback runs; "
+            f"--backend={plan.fallback_backend} starts with the fallback backend.",
+            file=sys.stderr,
+        )
 
 
 def format_elapsed_summary(seconds: float) -> str:
@@ -5444,6 +5660,7 @@ def launch_managed_runtime(args: argparse.Namespace, plan: RuntimePlan) -> int:
     info(f"Using runtime: {plan.state_dir}")
     say("", err=True)
     result = subprocess.run([str(plan.venv_python), str(plan.script_path)], env=env, check=False)
+    print_backend_exit_guidance(plan, result.returncode)
     return result.returncode
 
 
@@ -5453,10 +5670,16 @@ def outer_main() -> int:
     if args.help:
         print_help()
         return 0
+    if args.deep and not args.doctor:
+        die("--deep is only supported with --doctor.")
     if args.json_output and not (args.doctor or args.dry_run):
         die("--json is only supported with --doctor or --plan/--dry-run")
     if args.jobs < 1:
         die("--jobs must be at least 1")
+    if args.make_sample_media:
+        if args.targets:
+            die("--make-sample-media does not accept media targets.")
+        return run_make_sample_media(args.make_sample_media)
     runtime_management_requested = (
         args.doctor
         or args.clean

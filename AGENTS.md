@@ -15,7 +15,7 @@ The documentation model is:
 
 ## Agent Permission Rules
 
-Normal file edits inside `/home/maj/dig/maj-scripts-vibe` are pre-approved. Do not ask for user permission before creating or modifying files in this repo as part of the requested work.
+Normal file edits inside this repository checkout are pre-approved. Do not ask for user permission before creating or modifying files in this repo as part of the requested work.
 
 If the agent workflow requires a brief note before editing, phrase it as a progress update, not as an approval request.
 

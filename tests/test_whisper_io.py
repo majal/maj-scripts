@@ -429,6 +429,81 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(scope, "app")
         self.assertEqual(cache_dir, self.whisper.speaker_label_app_hub_cache_dir(state_dir))
 
+    def test_deep_doctor_payload_imports_selected_backend_when_installed(self) -> None:
+        plan = argparse.Namespace(
+            selected_backend="faster-whisper",
+            fallback_backend="none",
+            installed_backends=("faster-whisper",),
+            venv_python=Path("/fake/runtime/python"),
+        )
+
+        with (
+            mock.patch.object(
+                self.whisper,
+                "runtime_import_probe",
+                return_value={
+                    "module": "faster_whisper",
+                    "attempted": True,
+                    "ok": True,
+                    "returncode": 0,
+                    "status": "exit code 0",
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ) as probe,
+            mock.patch.object(self.whisper, "runtime_has_speaker_labels", return_value=False),
+        ):
+            payload = self.whisper.deep_doctor_payload(plan)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["backends"][0]["label"], "faster-whisper")
+        probe.assert_called_once_with(Path("/fake/runtime/python"), "faster_whisper")
+
+    def test_deep_doctor_payload_marks_selected_backend_failure(self) -> None:
+        plan = argparse.Namespace(
+            selected_backend="mlx",
+            fallback_backend="faster-whisper",
+            installed_backends=("mlx",),
+            venv_python=Path("/fake/runtime/python"),
+        )
+
+        with (
+            mock.patch.object(
+                self.whisper,
+                "runtime_import_probe",
+                return_value={
+                    "module": "mlx_whisper",
+                    "attempted": True,
+                    "ok": False,
+                    "returncode": -6,
+                    "status": "signal 6",
+                    "stdout": "",
+                    "stderr": "",
+                },
+            ),
+            mock.patch.object(self.whisper, "runtime_has_speaker_labels", return_value=False),
+        ):
+            payload = self.whisper.deep_doctor_payload(plan)
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["backends"][0]["status"], "signal 6")
+        self.assertFalse(payload["backends"][1]["attempted"])
+
+    def test_mlx_exit_guidance_suggests_explicit_fallback(self) -> None:
+        plan = argparse.Namespace(
+            selected_backend="mlx",
+            auto_backend=True,
+            fallback_backend="faster-whisper",
+        )
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            self.whisper.print_backend_exit_guidance(plan, -6)
+
+        output = stderr.getvalue()
+        self.assertIn("signal 6", output)
+        self.assertIn("--backend=faster-whisper", output)
+        self.assertIn("auto fallback", output)
+
     def test_process_file_skips_when_subtitle_already_exists(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

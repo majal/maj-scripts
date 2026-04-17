@@ -70,3 +70,13 @@ class WhisperGeneratedMediaIntegrationTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(embedded.is_file())
             self.assertGreaterEqual(self.whisper.probe_subtitle_stream_count(embedded), 1)
+
+    def test_create_sample_media_fixture_writes_video_and_sidecar(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            video, subtitle = self.whisper.create_sample_media_fixture(root / "sample.mp4")
+
+            self.assertTrue(video.is_file())
+            self.assertTrue(subtitle.is_file())
+            self.assertIn("Hello from whisper sample media", subtitle.read_text(encoding="utf-8"))
+            self.assertIsNotNone(self.whisper.probe_duration_seconds(video))

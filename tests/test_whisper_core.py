@@ -43,6 +43,17 @@ class WhisperCoreTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PYTHONPATH": str(root)}, clear=False):
                 self.assertTrue(self.whisper.runtime_has_module(Path(sys.executable), "crashy_probe_module"))
 
+    def test_sample_media_paths_defaults_and_validates_suffix(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            media, subtitle = self.whisper.sample_media_paths(root)
+
+            self.assertEqual(media, root / "whisper-sample.mp4")
+            self.assertEqual(subtitle, root / "whisper-sample.srt")
+            with self.assertRaisesRegex(ValueError, "supported video extension"):
+                self.whisper.sample_media_paths(root / "sample.txt")
+
     def test_parse_text_mapping_lines_reads_valid_entries(self) -> None:
         items = self.whisper.parse_text_mapping_lines(
             """

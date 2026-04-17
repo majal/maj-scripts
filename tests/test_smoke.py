@@ -33,6 +33,8 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Usage", result.stdout)
         self.assertIn("--doctor", result.stdout)
+        self.assertIn("--doctor --deep", result.stdout)
+        self.assertIn("--make-sample-media", result.stdout)
 
     def test_whisper_doctor(self) -> None:
         result = self.run_script("whisper", "--doctor")

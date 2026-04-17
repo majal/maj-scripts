@@ -154,6 +154,7 @@ Useful inspection/setup commands:
 ```bash
 whisper --doctor
 whisper --doctor --json
+whisper --doctor --deep
 whisper --setup-only
 ```
 
@@ -230,6 +231,13 @@ Preview the work plan without setup, installs, or transcription:
 ```bash
 whisper /path/to/file.mp4 --plan
 whisper /path/to/folder --recursive --plan --json
+```
+
+Create a tiny video plus matching subtitle sidecar for manual embed checks:
+
+```bash
+whisper --make-sample-media=/tmp/whisper-sample.mp4
+whisper /tmp/whisper-sample.mp4 --embed-file
 ```
 
 Retranscribe even when the expected subtitle or video output already exists:
@@ -313,7 +321,10 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
 - Default model selection is hardware-aware.
 - `--plan` / `--dry-run` shows discovered files, selected backend/model, output paths, configured glossary and suppression files, speaker-label status, embed/burn actions, and whether `ffmpeg` is required without installing packages or transcribing.
+- Normal `--doctor` checks installed runtime modules without importing native backends, which keeps routine diagnostics calmer around MLX/Metal crashes.
 - `--doctor --json` prints machine-readable diagnostics for scripts, CI, and support notes.
+- `--doctor --deep` explicitly imports installed runtime backends for deeper diagnostics. Use it when you want to isolate backend import failures and are comfortable with native packages being loaded.
+- `--make-sample-media=PATH` creates a tiny video and matching `.srt` sidecar so you can test `--embed-file` without hunting for a media fixture.
 - Existing expected outputs are skipped by default, so reruns resume safely instead of retranscribing finished files. Use `--force` to overwrite that skip behavior.
 - `-t` / `--transcript` writes a `.txt` transcript alongside normal `.srt`/`.ass` output. If the expected sidecar subtitle already exists, it builds the transcript from that file instead of retranscribing unless `--force` is set.
 - `-T` / `--transcript-only` writes only the `.txt` file and skips subtitle/video outputs.
@@ -353,7 +364,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 - Speaker labels depend on pyannote and may require accepting model terms on Hugging Face plus setting `HF_TOKEN` or `HUGGINGFACE_TOKEN`.
 - Soft subtitle embedding and burn-in both require `ffmpeg`, and the default speech-onset trim uses it when available.
 - In-place embedding only works when the embedded output can stay in the same container; cases that need an MKV fallback still require plain `--embed`.
-- MLX behavior can vary by machine, Python version, and model choice.
+- MLX behavior can vary by machine, Python version, model choice, and the host Metal stack. If MLX fails or macOS reports that Python closed unexpectedly, try `--backend=faster-whisper` and use `--doctor --deep` only when you want an explicit native import check.
 
 [↑ TOC](#table-of-contents)
 
