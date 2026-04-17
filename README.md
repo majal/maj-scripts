@@ -548,7 +548,6 @@ Keep `Platform Setup` generic and reusable. Script-specific requirements, caveat
 For quick repo checks, run the lightweight test harness before or after changes:
 
 ```bash
-make test
 python3 -m tests
 ```
 
