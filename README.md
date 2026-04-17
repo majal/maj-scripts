@@ -10,9 +10,9 @@ LLMs have changed the way the programming world works. Welcome to the machine-ma
 
 If you're just here to use a script, start here. This README is the friendly map:
 
-- find the script you want and copy a small example
-- use the shared setup notes when Python, `ffmpeg`, or a friendly launcher needs a little help
-- peek at [`AGENTS.md`](./AGENTS.md) only if you're adding scripts or guiding an AI coding helper
+- Each script section tells you what the script does, what it needs, and the safest first commands to try.
+- Use [Your Local Setup](#your-local-setup) when Python, Git, `ffmpeg`, or package managers need a little help.
+- Use [Friendly Launchers](#friendly-launchers) if you prefer double-clicks, drag-and-drop, file pickers, or right-click actions.
 
 ## Table of Contents
 
@@ -20,9 +20,10 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Scripts](#scripts)
   - [`wh`](#wh)
   - [`whisper`](#whisper)
-- [Setup And Friendly Launchers](#setup-and-friendly-launchers)
+- [Your Local Setup](#your-local-setup)
   - [Friendly Launchers](#friendly-launchers)
   - [Python](#python)
+  - [Git](#git)
   - [Package Managers](#package-managers)
 - [Contributing Docs](#contributing-docs)
 
@@ -369,7 +370,7 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 [↑ TOC](#table-of-contents)
 
-## Setup And Friendly Launchers
+## Your Local Setup
 
 Use this section for shared prerequisites and friendlier ways to run scripts without living in a terminal. Script-specific notes can link back here instead of repeating the same setup steps everywhere.
 
@@ -382,7 +383,7 @@ Good launchers should:
 - show command output or keep a log file so errors are not hidden
 - pass selected files and folders through to the script without changing them
 - keep the underlying command easy to inspect and edit
-- rely on the shared [Python](#python) and tool setup below
+- rely on the shared [Python](#python), [Git](#git), and tool setup below
 
 #### macOS Launchers
 
@@ -400,7 +401,7 @@ Example wrapper shape:
 ```zsh
 #!/bin/zsh
 cd /path/to/maj-scripts-vibe || exit 1
-./whisper "$@"
+./script-name "$@"
 ```
 
 #### Windows Launchers
@@ -417,7 +418,7 @@ Helpful Windows patterns:
 Example wrapper shape:
 
 ```powershell
-py C:\path\to\maj-scripts-vibe\whisper @args
+py C:\path\to\maj-scripts-vibe\script-name @args
 ```
 
 #### Linux Launchers
@@ -434,13 +435,13 @@ Helpful Linux patterns:
 Example `.desktop` command shape:
 
 ```ini
-Exec=/path/to/maj-scripts-vibe/whisper %F
+Exec=/path/to/maj-scripts-vibe/script-name %F
 Terminal=true
 ```
 
 #### Launcher Safety Notes
 
-Treat launchers as convenience wrappers, not separate apps with different behavior. When a launcher is new, test it with a tiny file or a dry-run option such as `whisper --plan`. For `whisper`, `whisper --make-sample-media=/tmp/whisper-sample.mp4` can create a small media file and sidecar subtitle for a low-stakes embed test.
+Treat launchers as convenience wrappers, not separate apps with different behavior. When a launcher is new, test it with a tiny throwaway file or a harmless preview command first. If a script offers a dry-run, doctor, or sample-file command, use that before handing it important files.
 
 [↑ TOC](#table-of-contents)
 
@@ -533,6 +534,33 @@ python --version
 
 [↑ TOC](#table-of-contents)
 
+### [Git](https://git-scm.com/)
+
+Git is optional if you only want to download a ZIP and try one script. It becomes handy when you want to keep your local copy of this repo up to date without re-downloading everything by hand.
+
+Check whether Git is already available:
+
+```bash
+git --version
+```
+
+If you have Git, you can make a local copy with:
+
+```bash
+git clone https://github.com/majal/maj-scripts-vibe.git
+cd maj-scripts-vibe
+```
+
+Later, update that copy from inside the repo folder:
+
+```bash
+git pull
+```
+
+If Git feels like too much, downloading a fresh ZIP from GitHub is still okay. Git just makes updates tidier. If you prefer a visual app, [GitHub Desktop](https://desktop.github.com/) can clone the repo and update it with Fetch/Pull buttons.
+
+[↑ TOC](#table-of-contents)
+
 ### Package Managers
 
 Package managers help you install and update command-line tools without chasing individual downloads by hand.
@@ -615,7 +643,7 @@ python --version
 
 When future scripts are added, keep this README as the main navigation page and update it alongside the script so new tools stay easy to discover.
 
-Keep `Setup And Friendly Launchers` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
+Keep `Your Local Setup` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
 
 For quick repo checks, run the lightweight test harness before or after changes:
 
