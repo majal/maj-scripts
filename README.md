@@ -8,11 +8,11 @@ LLMs have changed the way the programming world works. Welcome to the machine-ma
 
 `maj-scripts-vibe` is a home for utility scripts, all vibe-coded. 😎
 
-The root README is the main navigation page:
+If you're just here to use a script, start here. This README is the friendly map:
 
-- shared setup guidance lives here
-- each script gets its own section here
-- future contributor and AI-agent documentation rules live in [`AGENTS.md`](./AGENTS.md)
+- find the script you want and copy a small example
+- use the shared setup notes when Python, `ffmpeg`, or a friendly launcher needs a little help
+- peek at [`AGENTS.md`](./AGENTS.md) only if you're adding scripts or guiding an AI coding helper
 
 ## Table of Contents
 
