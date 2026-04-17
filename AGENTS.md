@@ -49,6 +49,10 @@ Do not add a new script without updating the README.
 
 Run `python3 -m tests` before pushing changes that affect scripts, tests, or README/AGENTS documentation. On Windows, use `py -m tests`.
 
+## Commit And Push Rules
+
+When an agent completes requested repo changes, commit and push them unless the user explicitly asks not to.
+
 ## Script Section Template
 
 Each script subsection under `## Scripts` in `README.md` should include:
