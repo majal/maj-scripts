@@ -51,7 +51,9 @@ Run `python3 -m tests` before pushing changes that affect scripts, tests, or REA
 
 ## Commit And Push Rules
 
-When an agent completes requested repo changes, commit and push them unless the user explicitly asks not to.
+When an agent completes requested repo changes and is confident the work is ready, commit and push them unless the user explicitly asks not to.
+
+Do not push when there are unresolved errors, relevant verification has not passed, or the agent believes the change should wait for more work or be bundled with related follow-up changes. In those cases, leave a clear status note with the next step.
 
 ## Script Section Template
 
