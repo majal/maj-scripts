@@ -61,13 +61,13 @@ class ReadmeConsistencyTest(unittest.TestCase):
         cls.readme = README_PATH.read_text(encoding="utf-8")
         cls.scripts = root_scripts()
 
-    def test_scripts_section_stays_before_platform_setup(self) -> None:
+    def test_scripts_section_stays_before_setup_and_launchers(self) -> None:
         scripts_index = self.readme.find("\n## Scripts\n")
-        platform_index = self.readme.find("\n## Platform Setup\n")
+        setup_index = self.readme.find("\n## Setup And Friendly Launchers\n")
 
         self.assertNotEqual(scripts_index, -1, "README must include ## Scripts")
-        self.assertNotEqual(platform_index, -1, "README must include ## Platform Setup")
-        self.assertLess(scripts_index, platform_index, "## Scripts must stay above ## Platform Setup")
+        self.assertNotEqual(setup_index, -1, "README must include ## Setup And Friendly Launchers")
+        self.assertLess(scripts_index, setup_index, "## Scripts must stay above ## Setup And Friendly Launchers")
 
     def test_root_scripts_are_in_toc_and_have_linked_sections(self) -> None:
         toc = section_body(self.readme, "## Table of Contents")

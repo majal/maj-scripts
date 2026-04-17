@@ -20,7 +20,8 @@ The root README is the main navigation page:
 - [Scripts](#scripts)
   - [`wh`](#wh)
   - [`whisper`](#whisper)
-- [Platform Setup](#platform-setup)
+- [Setup And Friendly Launchers](#setup-and-friendly-launchers)
+  - [Friendly Launchers](#friendly-launchers)
   - [Python](#python)
   - [Package Managers](#package-managers)
 - [Contributing Docs](#contributing-docs)
@@ -49,7 +50,7 @@ The root README is the main navigation page:
 Shared prerequisites:
 
 - [Python](#python)
-- platform setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
+- shared setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
 
 Primary external tool:
 
@@ -131,7 +132,7 @@ MLX support is for Apple Silicon on macOS. Other environments use `faster-whispe
 Shared prerequisites:
 
 - [Python](#python)
-- platform setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
+- shared setup from [macOS](#python-on-macos), [Linux](#python-on-linux), or [Windows](#python-on-windows)
 
 Useful system dependency:
 
@@ -368,9 +369,80 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
 
 [↑ TOC](#table-of-contents)
 
-## Platform Setup
+## Setup And Friendly Launchers
 
-Use this section for shared prerequisites. Script-specific notes can link back here instead of repeating the same setup steps everywhere.
+Use this section for shared prerequisites and friendlier ways to run scripts without living in a terminal. Script-specific notes can link back here instead of repeating the same setup steps everywhere.
+
+### Friendly Launchers
+
+These scripts stay command-line-first because that keeps them portable, scriptable, and easy to debug. Friendly launchers are thin wrappers around the same commands for people who prefer double-clicking, drag-and-drop, file pickers, or context menus.
+
+Good launchers should:
+
+- show command output or keep a log file so errors are not hidden
+- pass selected files and folders through to the script without changing them
+- keep the underlying command easy to inspect and edit
+- rely on the shared [Python](#python) and tool setup below
+
+#### macOS Launchers
+
+For a simple double-click launcher, create a `.command` file that runs a script from this repo. For drag-and-drop, create an Automator Application or Shortcuts workflow that accepts files or folders from Finder and passes them to the script.
+
+Helpful macOS patterns:
+
+- Finder Quick Actions work well for right-click workflows.
+- Automator Applications work well for drag-and-drop workflows.
+- A `.command` file should be executable with `chmod +x`.
+- Keep Terminal visible while testing so setup prompts and errors are easy to see.
+
+Example wrapper shape:
+
+```zsh
+#!/bin/zsh
+cd /path/to/maj-scripts-vibe || exit 1
+./whisper "$@"
+```
+
+#### Windows Launchers
+
+For Windows, use a PowerShell script, a `.cmd` file, or a shortcut in the `Send to` folder. The `py` launcher is the safest default because it forwards arguments to Python scripts predictably.
+
+Helpful Windows patterns:
+
+- A `Send to` shortcut works well for right-click file workflows.
+- A PowerShell wrapper can keep the window open after errors.
+- Start with one selected file while testing, then try multiple files.
+- If Windows blocks a downloaded script, unblock it from file Properties or use a local wrapper you created yourself.
+
+Example wrapper shape:
+
+```powershell
+py C:\path\to\maj-scripts-vibe\whisper @args
+```
+
+#### Linux Launchers
+
+For Linux desktops, use a `.desktop` launcher, a file-manager custom action, or a small shell wrapper. Nautilus, Nemo, Dolphin, and Thunar each expose custom actions a little differently, but the core idea is the same: pass selected files to the script and keep output visible.
+
+Helpful Linux patterns:
+
+- Use `Terminal=true` in `.desktop` launchers while testing.
+- File-manager custom actions are often the best right-click workflow.
+- A shell wrapper can normalize paths and write logs before calling the repo script.
+- Desktop environments differ, so keep launcher docs practical rather than tied to one file manager.
+
+Example `.desktop` command shape:
+
+```ini
+Exec=/path/to/maj-scripts-vibe/whisper %F
+Terminal=true
+```
+
+#### Launcher Safety Notes
+
+Treat launchers as convenience wrappers, not separate apps with different behavior. When a launcher is new, test it with a tiny file or a dry-run option such as `whisper --plan`. For `whisper`, `whisper --make-sample-media=/tmp/whisper-sample.mp4` can create a small media file and sidecar subtitle for a low-stakes embed test.
+
+[↑ TOC](#table-of-contents)
 
 ### [Python](https://www.python.org/downloads/)
 
@@ -543,7 +615,7 @@ python --version
 
 When future scripts are added, keep this README as the main navigation page and update it alongside the script so new tools stay easy to discover.
 
-Keep `Platform Setup` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
+Keep `Setup And Friendly Launchers` generic and reusable. Script-specific requirements, caveats, and quality-of-life notes should live in the relevant script section instead.
 
 For quick repo checks, run the lightweight test harness before or after changes:
 
