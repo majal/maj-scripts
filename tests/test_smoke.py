@@ -4,6 +4,7 @@ import json
 import py_compile
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from tests.support import REPO_ROOT
@@ -20,8 +21,35 @@ class SmokeTest(unittest.TestCase):
         )
 
     def test_scripts_compile(self) -> None:
-        py_compile.compile(str(REPO_ROOT / "wh"), doraise=True)
-        py_compile.compile(str(REPO_ROOT / "whisper"), doraise=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            py_compile.compile(str(REPO_ROOT / "gmail-cleanup"), cfile=f"{tmpdir}/gmail_cleanup.pyc", doraise=True)
+            py_compile.compile(str(REPO_ROOT / "wh"), cfile=f"{tmpdir}/wh.pyc", doraise=True)
+            py_compile.compile(str(REPO_ROOT / "whisper"), cfile=f"{tmpdir}/whisper.pyc", doraise=True)
+
+    def test_gmail_cleanup_help(self) -> None:
+        top_level = self.run_script("gmail-cleanup", "--help")
+        self.assertEqual(top_level.returncode, 0, top_level.stderr)
+        self.assertIn("extract-media", top_level.stdout)
+        self.assertIn("report", top_level.stdout)
+        self.assertIn("doctor", top_level.stdout)
+
+        result = self.run_script("gmail-cleanup", "extract-media", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--backup-dir", result.stdout)
+        self.assertIn("--apply", result.stdout)
+        self.assertIn("--preset", result.stdout)
+
+        report = self.run_script("gmail-cleanup", "report", "--help")
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertIn("--query", report.stdout)
+
+    def test_gmail_cleanup_doctor_json(self) -> None:
+        result = self.run_script("gmail-cleanup", "doctor", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["mode"], "doctor")
+        self.assertIn("checks", payload)
+        self.assertIn("overall_status", payload)
 
     def test_wh_help(self) -> None:
         result = self.run_script("wh", "help")

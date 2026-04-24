@@ -13,6 +13,14 @@ The documentation model is:
 - `README.md` is the user-facing index and navigation hub
 - `AGENTS.md` defines how scripts and docs should be added in the future
 
+## Public Repo And Secrets
+
+This repository is public. Treat anything committed here as readable by others.
+
+Do not store secrets, OAuth client JSON files, token caches, API keys, private backup paths, or other sensitive local state in this repo.
+
+Prefer OS-local config, environment variables, or user home paths outside the repo for secrets and machine-specific state. When documenting setup, show placeholder paths or explicitly off-repo locations.
+
 ## Agent Permission Rules
 
 Normal file edits inside this repository checkout are pre-approved. Do not ask for user permission before creating or modifying files in this repo as part of the requested work.
