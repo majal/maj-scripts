@@ -809,6 +809,74 @@ class GmailCleanupTest(unittest.TestCase):
             self.assertEqual(client.list_calls, 2)
             self.assertEqual(client.raw_many_calls, 2)
 
+    def test_cleanup_category_selectors_can_target_common_attachment_families(self) -> None:
+        message = EmailMessage()
+        message["Subject"] = "Mixed files"
+        message["From"] = "sender@example.com"
+        message["To"] = "maj@example.com"
+        message.set_content("Please see attached.")
+        message.add_attachment(
+            b"DOCX",
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="letter.docx",
+        )
+        message.add_attachment(b"ZIP", maintype="application", subtype="zip", filename="bundle.zip")
+        message.add_attachment(b"MP3", maintype="audio", subtype="mpeg", filename="song.mp3")
+        message.add_attachment(b"JS", maintype="application", subtype="x-javascript", filename="script.js")
+        record = self.gmail_cleanup.GmailMessageRecord(
+            message_id="mixed-1",
+            thread_id="thread-mixed",
+            label_ids=("INBOX",),
+            raw_bytes=message.as_bytes(),
+        )
+
+        settings = self.gmail_cleanup.replace(
+            self.default_settings(),
+            attachment_types=("office", "archive", "audio", "code"),
+        )
+        plan = self.gmail_cleanup.plan_message(record, settings)
+
+        self.assertEqual(
+            [part.filename for part in plan.media_parts],
+            ["letter.docx", "bundle.zip", "song.mp3", "script.js"],
+        )
+
+    def test_large_media_preset_filters_by_selected_message_bytes(self) -> None:
+        parser = self.gmail_cleanup.build_parser()
+        args = parser.parse_args(["report", "--preset", "large-media"])
+        self.gmail_cleanup.apply_preset_defaults(args)
+        settings = self.gmail_cleanup.build_extraction_settings(args, {}, Path("/tmp/missing.toml"))
+
+        self.assertEqual(settings.attachment_types, ("image", "video"))
+        self.assertEqual(settings.min_message_bytes, 1000000)
+        self.assertEqual(args.query, "has:attachment -in:trash -in:spam")
+
+    def test_index_analyze_summarizes_cached_attachment_categories(self) -> None:
+        client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1"), self.build_record("msg-2")])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_db = Path(tmpdir) / "gmail-index.sqlite"
+            self.gmail_cleanup.run_index_build(
+                client,
+                "has:attachment -in:trash -in:spam",
+                25,
+                index_db,
+                request_profile="conservative",
+            )
+            summary = self.gmail_cleanup.run_index_analyze(
+                index_db,
+                query="has:attachment -in:trash -in:spam",
+                top=5,
+            )
+
+            categories = {item["name"]: item for item in summary["categories"]}
+            self.assertEqual(summary["messages_analyzed"], 2)
+            self.assertEqual(categories["image"]["parts"], 2)
+            self.assertEqual(categories["pdf"]["parts"], 2)
+            self.assertEqual(categories["video"]["parts"], 2)
+            self.assertGreaterEqual(summary["duplicates"]["groups"], 3)
+
     def test_default_request_profile_uses_quota_aware_moderate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"

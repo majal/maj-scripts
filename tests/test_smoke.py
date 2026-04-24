@@ -39,6 +39,7 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("--backup-dir", result.stdout)
         self.assertIn("--apply", result.stdout)
         self.assertIn("--preset", result.stdout)
+        self.assertIn("--min-message-bytes", result.stdout)
 
         report = self.run_script("gmail-cleanup", "report", "--help")
         self.assertEqual(report.returncode, 0, report.stderr)
@@ -48,6 +49,10 @@ class SmokeTest(unittest.TestCase):
         index = self.run_script("gmail-cleanup", "index", "build", "--help")
         self.assertEqual(index.returncode, 0, index.stderr)
         self.assertIn("--index-db", index.stdout)
+
+        analyze = self.run_script("gmail-cleanup", "index", "analyze", "--help")
+        self.assertEqual(analyze.returncode, 0, analyze.stderr)
+        self.assertIn("--top", analyze.stdout)
 
     def test_gmail_cleanup_doctor_json(self) -> None:
         result = self.run_script("gmail-cleanup", "doctor", "--json")

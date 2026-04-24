@@ -39,7 +39,7 @@ If you're just here to use a script, start here. This README is the friendly map
 - searches Gmail with a normal Gmail query
 - inspects matching messages for image and video attachments by default
 - can optionally process PDF attachments too
-- can use named presets for repeatable cleanup jobs, such as `pdf-archive`
+- can use named presets for repeatable cleanup jobs, such as `large-media`, `office-docs`, `archives`, `audio-archive`, `old-media`, and `pdf-archive`
 - backs up selected attachments to a local folder you choose
 - saves each removed file with deterministic recovery markers in filenames and metadata
 - inserts a modified copy of the email back into Gmail with a visible backup note
@@ -192,6 +192,9 @@ types = ["image", "video"]
 # request_profile = "moderate"
 # quota_units_per_second = 125
 # progress_format = "text"
+# before_year = 2018
+# min_message_bytes = 1000000
+# min_part_bytes = 0
 # audit_labels = false
 # label_processed = "gmail-cleanup/processed"
 # label_review = "gmail-cleanup/review"
@@ -290,16 +293,43 @@ Check index size and cached queries:
 gmail-cleanup index stats
 ```
 
+Analyze the cached index locally to see cleanup opportunities by selector, extension, MIME type, duplicate payloads, sender domain, and year:
+
+```bash
+gmail-cleanup index analyze --query 'has:attachment -in:trash -in:spam'
+```
+
 Use the index for a later report so cached messages are read locally instead of downloaded again:
 
 ```bash
 gmail-cleanup report --preset pdf-archive --use-index
 ```
 
+Report the next high-value cleanup pass from the cache. `large-media` means image/video messages whose selected media total at least 1,000,000 bytes:
+
+```bash
+gmail-cleanup report --preset large-media --use-index
+```
+
+Other cached cleanup presets target common non-media attachment families:
+
+```bash
+gmail-cleanup report --preset office-docs --use-index
+gmail-cleanup report --preset archives --use-index
+gmail-cleanup report --preset audio-archive --use-index
+gmail-cleanup report --preset old-media --use-index
+```
+
 Use the index during apply. Gmail writes still go to Gmail, but cached message reads come from the local index when present:
 
 ```bash
 gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
+```
+
+Apply one of the non-PDF presets after reviewing its report. Non-image, non-video, and non-PDF metadata stamping is best-effort, so the Gmail note, saved filename, and manifest are the durable markers for office/archive/audio files:
+
+```bash
+gmail-cleanup extract-media --preset large-media --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
 ```
 
 Run a local setup check:
@@ -324,6 +354,12 @@ Ask an agent to build the reusable local index with structured progress:
 
 ```bash
 gmail-cleanup index build --preset pdf-archive --progress-format jsonl --json -v
+```
+
+Ask an agent to summarize cached cleanup opportunities without calling Gmail:
+
+```bash
+gmail-cleanup index analyze --query 'has:attachment -in:trash -in:spam' --json
 ```
 
 Ask an agent for machine-readable local setup diagnostics:
@@ -410,11 +446,14 @@ Agent-friendly review artifacts are written as JSONL too:
 
 - The default mode is a dry run. Nothing in Gmail or on disk changes unless you pass `--apply`.
 - `--preset pdf-archive` expands to `filename:pdf -in:trash -in:spam`, `--types pdf`, `--pdf-mode auto`, `--pdf-original trash`, `--pdf-password-mode low-hanging`, `--pdf-password-failure-action trash-original`, `--pdf-text-mode auto`, `--empty-after-removal note-only`, conservative request pacing, and `--max-results 5000`. You can still override individual options on the same command.
-- The default attachment types are `image,video`. PDFs are opt-in with `--types image,video,pdf` or `--types pdf`.
+- Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters.
+- The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
+- `--before-year`, `--min-message-bytes`, and `--min-part-bytes` are local filters applied after messages are inspected or loaded from the index. They are useful when you want repeated cleanup passes without changing the Gmail query.
 - `gmail-cleanup report` uses the same query, preset, and extraction settings as `extract-media`, but only lists and classifies matched messages. It is useful after a run to separate real remaining work from Gmail search false positives.
 - `gmail-cleanup doctor` does not call Gmail. It checks local config paths, token scopes, Python imports, external tools, and trash support so humans and agents can see what is ready before a long run.
 - `--audit-labels` creates or reuses `gmail-cleanup/processed` and `gmail-cleanup/review`. `--label-processed` and `--label-review` let you set explicit labels without enabling both defaults.
 - `gmail-cleanup index build` creates a private SQLite index at `~/.local/state/maj-scripts/gmail-cleanup/gmail-index.sqlite` on Linux, with equivalent OS-local state paths on macOS and Windows. Override it with `--index-db`, `GMAIL_CLEANUP_INDEX_DB`, or `index_db` in local config.
+- `gmail-cleanup index analyze` does not call Gmail. It reads the local index and summarizes attachment selectors, extensions, MIME types, duplicate payload groups, sender domains, years, and suggested report commands.
 - The index stores personal email metadata and compressed raw MIME for cached messages. Keep it outside this public repo, protect it like the token cache, and delete it when you no longer need the faster repeated passes.
 - `--use-index` is read-through: if the requested query and messages are already cached, reports and inspection read locally; missing records are fetched from Gmail and added to the index. Gmail insert/trash/label writes are never simulated locally.
 - Current PDF modes are `auto`, `render-pages`, `extract-images`, and `backup`.
@@ -429,7 +468,7 @@ Agent-friendly review artifacts are written as JSONL too:
 - Passworded PDFs that could not be opened are recorded in `<backup-dir>/passworded-pdfs.jsonl`.
 - Saved filenames are prefixed with a deterministic token like `gcm-<message-id>-<index>__original.jpg`; Google Photos supports exact-text filename search when you use quotation marks.
 - Existing deterministic `gcm-*` backup files are reused on reruns, even if metadata stamping changed their bytes after the original extraction. This keeps interrupted runs from creating `__2` duplicates.
-- During `--apply`, the same marker is embedded into saved file metadata too. For images the script stamps XMP/IPTC/EXIF description fields; for QuickTime-family videos it stamps comment/description fields plus XMP. When `exiftool` cannot write a video container directly, `gmail-cleanup` falls back to `ffmpeg` container metadata. Backup-mode PDFs are stamped too.
+- During `--apply`, the same marker is embedded into saved file metadata too. For images the script stamps XMP/IPTC/EXIF description fields; for QuickTime-family videos it stamps comment/description fields plus XMP. When `exiftool` cannot write a video container directly, `gmail-cleanup` falls back to `ffmpeg` container metadata. Backup-mode PDFs are stamped too. Office, archive, audio, and other non-media formats use best-effort XMP metadata; if the container cannot be written, the deterministic filename, Gmail note, and manifest remain the recovery markers.
 - The modified Gmail copy keeps the thread ID and existing labels except `TRASH`, `SPAM`, and `DRAFT`.
 - The original message is moved to Gmail Trash after the modified copy is inserted. It is not permanently deleted by this workflow.
 - Gmail Trash and Spam are not included by default because the Gmail API list call is made without `includeSpamTrash=true`.

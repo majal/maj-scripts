@@ -26,12 +26,13 @@ import threading
 import tempfile
 import time
 import zlib
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -67,6 +68,9 @@ DEFAULT_PROGRESS_FORMAT_ENV = "GMAIL_CLEANUP_PROGRESS_FORMAT"
 DEFAULT_LABEL_PROCESSED_ENV = "GMAIL_CLEANUP_LABEL_PROCESSED"
 DEFAULT_LABEL_REVIEW_ENV = "GMAIL_CLEANUP_LABEL_REVIEW"
 DEFAULT_INDEX_DB_ENV = "GMAIL_CLEANUP_INDEX_DB"
+DEFAULT_BEFORE_YEAR_ENV = "GMAIL_CLEANUP_BEFORE_YEAR"
+DEFAULT_MIN_MESSAGE_BYTES_ENV = "GMAIL_CLEANUP_MIN_MESSAGE_BYTES"
+DEFAULT_MIN_PART_BYTES_ENV = "GMAIL_CLEANUP_MIN_PART_BYTES"
 DEFAULT_TOKEN_ENV = "GMAIL_CLEANUP_TOKEN_CACHE"
 DEFAULT_TYPES_ENV = "GMAIL_CLEANUP_TYPES"
 SKIPPED_LABEL_IDS = {"TRASH", "SPAM", "DRAFT"}
@@ -101,7 +105,20 @@ GENERIC_ATTACHMENT_MIME_TYPES = {
     "binary/octet-stream",
     "application/unknown",
 }
-VALID_ATTACHMENT_TYPES = ("image", "video", "pdf")
+VALID_ATTACHMENT_TYPES = (
+    "image",
+    "video",
+    "pdf",
+    "media",
+    "large-media",
+    "office",
+    "archive",
+    "audio",
+    "legacy",
+    "code",
+    "calendar",
+    "other",
+)
 VALID_PDF_MODES = ("auto", "render-pages", "extract-images", "backup")
 VALID_PDF_ORIGINAL_RETENTION = ("keep", "trash", "discard")
 VALID_PDF_PASSWORD_MODES = ("skip", "infer", "low-hanging")
@@ -111,7 +128,64 @@ VALID_PDF_TEXT_MODES = ("none", "native", "ocr", "auto")
 VALID_EMPTY_AFTER_REMOVAL_MODES = ("skip", "note-only")
 VALID_REQUEST_PROFILES = ("conservative", "moderate", "aggressive")
 VALID_PROGRESS_FORMATS = ("text", "jsonl")
-VALID_PRESETS = ("pdf-archive",)
+VALID_PRESETS = ("pdf-archive", "large-media", "office-docs", "archives", "audio-archive", "old-media")
+LARGE_MEDIA_MIN_PART_BYTES = 1024 * 1024
+OFFICE_ATTACHMENT_EXTENSIONS = {
+    ".doc",
+    ".docm",
+    ".docx",
+    ".dot",
+    ".dotm",
+    ".dotx",
+    ".odp",
+    ".ods",
+    ".odt",
+    ".pages",
+    ".pps",
+    ".ppsm",
+    ".ppsx",
+    ".ppt",
+    ".pptm",
+    ".pptx",
+    ".pub",
+    ".rtf",
+    ".xls",
+    ".xlsb",
+    ".xlsm",
+    ".xlsx",
+}
+ARCHIVE_ATTACHMENT_EXTENSIONS = {
+    ".7z",
+    ".bz2",
+    ".gz",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".xz",
+    ".zip",
+}
+AUDIO_ATTACHMENT_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".wav", ".wma"}
+LEGACY_ATTACHMENT_EXTENSIONS = {
+    ".bak",
+    ".db",
+    ".mdb",
+    ".novabackup",
+    ".sql",
+}
+CODE_ATTACHMENT_EXTENSIONS = {
+    ".apk",
+    ".bat",
+    ".cmd",
+    ".exe",
+    ".jar",
+    ".js",
+    ".maj",
+    ".msi",
+    ".ps1",
+    ".scr",
+    ".vbs",
+}
+CALENDAR_ATTACHMENT_EXTENSIONS = {".ics"}
 DEFAULT_PROCESSED_LABEL = "gmail-cleanup/processed"
 DEFAULT_REVIEW_LABEL = "gmail-cleanup/review"
 DEFAULT_PDF_RENDER_DPI = 300
@@ -172,6 +246,46 @@ PDF_ARCHIVE_PRESET_DEFAULTS = {
     "empty_after_removal": "note-only",
     "request_profile": "conservative",
     "quota_units_per_second": 80.0,
+}
+ATTACHMENT_CLEANUP_PRESET_DEFAULTS = {
+    "pdf-archive": PDF_ARCHIVE_PRESET_DEFAULTS,
+    "large-media": {
+        "query": "has:attachment -in:trash -in:spam",
+        "max_results": 50000,
+        "types": "image,video",
+        "min_message_bytes": 1000000,
+        "request_profile": "conservative",
+        "quota_units_per_second": 80.0,
+    },
+    "office-docs": {
+        "query": "has:attachment -in:trash -in:spam",
+        "max_results": 50000,
+        "types": "office",
+        "request_profile": "conservative",
+        "quota_units_per_second": 80.0,
+    },
+    "archives": {
+        "query": "has:attachment -in:trash -in:spam",
+        "max_results": 50000,
+        "types": "archive",
+        "request_profile": "conservative",
+        "quota_units_per_second": 80.0,
+    },
+    "audio-archive": {
+        "query": "has:attachment -in:trash -in:spam",
+        "max_results": 50000,
+        "types": "audio",
+        "request_profile": "conservative",
+        "quota_units_per_second": 80.0,
+    },
+    "old-media": {
+        "query": "has:attachment -in:trash -in:spam",
+        "max_results": 50000,
+        "types": "image,video",
+        "before_year": 2018,
+        "request_profile": "conservative",
+        "quota_units_per_second": 80.0,
+    },
 }
 
 
@@ -314,6 +428,9 @@ class ExtractionSettings:
     pdf_render_format: str
     pdf_text_mode: str
     empty_after_removal: str
+    before_year: int | None = None
+    min_message_bytes: int = 0
+    min_part_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -432,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=VALID_PRESETS,
         default=None,
-        help="Apply a named option set. pdf-archive targets non-Trash/non-Spam PDFs with archival settings.",
+        help="Apply a named cleanup option set such as large-media, office-docs, archives, audio-archive, old-media, or pdf-archive.",
     )
     extract.add_argument("--query", default=None, help="Gmail search query used to find candidate messages.")
     extract.add_argument(
@@ -506,10 +623,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--types",
         default=None,
         help=(
-            "Comma-separated attachment types to extract. "
+            "Comma-separated attachment selectors to extract. "
             f"Supported values: {', '.join(VALID_ATTACHMENT_TYPES)}. "
             "Default: image,video."
         ),
+    )
+    extract.add_argument(
+        "--before-year",
+        type=int,
+        default=None,
+        help="Only select attachments from messages whose Date header is before this year.",
+    )
+    extract.add_argument(
+        "--min-message-bytes",
+        type=int,
+        default=None,
+        help="Only select messages whose selected attachments total at least this many bytes.",
+    )
+    extract.add_argument(
+        "--min-part-bytes",
+        type=int,
+        default=None,
+        help="Only select attachment parts at least this many bytes.",
     )
     extract.add_argument(
         "--pdf-mode",
@@ -675,7 +810,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=VALID_PRESETS,
         default=None,
-        help="Apply a named option set before reporting. pdf-archive reports the PDF archive query/settings.",
+        help="Apply a named cleanup option set before reporting.",
     )
     report.add_argument("--query", default=None, help="Gmail search query to classify.")
     report.add_argument("--max-results", type=int, default=None, help="Maximum Gmail search matches to inspect.")
@@ -685,7 +820,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--gmail-user", default=None, help="Gmail user ID to call the API with. Defaults to me.")
     report.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
     report.add_argument("--use-index", action="store_true", help="Use the local Gmail index before downloading messages from Gmail.")
-    report.add_argument("--types", default=None, help="Comma-separated attachment types to classify.")
+    report.add_argument("--types", default=None, help="Comma-separated attachment selectors to classify.")
+    report.add_argument("--before-year", type=int, default=None, help="Only classify attachments from messages before this year.")
+    report.add_argument("--min-message-bytes", type=int, default=None, help="Only count messages whose selected attachments total at least this many bytes.")
+    report.add_argument("--min-part-bytes", type=int, default=None, help="Only count selected attachment parts at least this many bytes.")
     report.add_argument("--request-profile", choices=VALID_REQUEST_PROFILES, default=None, help="Inspection request profile.")
     report.add_argument("--quota-units-per-second", type=float, default=None, help="Target Gmail quota pacing.")
     report.add_argument("--json", action="store_true", help="Print the report as JSON.")
@@ -698,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=VALID_PRESETS,
         default=None,
-        help="Apply a named option set before indexing. pdf-archive indexes the PDF archive query.",
+        help="Apply a named cleanup option set before indexing.",
     )
     index_build.add_argument("--query", default=None, help="Gmail search query to index.")
     index_build.add_argument("--max-results", type=int, default=None, help="Maximum Gmail search matches to index.")
@@ -723,6 +861,20 @@ def build_parser() -> argparse.ArgumentParser:
     index_stats.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
     index_stats.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
     index_stats.add_argument("--json", action="store_true", help="Print index stats as JSON.")
+
+    index_analyze = index_subparsers.add_parser("analyze", help="Summarize cached attachment categories from the local Gmail index.")
+    index_analyze.add_argument(
+        "--preset",
+        choices=VALID_PRESETS,
+        default=None,
+        help="Apply a named cleanup option set before analyzing its cached query.",
+    )
+    index_analyze.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
+    index_analyze.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
+    index_analyze.add_argument("--query", default=None, help="Only analyze cached messages for this exact indexed Gmail query.")
+    index_analyze.add_argument("--max-results", type=int, default=None, help="Maximum cached messages to analyze.")
+    index_analyze.add_argument("--top", type=int, default=20, help="Number of top rows to include in ranked sections.")
+    index_analyze.add_argument("--json", action="store_true", help="Print the analysis as JSON.")
 
     doctor = subparsers.add_parser("doctor", help="Check local gmail-cleanup configuration, tokens, and dependencies.")
     doctor.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
@@ -750,6 +902,9 @@ def log_progress(verbose: int, level: int, message: str) -> None:
 def default_extraction_settings() -> ExtractionSettings:
     return ExtractionSettings(
         attachment_types=("image", "video"),
+        before_year=None,
+        min_message_bytes=0,
+        min_part_bytes=0,
         pdf_mode="auto",
         pdf_original="keep",
         pdf_password_mode="skip",
@@ -767,9 +922,10 @@ def apply_preset_defaults(args: argparse.Namespace) -> None:
     preset = getattr(args, "preset", None)
     if preset is None:
         return
-    if preset != "pdf-archive":
+    defaults = ATTACHMENT_CLEANUP_PRESET_DEFAULTS.get(preset)
+    if defaults is None:
         raise ValueError(f"Unsupported preset: {preset}")
-    for name, value in PDF_ARCHIVE_PRESET_DEFAULTS.items():
+    for name, value in defaults.items():
         if hasattr(args, name) and getattr(args, name) is None:
             setattr(args, name, value)
 
@@ -783,6 +939,21 @@ def resolve_query(explicit: str | None) -> str:
 def build_extraction_settings(args: argparse.Namespace, config: dict[str, object], config_path: Path) -> ExtractionSettings:
     return ExtractionSettings(
         attachment_types=resolve_attachment_types(getattr(args, "types", None), config, config_path),
+        before_year=resolve_before_year(getattr(args, "before_year", None), config, config_path),
+        min_message_bytes=resolve_nonnegative_int_setting(
+            "min_message_bytes",
+            getattr(args, "min_message_bytes", None),
+            DEFAULT_MIN_MESSAGE_BYTES_ENV,
+            config,
+            config_path,
+        ),
+        min_part_bytes=resolve_nonnegative_int_setting(
+            "min_part_bytes",
+            getattr(args, "min_part_bytes", None),
+            DEFAULT_MIN_PART_BYTES_ENV,
+            config,
+            config_path,
+        ),
         pdf_mode=resolve_pdf_mode(getattr(args, "pdf_mode", None), config, config_path),
         pdf_original=resolve_pdf_original(getattr(args, "pdf_original", None), config, config_path),
         pdf_password_mode=resolve_pdf_password_mode(getattr(args, "pdf_password_mode", None), config, config_path),
@@ -834,12 +1005,15 @@ def load_config(path: Path) -> dict[str, object]:
     allowed_keys = {
         "backup_dir",
         "audit_labels",
+        "before_year",
         "credentials",
         "gmail_user",
         "index_db",
         "label_processed",
         "label_review",
         "max_results",
+        "min_message_bytes",
+        "min_part_bytes",
         "pdf_mode",
         "pdf_original",
         "pdf_password_mode",
@@ -983,6 +1157,35 @@ def resolve_max_results(explicit: int | None, config: dict[str, object], config_
     return value if value is not None else 50
 
 
+def resolve_before_year(explicit: int | None, config: dict[str, object], config_path: Path) -> int | None:
+    value = explicit if explicit is not None else env_int(DEFAULT_BEFORE_YEAR_ENV)
+    if value is None:
+        value = config_int_value(config, "before_year", config_path)
+    if value is None:
+        return None
+    if value < 1:
+        raise ValueError("--before-year must be a positive year")
+    return value
+
+
+def resolve_nonnegative_int_setting(
+    key: str,
+    explicit: int | None,
+    env_name: str,
+    config: dict[str, object],
+    config_path: Path,
+) -> int:
+    value = explicit if explicit is not None else env_int(env_name)
+    if value is None:
+        value = config_int_value(config, key, config_path)
+    if value is None:
+        return 0
+    if value < 0:
+        cli_name = key.replace("_", "-")
+        raise ValueError(f"--{cli_name} must be zero or greater")
+    return value
+
+
 def is_password_protected_pdf_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     markers = (
@@ -1011,10 +1214,10 @@ def parse_attachment_types(value: str | None) -> tuple[str, ...]:
         return ("image", "video")
     parts = tuple(token.strip().lower() for token in value.split(",") if token.strip())
     if not parts:
-        raise ValueError("--types must include at least one attachment type")
+        raise ValueError("--types must include at least one attachment selector")
     invalid = sorted(set(parts) - set(VALID_ATTACHMENT_TYPES))
     if invalid:
-        raise ValueError(f"Unsupported attachment type(s): {', '.join(invalid)}")
+        raise ValueError(f"Unsupported attachment selector(s): {', '.join(invalid)}")
     ordered: list[str] = []
     for part in parts:
         if part not in ordered:
@@ -1872,6 +2075,10 @@ def plan_message(record: GmailMessageRecord, settings: ExtractionSettings | None
     message = parse_email_message(record.raw_bytes)
     skip_reason = detect_unsupported_message(message)
     media_parts = tuple(() if skip_reason else collect_media_parts(message, record.message_id, settings))
+    if media_parts and not message_matches_before_year(message, settings.before_year):
+        media_parts = ()
+    if media_parts and settings.min_message_bytes and sum(part.size_bytes for part in media_parts) < settings.min_message_bytes:
+        media_parts = ()
     return PlannedMessage(
         message_id=record.message_id,
         thread_id=record.thread_id,
@@ -1924,18 +2131,88 @@ def collect_media_parts(message: EmailMessage, message_id: str, settings: Extrac
     return parts
 
 
-def should_extract_part(part: EmailMessage, settings: ExtractionSettings) -> bool:
-    maintype = part.get_content_maintype().lower()
+def message_matches_before_year(message: EmailMessage, before_year: int | None) -> bool:
+    if before_year is None:
+        return True
+    try:
+        parsed = parsedate_to_datetime(header_value(message, "Date"))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return False
+    return parsed.year < before_year
+
+
+def attachment_extension(filename: str | None) -> str:
+    if not filename:
+        return ""
+    suffix = Path(filename).suffix.lower()
+    return suffix if len(suffix) <= 24 else ""
+
+
+def attachment_categories_for_part(part: EmailMessage) -> set[str]:
     content_type = infer_attachment_mime_type(part)
-    inferred_maintype = content_type.split("/", 1)[0]
-    if inferred_maintype in {"image", "video"} and inferred_maintype not in settings.attachment_types:
-        return False
-    if content_type == PDF_MIME_TYPE and "pdf" not in settings.attachment_types:
-        return False
-    if inferred_maintype not in {"image", "video"} and content_type != PDF_MIME_TYPE:
-        return False
+    maintype = content_type.split("/", 1)[0]
+    extension = attachment_extension(part.get_filename())
+    categories: set[str] = set()
+    if maintype == "image":
+        categories.update(("image", "media"))
+    if maintype == "video":
+        categories.update(("video", "media"))
+    if maintype == "audio" or extension in AUDIO_ATTACHMENT_EXTENSIONS:
+        categories.add("audio")
+    if content_type == PDF_MIME_TYPE or extension == ".pdf":
+        categories.add("pdf")
+    if extension in OFFICE_ATTACHMENT_EXTENSIONS or content_type in {
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.oasis.opendocument.presentation",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.text",
+        "application/rtf",
+    }:
+        categories.add("office")
+    if extension in ARCHIVE_ATTACHMENT_EXTENSIONS or content_type in {
+        "application/rar",
+        "application/x-7z-compressed",
+        "application/x-rar-compressed",
+        "application/x-tar",
+        "application/x-zip-compressed",
+        "application/zip",
+    }:
+        categories.add("archive")
+    if extension in LEGACY_ATTACHMENT_EXTENSIONS:
+        categories.add("legacy")
+    if extension in CODE_ATTACHMENT_EXTENSIONS or content_type in {
+        "application/javascript",
+        "application/java-archive",
+        "application/vnd.android.package-archive",
+        "application/x-executable",
+        "application/x-javascript",
+        "text/javascript",
+    }:
+        categories.add("code")
+    if extension in CALENDAR_ATTACHMENT_EXTENSIONS or content_type in {"application/ics", "text/calendar"}:
+        categories.add("calendar")
+    if not categories:
+        categories.add("other")
+    return categories
+
+
+def should_extract_part(part: EmailMessage, settings: ExtractionSettings) -> bool:
     disposition = (part.get_content_disposition() or "").lower()
-    return bool(part.get_filename() or part.get("Content-ID") or disposition in {"attachment", "inline"})
+    if not (part.get_filename() or part.get("Content-ID") or disposition in {"attachment", "inline"}):
+        return False
+    payload_size = len(part.get_payload(decode=True) or b"")
+    if payload_size < settings.min_part_bytes:
+        return False
+    categories = attachment_categories_for_part(part)
+    requested = set(settings.attachment_types)
+    if "large-media" in requested and "media" in categories and payload_size >= LARGE_MEDIA_MIN_PART_BYTES:
+        return True
+    return bool(categories & requested)
 
 
 def infer_attachment_mime_type(part: EmailMessage) -> str:
@@ -3914,6 +4191,8 @@ def metadata_tags_for_attachment(attachment: WrittenAttachment) -> tuple[str, ..
         return PDF_METADATA_TAGS
     if attachment.mime_type.startswith("video/"):
         return VIDEO_METADATA_TAGS
+    if not attachment.mime_type.startswith("image/"):
+        return ("XMP-dc:Description", "XMP-dc:Subject")
     return IMAGE_METADATA_TAGS
 
 
@@ -4131,6 +4410,13 @@ def embed_marker_metadata(
                 )
                 continue
             if not attachment.mime_type.startswith("video/"):
+                if not attachment.mime_type.startswith("image/") and attachment.mime_type != PDF_MIME_TYPE:
+                    log_progress(
+                        verbose,
+                        2,
+                        f"Exiftool could not write metadata for {attachment.filename}; continuing with filename and manifest markers",
+                    )
+                    continue
                 raise
             log_progress(
                 verbose,
@@ -4208,7 +4494,10 @@ def append_completed_manifest_record(backup_dir: Path, record: dict[str, object]
 def settings_checkpoint_payload(settings: ExtractionSettings) -> dict[str, object]:
     return {
         "attachment_types": list(settings.attachment_types),
+        "before_year": settings.before_year,
         "empty_after_removal": settings.empty_after_removal,
+        "min_message_bytes": settings.min_message_bytes,
+        "min_part_bytes": settings.min_part_bytes,
         "pdf_mode": settings.pdf_mode,
         "pdf_original": settings.pdf_original,
         "pdf_password_failure_action": settings.pdf_password_failure_action,
@@ -4600,7 +4889,7 @@ def render_summary(summary: dict[str, object]) -> str:
         f"Matched Gmail messages: {summary['matched_messages']}",
         f"Inspected messages: {summary['inspected_messages']}",
         f"Candidate messages: {summary['candidate_messages']}",
-        f"Candidate media parts: {summary['candidate_media_parts']}",
+        f"Candidate attachment parts: {summary['candidate_media_parts']}",
         f"Candidate bytes: {human_size(int(summary['candidate_bytes']))}",
     ]
     skipped = summary["skipped_messages"]
@@ -4884,6 +5173,44 @@ class GmailIndex:
             internal_date=int(row["internal_date"]) if row["internal_date"] is not None else None,
         )
 
+    def message_records(self, *, query: str | None = None, max_results: int | None = None) -> list[GmailMessageRecord]:
+        limit = max_results if max_results is not None else -1
+        if limit == 0:
+            return []
+        if query is None:
+            rows = self.connection.execute(
+                """
+                SELECT message_id, thread_id, history_id, internal_date, label_ids_json, raw_zlib
+                FROM messages
+                ORDER BY COALESCE(internal_date, 0) DESC, message_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT m.message_id, m.thread_id, m.history_id, m.internal_date, m.label_ids_json, m.raw_zlib
+                FROM query_matches AS q
+                JOIN messages AS m ON m.message_id = q.message_id
+                WHERE q.query = ?
+                ORDER BY q.position
+                LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+        return [
+            GmailMessageRecord(
+                message_id=str(row["message_id"]),
+                thread_id=str(row["thread_id"]),
+                label_ids=tuple(json.loads(str(row["label_ids_json"]))),
+                raw_bytes=zlib.decompress(row["raw_zlib"]),
+                history_id=str(row["history_id"]) if row["history_id"] is not None else None,
+                internal_date=int(row["internal_date"]) if row["internal_date"] is not None else None,
+            )
+            for row in rows
+        ]
+
     def stats(self) -> dict[str, object]:
         message_row = self.connection.execute(
             """
@@ -5076,6 +5403,273 @@ def render_index_stats(stats: dict[str, object]) -> str:
     ]
     for query in stats["queries"]:
         lines.append(f"- {query['message_count']} message(s): {query['query']}")
+    return "\n".join(lines)
+
+
+def message_sender_domain(message: EmailMessage) -> str:
+    address = parseaddr(header_value(message, "From"))[1].strip().lower()
+    if "@" not in address:
+        return "unknown"
+    return address.rsplit("@", 1)[1]
+
+
+def message_year(message: EmailMessage) -> int | None:
+    try:
+        return parsedate_to_datetime(header_value(message, "Date")).year
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+
+def is_analyzable_attachment_part(part: EmailMessage) -> bool:
+    if part.is_multipart():
+        return False
+    disposition = (part.get_content_disposition() or "").lower()
+    if part.get_filename() or disposition in {"attachment", "inline"}:
+        return True
+    if part.get("Content-ID") and part.get_content_maintype().lower() in {"image", "video"}:
+        return True
+    return False
+
+
+def counter_items(counter: Counter, *, top: int, include_bytes: Counter | None = None) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for key, count in counter.most_common(top):
+        row: dict[str, object] = {"key": key, "count": count}
+        if include_bytes is not None:
+            size = int(include_bytes[key])
+            row["bytes"] = size
+            row["human"] = human_size(size)
+        rows.append(row)
+    return rows
+
+
+def top_bytes_items(counter: Counter, *, top: int) -> list[dict[str, object]]:
+    return [
+        {
+            "key": key,
+            "bytes": int(size),
+            "human": human_size(int(size)),
+        }
+        for key, size in counter.most_common(top)
+    ]
+
+
+def indexed_cleanup_suggestions(query: str | None) -> list[dict[str, str]]:
+    base_query = query or "has:attachment -in:trash -in:spam"
+    base = f"gmail-cleanup report --query {json.dumps(base_query)} --max-results 50000 --use-index"
+    return [
+        {
+            "name": "large-media",
+            "command": f"{base} --types image,video --min-message-bytes 1000000",
+        },
+        {
+            "name": "office",
+            "command": f"{base} --types office",
+        },
+        {
+            "name": "archive",
+            "command": f"{base} --types archive",
+        },
+        {
+            "name": "audio",
+            "command": f"{base} --types audio",
+        },
+        {
+            "name": "older-than-2018-media",
+            "command": f"{base} --types image,video --before-year 2018",
+        },
+    ]
+
+
+def run_index_analyze(index_db: Path, *, query: str | None = None, max_results: int | None = None, top: int = 20) -> dict[str, object]:
+    if max_results is not None and max_results < 1:
+        raise ValueError("--max-results must be 1 or greater")
+    if top < 1:
+        raise ValueError("--top must be 1 or greater")
+    gmail_index = GmailIndex(index_db)
+    try:
+        records = gmail_index.message_records(query=query, max_results=max_results)
+    finally:
+        gmail_index.close()
+    if query is not None and not records:
+        raise ValueError(f"No cached messages found for query: {query}")
+
+    category_parts: Counter = Counter()
+    category_bytes: Counter = Counter()
+    category_messages: dict[str, set[str]] = defaultdict(set)
+    disposition_counts: Counter = Counter()
+    duplicate_payloads: dict[str, list[dict[str, object]]] = defaultdict(list)
+    extension_counts: Counter = Counter()
+    extension_bytes: Counter = Counter()
+    mime_counts: Counter = Counter()
+    mime_bytes: Counter = Counter()
+    sender_counts: Counter = Counter()
+    sender_bytes: Counter = Counter()
+    year_counts: Counter = Counter()
+    year_bytes: Counter = Counter()
+    largest_messages: list[dict[str, object]] = []
+    attachment_parts = 0
+    attachment_bytes = 0
+
+    for record in records:
+        message = parse_email_message(record.raw_bytes)
+        domain = message_sender_domain(message)
+        year = message_year(message)
+        if year is not None:
+            year_counts[str(year)] += 1
+        sender_counts[domain] += 1
+        message_attachment_bytes = 0
+        message_parts = 0
+        biggest_part: dict[str, object] | None = None
+        for part in message.walk():
+            if not is_analyzable_attachment_part(part):
+                continue
+            payload = part.get_payload(decode=True) or b""
+            size = len(payload)
+            filename = derive_attachment_filename(part, message_parts + 1)
+            mime_type = infer_attachment_mime_type(part)
+            extension = attachment_extension(filename) or "(none)"
+            categories = attachment_categories_for_part(part)
+            if "media" in categories and size >= LARGE_MEDIA_MIN_PART_BYTES:
+                categories.add("large-media")
+            attachment_parts += 1
+            attachment_bytes += size
+            message_parts += 1
+            message_attachment_bytes += size
+            disposition = (part.get_content_disposition() or "(none)").lower()
+            disposition_counts[disposition] += 1
+            extension_counts[extension] += 1
+            extension_bytes[extension] += size
+            mime_counts[mime_type] += 1
+            mime_bytes[mime_type] += size
+            for category in categories:
+                category_parts[category] += 1
+                category_bytes[category] += size
+                category_messages[category].add(record.message_id)
+            if payload:
+                duplicate_payloads[hashlib.sha256(payload).hexdigest()].append(
+                    {
+                        "message_id": record.message_id,
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size_bytes": size,
+                        "sender_domain": domain,
+                    }
+                )
+            if biggest_part is None or size > int(biggest_part["size_bytes"]):
+                biggest_part = {
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "size_bytes": size,
+                    "human": human_size(size),
+                }
+        sender_bytes[domain] += message_attachment_bytes
+        if year is not None:
+            year_bytes[str(year)] += message_attachment_bytes
+        if message_parts:
+            largest_messages.append(
+                {
+                    "attachment_bytes": message_attachment_bytes,
+                    "attachment_human": human_size(message_attachment_bytes),
+                    "biggest_part": biggest_part,
+                    "message_id": record.message_id,
+                    "sender_domain": domain,
+                    "subject": header_value(message, "Subject"),
+                }
+            )
+
+    duplicate_groups = [items for items in duplicate_payloads.values() if len(items) > 1]
+    duplicate_groups.sort(key=lambda items: (len(items) - 1) * int(items[0]["size_bytes"]), reverse=True)
+    duplicate_reclaimable = sum((len(items) - 1) * int(items[0]["size_bytes"]) for items in duplicate_groups)
+    categories = [
+        {
+            "bytes": int(category_bytes[name]),
+            "human": human_size(int(category_bytes[name])),
+            "messages": len(category_messages[name]),
+            "name": name,
+            "parts": int(category_parts[name]),
+        }
+        for name in sorted(category_parts, key=lambda item: (-category_bytes[item], item))
+    ]
+    return {
+        "attachment_bytes": attachment_bytes,
+        "attachment_human": human_size(attachment_bytes),
+        "attachment_parts": attachment_parts,
+        "categories": categories,
+        "dispositions": counter_items(disposition_counts, top=top),
+        "duplicates": {
+            "groups": len(duplicate_groups),
+            "instances": sum(len(items) for items in duplicate_groups),
+            "reclaimable_bytes": duplicate_reclaimable,
+            "reclaimable_human": human_size(duplicate_reclaimable),
+            "top_groups": [
+                {
+                    "each_bytes": int(items[0]["size_bytes"]),
+                    "each_human": human_size(int(items[0]["size_bytes"])),
+                    "filename": items[0]["filename"],
+                    "instances": len(items),
+                    "mime_type": items[0]["mime_type"],
+                    "reclaimable_bytes": (len(items) - 1) * int(items[0]["size_bytes"]),
+                    "reclaimable_human": human_size((len(items) - 1) * int(items[0]["size_bytes"])),
+                    "sample_sender_domains": sorted({str(item["sender_domain"]) for item in items})[:5],
+                }
+                for items in duplicate_groups[:top]
+            ],
+        },
+        "extensions_by_bytes": top_bytes_items(extension_bytes, top=top),
+        "extensions_by_count": counter_items(extension_counts, top=top, include_bytes=extension_bytes),
+        "index_db": str(index_db),
+        "largest_messages": sorted(largest_messages, key=lambda item: int(item["attachment_bytes"]), reverse=True)[:top],
+        "messages_analyzed": len(records),
+        "mimes_by_bytes": top_bytes_items(mime_bytes, top=top),
+        "mimes_by_count": counter_items(mime_counts, top=top, include_bytes=mime_bytes),
+        "mode": "index-analyze",
+        "query": query,
+        "sender_domains_by_bytes": top_bytes_items(sender_bytes, top=top),
+        "sender_domains_by_count": counter_items(sender_counts, top=top, include_bytes=sender_bytes),
+        "suggested_reports": indexed_cleanup_suggestions(query),
+        "years": [
+            {
+                "bytes": int(year_bytes[year]),
+                "count": int(year_counts[year]),
+                "human": human_size(int(year_bytes[year])),
+                "year": year,
+            }
+            for year in sorted(year_counts)
+        ],
+    }
+
+
+def render_index_analyze(summary: dict[str, object]) -> str:
+    lines = [
+        f"Mode: {summary['mode']}",
+        f"Index DB: {summary['index_db']}",
+        f"Query: {summary['query'] or '(all indexed messages)'}",
+        f"Messages analyzed: {summary['messages_analyzed']}",
+        f"Attachment parts: {summary['attachment_parts']}",
+        f"Attachment bytes: {summary['attachment_human']}",
+        "Selectors by bytes:",
+    ]
+    for category in summary["categories"]:
+        lines.append(
+            f"- {category['name']}: {category['messages']} message(s), "
+            f"{category['parts']} part(s), {category['human']}"
+        )
+    duplicates = summary["duplicates"]
+    lines.extend(
+        [
+            "Duplicates:",
+            f"- groups: {duplicates['groups']}",
+            f"- instances: {duplicates['instances']}",
+            f"- reclaimable estimate: {duplicates['reclaimable_human']}",
+            "Top extensions by bytes:",
+        ]
+    )
+    for item in summary["extensions_by_bytes"]:
+        lines.append(f"- {item['key']}: {item['human']}")
+    lines.append("Suggested report commands:")
+    for suggestion in summary["suggested_reports"]:
+        lines.append(f"- {suggestion['name']}: {suggestion['command']}")
     return "\n".join(lines)
 
 
@@ -5378,7 +5972,7 @@ def inspect_matching_messages(
                     state.planned.append(plan)
                     reporter.log_event(
                         2,
-                        f"Selected {format_message_label(plan)} with {len(plan.media_parts)} media part(s)",
+                        f"Selected {format_message_label(plan)} with {len(plan.media_parts)} attachment part(s)",
                         "message_selected",
                         message_id=plan.message_id,
                         media_parts=len(plan.media_parts),
@@ -5393,7 +5987,7 @@ def inspect_matching_messages(
         selected_bytes = sum(part.size_bytes for plan in state.planned for part in plan.media_parts)
         reporter.log_event(
             1,
-            f"Planned {len(state.planned)} candidate message(s), {selected_parts} media part(s), {human_size(selected_bytes)} total",
+            f"Planned {len(state.planned)} candidate message(s), {selected_parts} attachment part(s), {human_size(selected_bytes)} total",
             "inspection_completed",
             candidate_messages=len(state.planned),
             candidate_media_parts=selected_parts,
@@ -5507,7 +6101,7 @@ def run_extract_media(
             total_hint = max(index, len(inspection_state.planned))
             reporter.log_event(
                 1,
-                f"Applying {index}/{total_hint} {plan.message_id} with {len(plan.media_parts)} media part(s)",
+                f"Applying {index}/{total_hint} {plan.message_id} with {len(plan.media_parts)} attachment part(s)",
                 "apply_started",
                 index=index,
                 total=total_hint,
@@ -5585,7 +6179,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 1
     if args.command == "index" and args.index_command is None:
-        return die("Missing index subcommand. Use `gmail-cleanup index build` or `gmail-cleanup index stats`.")
+        return die("Missing index subcommand. Use `gmail-cleanup index build`, `gmail-cleanup index stats`, or `gmail-cleanup index analyze`.")
     if args.command == "doctor":
         try:
             report = run_doctor(args)
@@ -5608,6 +6202,14 @@ def main(argv: list[str] | None = None) -> int:
                 summary["mode"] = "index-stats"
             finally:
                 gmail_index.close()
+        elif args.command == "index" and args.index_command == "analyze":
+            index_db = resolve_index_db_path(args.index_db, config, config_path)
+            summary = run_index_analyze(
+                index_db,
+                query=args.query.strip() if args.query else None,
+                max_results=args.max_results,
+                top=args.top,
+            )
         elif args.command == "index" and args.index_command == "build":
             query = resolve_query(args.query)
             credentials_path = resolve_credentials_path(args.credentials, config, config_path)
@@ -5724,6 +6326,8 @@ def main(argv: list[str] | None = None) -> int:
         print(render_index_build(summary))
     elif args.command == "index" and args.index_command == "stats":
         print(render_index_stats(summary))
+    elif args.command == "index" and args.index_command == "analyze":
+        print(render_index_analyze(summary))
     elif args.command == "report":
         print(render_report(summary))
     else:
