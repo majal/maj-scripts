@@ -19,11 +19,13 @@ import re
 import shutil
 import socket
 import ssl
+import sqlite3
 import subprocess
 import sys
 import threading
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from email import policy
@@ -64,6 +66,7 @@ DEFAULT_QUOTA_UNITS_PER_SECOND_ENV = "GMAIL_CLEANUP_QUOTA_UNITS_PER_SECOND"
 DEFAULT_PROGRESS_FORMAT_ENV = "GMAIL_CLEANUP_PROGRESS_FORMAT"
 DEFAULT_LABEL_PROCESSED_ENV = "GMAIL_CLEANUP_LABEL_PROCESSED"
 DEFAULT_LABEL_REVIEW_ENV = "GMAIL_CLEANUP_LABEL_REVIEW"
+DEFAULT_INDEX_DB_ENV = "GMAIL_CLEANUP_INDEX_DB"
 DEFAULT_TOKEN_ENV = "GMAIL_CLEANUP_TOKEN_CACHE"
 DEFAULT_TYPES_ENV = "GMAIL_CLEANUP_TYPES"
 SKIPPED_LABEL_IDS = {"TRASH", "SPAM", "DRAFT"}
@@ -212,6 +215,7 @@ DEFAULT_CONFIG_PATH = default_config_path()
 LEGACY_CONFIG_PATH = legacy_config_path()
 DEFAULT_TOKEN_PATH = default_state_dir() / "token.json"
 LEGACY_TOKEN_PATH = legacy_state_dir() / "token.json"
+DEFAULT_INDEX_DB_PATH = default_state_dir() / "gmail-index.sqlite"
 PASSWORD_RECIPE_STORE_PATH = default_state_dir() / "pdf-password-recipes.json"
 PASSWORD_SECRET_STORE_PATH = default_state_dir() / "pdf-password-secrets.json"
 PASSWORD_FAILURE_STORE_PATH = default_state_dir() / "pdf-password-failures.json"
@@ -223,6 +227,8 @@ class GmailMessageRecord:
     thread_id: str
     label_ids: tuple[str, ...]
     raw_bytes: bytes
+    history_id: str | None = None
+    internal_date: int | None = None
 
 
 @dataclass(frozen=True)
@@ -476,6 +482,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     extract.add_argument(
+        "--index-db",
+        type=Path,
+        help=(
+            "Path to the local SQLite Gmail index. "
+            f"Defaults to ${DEFAULT_INDEX_DB_ENV}, the config file, or {DEFAULT_INDEX_DB_PATH}."
+        ),
+    )
+    extract.add_argument(
+        "--use-index",
+        action="store_true",
+        help="Use the local Gmail index as a read-through cache for message IDs and raw MIME bytes.",
+    )
+    extract.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -664,10 +683,46 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--credentials", type=Path, help="Path to the Google desktop OAuth client secret JSON.")
     report.add_argument("--token-cache", type=Path, help="Path to the cached OAuth token JSON.")
     report.add_argument("--gmail-user", default=None, help="Gmail user ID to call the API with. Defaults to me.")
+    report.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
+    report.add_argument("--use-index", action="store_true", help="Use the local Gmail index before downloading messages from Gmail.")
     report.add_argument("--types", default=None, help="Comma-separated attachment types to classify.")
     report.add_argument("--request-profile", choices=VALID_REQUEST_PROFILES, default=None, help="Inspection request profile.")
     report.add_argument("--quota-units-per-second", type=float, default=None, help="Target Gmail quota pacing.")
     report.add_argument("--json", action="store_true", help="Print the report as JSON.")
+
+    index = subparsers.add_parser("index", help="Build or inspect the private local Gmail SQLite index.")
+    index_subparsers = index.add_subparsers(dest="index_command")
+
+    index_build = index_subparsers.add_parser("build", help="Cache Gmail search matches and raw MIME locally for faster future passes.")
+    index_build.add_argument(
+        "--preset",
+        choices=VALID_PRESETS,
+        default=None,
+        help="Apply a named option set before indexing. pdf-archive indexes the PDF archive query.",
+    )
+    index_build.add_argument("--query", default=None, help="Gmail search query to index.")
+    index_build.add_argument("--max-results", type=int, default=None, help="Maximum Gmail search matches to index.")
+    index_build.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
+    index_build.add_argument("--credentials", type=Path, help="Path to the Google desktop OAuth client secret JSON.")
+    index_build.add_argument("--token-cache", type=Path, help="Path to the cached OAuth token JSON.")
+    index_build.add_argument("--gmail-user", default=None, help="Gmail user ID to call the API with. Defaults to me.")
+    index_build.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
+    index_build.add_argument("--request-profile", choices=VALID_REQUEST_PROFILES, default=None, help="Inspection request profile.")
+    index_build.add_argument("--quota-units-per-second", type=float, default=None, help="Target Gmail quota pacing.")
+    index_build.add_argument(
+        "--progress-format",
+        choices=VALID_PROGRESS_FORMATS,
+        default=None,
+        help="Progress output format on stderr: text or jsonl. Default: text.",
+    )
+    index_build.add_argument("-v", "--verbose", action="count", default=0, help="Increase progress output.")
+    index_build.add_argument("-y", "--yes", action="store_true", help="Accept dependency install prompts automatically.")
+    index_build.add_argument("--json", action="store_true", help="Print the index summary as JSON.")
+
+    index_stats = index_subparsers.add_parser("stats", help="Show local Gmail index size and cached query counts.")
+    index_stats.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
+    index_stats.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
+    index_stats.add_argument("--json", action="store_true", help="Print index stats as JSON.")
 
     doctor = subparsers.add_parser("doctor", help="Check local gmail-cleanup configuration, tokens, and dependencies.")
     doctor.add_argument("--config", type=Path, help=f"Path to local TOML config. Defaults to ${DEFAULT_CONFIG_ENV}.")
@@ -675,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--credentials", type=Path, help="Path to the Google desktop OAuth client secret JSON.")
     doctor.add_argument("--token-cache", type=Path, help="Path to the cached OAuth token JSON.")
     doctor.add_argument("--gmail-user", default=None, help="Gmail user ID to report. Defaults to me.")
+    doctor.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
     doctor.add_argument("--json", action="store_true", help="Print diagnostics as JSON.")
 
     return parser
@@ -780,6 +836,7 @@ def load_config(path: Path) -> dict[str, object]:
         "audit_labels",
         "credentials",
         "gmail_user",
+        "index_db",
         "label_processed",
         "label_review",
         "max_results",
@@ -900,6 +957,18 @@ def resolve_token_cache_path(explicit: Path | None, config: dict[str, object], c
     if DEFAULT_TOKEN_PATH.exists() or not LEGACY_TOKEN_PATH.exists():
         return DEFAULT_TOKEN_PATH
     return LEGACY_TOKEN_PATH
+
+
+def resolve_index_db_path(explicit: Path | None, config: dict[str, object], config_path: Path) -> Path:
+    if explicit is not None:
+        return explicit.expanduser()
+    env_path = path_from_env(DEFAULT_INDEX_DB_ENV)
+    if env_path is not None:
+        return env_path
+    configured = config_path_value(config, "index_db", config_path)
+    if configured is not None:
+        return configured
+    return DEFAULT_INDEX_DB_PATH
 
 
 def resolve_gmail_user(explicit: str | None, config: dict[str, object], config_path: Path) -> str:
@@ -1507,6 +1576,8 @@ class GmailApiClient:
             thread_id=response["threadId"],
             label_ids=tuple(response.get("labelIds", ())),
             raw_bytes=decode_gmail_raw(response["raw"]),
+            history_id=str(response["historyId"]) if response.get("historyId") is not None else None,
+            internal_date=int(response["internalDate"]) if response.get("internalDate") is not None else None,
         )
 
     def clone(self) -> "GmailApiClient":
@@ -1542,6 +1613,8 @@ class GmailApiClient:
                 thread_id=response["threadId"],
                 label_ids=tuple(response.get("labelIds", ())),
                 raw_bytes=decode_gmail_raw(response["raw"]),
+                history_id=str(response["historyId"]) if response.get("historyId") is not None else None,
+                internal_date=int(response["internalDate"]) if response.get("internalDate") is not None else None,
             )
 
         for message_id in message_ids:
@@ -4591,6 +4664,421 @@ def message_filename_records(message: EmailMessage) -> list[dict[str, object]]:
     return records
 
 
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def private_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not sys.platform.startswith("win"):
+        try:
+            os.chmod(path.parent, 0o700)
+        except OSError:
+            pass
+
+
+def all_header_records(message: EmailMessage) -> list[dict[str, str]]:
+    return [{"name": str(name), "value": str(value)} for name, value in message.items()]
+
+
+class GmailIndex:
+    schema_version = 1
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.expanduser()
+        private_parent(self.path)
+        self.connection = sqlite3.connect(str(self.path))
+        self.connection.row_factory = sqlite3.Row
+        self.ensure_schema()
+        if not sys.platform.startswith("win"):
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def ensure_schema(self) -> None:
+        self.connection.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                message_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                history_id TEXT,
+                internal_date INTEGER,
+                label_ids_json TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                recipients TEXT NOT NULL,
+                date_header TEXT NOT NULL,
+                message_id_header TEXT NOT NULL,
+                headers_json TEXT NOT NULL,
+                filenames_json TEXT NOT NULL,
+                raw_zlib BLOB NOT NULL,
+                raw_sha256 TEXT NOT NULL,
+                raw_size_bytes INTEGER NOT NULL,
+                indexed_at TEXT NOT NULL,
+                source_query TEXT
+            );
+            CREATE TABLE IF NOT EXISTS query_matches (
+                query TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                max_results INTEGER NOT NULL,
+                matched_at TEXT NOT NULL,
+                PRIMARY KEY (query, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_query_matches_query_position
+                ON query_matches(query, position);
+            """
+        )
+        self.connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("schema_version", str(self.schema_version)),
+        )
+        self.connection.commit()
+
+    def record_query_matches(self, query: str, max_results: int, message_ids: list[str]) -> None:
+        matched_at = iso_now()
+        with self.connection:
+            self.connection.execute("DELETE FROM query_matches WHERE query = ?", (query,))
+            self.connection.executemany(
+                """
+                INSERT INTO query_matches(query, message_id, position, max_results, matched_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (query, message_id, position, max_results, matched_at)
+                    for position, message_id in enumerate(message_ids, start=1)
+                ],
+            )
+
+    def upsert_message(self, record: GmailMessageRecord, *, source_query: str | None = None) -> None:
+        message = parse_email_message(record.raw_bytes)
+        raw_zlib = sqlite3.Binary(zlib.compress(record.raw_bytes, level=6))
+        recipients = ", ".join(
+            value
+            for value in (
+                header_value(message, "To"),
+                header_value(message, "Cc"),
+                header_value(message, "Bcc"),
+            )
+            if value
+        )
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO messages(
+                    message_id, thread_id, history_id, internal_date, label_ids_json,
+                    subject, sender, recipients, date_header, message_id_header,
+                    headers_json, filenames_json, raw_zlib, raw_sha256, raw_size_bytes,
+                    indexed_at, source_query
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    history_id = excluded.history_id,
+                    internal_date = excluded.internal_date,
+                    label_ids_json = excluded.label_ids_json,
+                    subject = excluded.subject,
+                    sender = excluded.sender,
+                    recipients = excluded.recipients,
+                    date_header = excluded.date_header,
+                    message_id_header = excluded.message_id_header,
+                    headers_json = excluded.headers_json,
+                    filenames_json = excluded.filenames_json,
+                    raw_zlib = excluded.raw_zlib,
+                    raw_sha256 = excluded.raw_sha256,
+                    raw_size_bytes = excluded.raw_size_bytes,
+                    indexed_at = excluded.indexed_at,
+                    source_query = excluded.source_query
+                """,
+                (
+                    record.message_id,
+                    record.thread_id,
+                    record.history_id,
+                    record.internal_date,
+                    json.dumps(list(record.label_ids), sort_keys=True),
+                    header_value(message, "Subject"),
+                    header_value(message, "From"),
+                    recipients,
+                    header_value(message, "Date"),
+                    header_value(message, "Message-ID"),
+                    json.dumps(all_header_records(message), sort_keys=True),
+                    json.dumps(message_filename_records(message), sort_keys=True),
+                    raw_zlib,
+                    hashlib.sha256(record.raw_bytes).hexdigest(),
+                    len(record.raw_bytes),
+                    iso_now(),
+                    source_query,
+                ),
+            )
+
+    def query_is_cached(self, query: str, max_results: int) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count, COALESCE(MAX(max_results), 0) AS max_requested
+            FROM query_matches
+            WHERE query = ?
+            """,
+            (query,),
+        ).fetchone()
+        count = int(row["count"])
+        max_requested = int(row["max_requested"])
+        if count == 0:
+            return False
+        if count >= max_results:
+            return True
+        return count < max_requested
+
+    def query_message_ids(self, query: str, max_results: int) -> list[str]:
+        rows = self.connection.execute(
+            """
+            SELECT message_id
+            FROM query_matches
+            WHERE query = ?
+            ORDER BY position
+            LIMIT ?
+            """,
+            (query, max_results),
+        ).fetchall()
+        return [str(row["message_id"]) for row in rows]
+
+    def cached_message_ids(self, message_ids: list[str]) -> set[str]:
+        cached: set[str] = set()
+        for index in range(0, len(message_ids), 500):
+            chunk = message_ids[index : index + 500]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"SELECT message_id FROM messages WHERE message_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            cached.update(str(row["message_id"]) for row in rows)
+        return cached
+
+    def get_message(self, message_id: str) -> GmailMessageRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT message_id, thread_id, history_id, internal_date, label_ids_json, raw_zlib
+            FROM messages
+            WHERE message_id = ?
+            """,
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return GmailMessageRecord(
+            message_id=str(row["message_id"]),
+            thread_id=str(row["thread_id"]),
+            label_ids=tuple(json.loads(str(row["label_ids_json"]))),
+            raw_bytes=zlib.decompress(row["raw_zlib"]),
+            history_id=str(row["history_id"]) if row["history_id"] is not None else None,
+            internal_date=int(row["internal_date"]) if row["internal_date"] is not None else None,
+        )
+
+    def stats(self) -> dict[str, object]:
+        message_row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count,
+                   COALESCE(SUM(raw_size_bytes), 0) AS raw_size,
+                   COALESCE(SUM(length(raw_zlib)), 0) AS compressed_size
+            FROM messages
+            """
+        ).fetchone()
+        query_rows = self.connection.execute(
+            """
+            SELECT query, COUNT(*) AS count, MAX(matched_at) AS matched_at
+            FROM query_matches
+            GROUP BY query
+            ORDER BY matched_at DESC, query
+            """
+        ).fetchall()
+        return {
+            "index_db": str(self.path),
+            "message_count": int(message_row["count"]),
+            "raw_size_bytes": int(message_row["raw_size"]),
+            "compressed_size_bytes": int(message_row["compressed_size"]),
+            "queries": [
+                {
+                    "query": str(row["query"]),
+                    "message_count": int(row["count"]),
+                    "matched_at": row["matched_at"],
+                }
+                for row in query_rows
+            ],
+        }
+
+
+class IndexedGmailClient:
+    def __init__(self, delegate, index: GmailIndex) -> None:
+        self.delegate = delegate
+        self.index = index
+
+    def list_message_ids(self, query: str, max_results: int) -> list[str]:
+        if self.index.query_is_cached(query, max_results):
+            return self.index.query_message_ids(query, max_results)
+        message_ids = self.delegate.list_message_ids(query, max_results)
+        self.index.record_query_matches(query, max_results, message_ids)
+        return message_ids
+
+    def get_message_raw(self, message_id: str) -> GmailMessageRecord:
+        cached = self.index.get_message(message_id)
+        if cached is not None:
+            return cached
+        record = self.delegate.get_message_raw(message_id)
+        self.index.upsert_message(record)
+        return record
+
+    def get_message_raw_many(self, message_ids, *, batch_size: int, max_inflight: int):
+        ordered: list[GmailMessageRecord | None] = []
+        missing: list[str] = []
+        for message_id in message_ids:
+            cached = self.index.get_message(message_id)
+            ordered.append(cached)
+            if cached is None:
+                missing.append(message_id)
+        if missing:
+            fetched = self.delegate.get_message_raw_many(missing, batch_size=batch_size, max_inflight=max_inflight)
+            fetched_by_id = {record.message_id: record for record in fetched}
+            for record in fetched:
+                self.index.upsert_message(record)
+            for index, message_id in enumerate(message_ids):
+                if ordered[index] is None:
+                    ordered[index] = fetched_by_id[message_id]
+        return [record for record in ordered if record is not None]
+
+    def find_cleanup_replacement_message_id(self, thread_id: str, original_message_id: str) -> str | None:
+        return self.delegate.find_cleanup_replacement_message_id(thread_id, original_message_id)
+
+    def insert_message(self, *args, **kwargs) -> str:
+        return self.delegate.insert_message(*args, **kwargs)
+
+    def trash_message(self, message_id: str) -> None:
+        self.delegate.trash_message(message_id)
+
+    def list_labels(self) -> list[dict[str, object]]:
+        return self.delegate.list_labels()
+
+    def get_or_create_label(self, name: str) -> str:
+        return self.delegate.get_or_create_label(name)
+
+    def modify_message_labels(self, message_id: str, add_label_ids: tuple[str, ...]) -> None:
+        self.delegate.modify_message_labels(message_id, add_label_ids)
+
+
+def run_index_build(
+    client,
+    query: str,
+    max_results: int,
+    index_db: Path,
+    *,
+    request_profile: str = "moderate",
+    progress_format: str = "text",
+    verbose: int = 0,
+) -> dict[str, object]:
+    if max_results < 1:
+        raise ValueError("--max-results must be 1 or greater")
+    reporter = ProgressReporter(verbose=verbose, progress_format=progress_format)
+    gmail_index = GmailIndex(index_db)
+    try:
+        reporter.log_event(
+            1,
+            f"Searching Gmail with query {query!r} for index build (max_results={max_results})",
+            "index_search_started",
+            query=query,
+            max_results=max_results,
+        )
+        message_ids = client.list_message_ids(query, max_results)
+        gmail_index.record_query_matches(query, max_results, message_ids)
+        already_cached = gmail_index.cached_message_ids(message_ids)
+        message_ids_to_fetch = [message_id for message_id in message_ids if message_id not in already_cached]
+        reporter.log_event(
+            1,
+            f"Gmail matched {len(message_ids)} message(s); {len(already_cached)} already cached, fetching {len(message_ids_to_fetch)}",
+            "index_match_count",
+            cached_messages=len(already_cached),
+            fetch_messages=len(message_ids_to_fetch),
+            query=query,
+            matched_messages=len(message_ids),
+        )
+        profile_config = REQUEST_PROFILE_CONFIG[request_profile]
+        batch_size = int(profile_config["batch_size"])
+        max_inflight = int(profile_config["max_inflight"])
+        cached = len(already_cached)
+        fetched = 0
+        raw_size_bytes = 0
+        cursor = 0
+        while cursor < len(message_ids_to_fetch):
+            chunk_ids = message_ids_to_fetch[cursor : cursor + batch_size * max_inflight]
+            records = client.get_message_raw_many(chunk_ids, batch_size=batch_size, max_inflight=max_inflight)
+            for record in records:
+                gmail_index.upsert_message(record, source_query=query)
+                cached += 1
+                fetched += 1
+                raw_size_bytes += len(record.raw_bytes)
+            cursor += len(records)
+            reporter.log_event(
+                1,
+                f"Cached {cached}/{len(message_ids)} message(s) into {index_db}",
+                "index_cache_progress",
+                cached_messages=cached,
+                matched_messages=len(message_ids),
+            )
+        stats = gmail_index.stats()
+        return {
+            "cached_messages": cached,
+            "fetched_messages": fetched,
+            "index": stats,
+            "matched_messages": len(message_ids),
+            "mode": "index-build",
+            "query": query,
+            "raw_size_bytes": raw_size_bytes,
+            "reused_cached_messages": len(already_cached),
+            "request_profile": request_profile,
+        }
+    finally:
+        gmail_index.close()
+
+
+def render_index_build(summary: dict[str, object]) -> str:
+    index = summary["index"]
+    return "\n".join(
+        [
+            f"Mode: {summary['mode']}",
+            f"Query: {summary['query']}",
+            f"Index DB: {index['index_db']}",
+            f"Matched Gmail messages: {summary['matched_messages']}",
+            f"Cached messages: {summary['cached_messages']}",
+            f"Fetched this run: {summary['fetched_messages']}",
+            f"Reused from index: {summary['reused_cached_messages']}",
+            f"Fetched raw size: {human_size(int(summary['raw_size_bytes']))}",
+            f"Total indexed messages: {index['message_count']}",
+            f"Compressed index payload: {human_size(int(index['compressed_size_bytes']))}",
+        ]
+    )
+
+
+def render_index_stats(stats: dict[str, object]) -> str:
+    lines = [
+        "Mode: index-stats",
+        f"Index DB: {stats['index_db']}",
+        f"Indexed messages: {stats['message_count']}",
+        f"Raw message bytes: {human_size(int(stats['raw_size_bytes']))}",
+        f"Compressed payload bytes: {human_size(int(stats['compressed_size_bytes']))}",
+    ]
+    for query in stats["queries"]:
+        lines.append(f"- {query['message_count']} message(s): {query['query']}")
+    return "\n".join(lines)
+
+
 def run_report(
     client,
     query: str,
@@ -4747,6 +5235,15 @@ def run_doctor(args: argparse.Namespace) -> dict[str, object]:
 
     gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
     rows.append(doctor_row("gmail_user", "ok", gmail_user))
+
+    index_db = resolve_index_db_path(getattr(args, "index_db", None), config, config_path)
+    rows.append(
+        doctor_row(
+            "index_db",
+            "ok" if index_db.exists() else "warn",
+            str(index_db) if index_db.exists() else f"not found yet: {index_db}",
+        )
+    )
 
     for module_name in ("googleapiclient.discovery", "google_auth_oauthlib.flow", "google.auth.transport.requests"):
         rows.append(python_module_status(module_name))
@@ -5087,6 +5584,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 1
+    if args.command == "index" and args.index_command is None:
+        return die("Missing index subcommand. Use `gmail-cleanup index build` or `gmail-cleanup index stats`.")
     if args.command == "doctor":
         try:
             report = run_doctor(args)
@@ -5101,20 +5600,60 @@ def main(argv: list[str] | None = None) -> int:
         apply_preset_defaults(args)
         config_path = resolve_config_path(args.config)
         config = load_config(config_path)
-        query = resolve_query(args.query)
-        credentials_path = resolve_credentials_path(args.credentials, config, config_path)
-        token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
-        gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
-        max_results = resolve_max_results(args.max_results, config, config_path)
-        settings = build_extraction_settings(args, config, config_path)
-        request_profile = resolve_request_profile(args.request_profile, config, config_path)
-        quota_units_per_second = resolve_quota_units_per_second(
-            args.quota_units_per_second,
-            config,
-            config_path,
-            request_profile,
-        )
-        if args.command == "report":
+        if args.command == "index" and args.index_command == "stats":
+            index_db = resolve_index_db_path(args.index_db, config, config_path)
+            gmail_index = GmailIndex(index_db)
+            try:
+                summary = gmail_index.stats()
+                summary["mode"] = "index-stats"
+            finally:
+                gmail_index.close()
+        elif args.command == "index" and args.index_command == "build":
+            query = resolve_query(args.query)
+            credentials_path = resolve_credentials_path(args.credentials, config, config_path)
+            token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
+            gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
+            max_results = resolve_max_results(args.max_results, config, config_path)
+            request_profile = resolve_request_profile(args.request_profile, config, config_path)
+            quota_units_per_second = resolve_quota_units_per_second(
+                args.quota_units_per_second,
+                config,
+                config_path,
+                request_profile,
+            )
+            index_db = resolve_index_db_path(args.index_db, config, config_path)
+            progress_format = resolve_progress_format(args.progress_format, config, config_path)
+            client = build_gmail_client(
+                credentials_path,
+                token_cache_path,
+                APPLY_SCOPES,
+                gmail_user,
+                assume_yes=args.yes,
+                quota_units_per_second=quota_units_per_second,
+            )
+            summary = run_index_build(
+                client,
+                query,
+                max_results,
+                index_db,
+                request_profile=request_profile,
+                progress_format=progress_format,
+                verbose=args.verbose,
+            )
+        elif args.command == "report":
+            query = resolve_query(args.query)
+            credentials_path = resolve_credentials_path(args.credentials, config, config_path)
+            token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
+            gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
+            max_results = resolve_max_results(args.max_results, config, config_path)
+            settings = build_extraction_settings(args, config, config_path)
+            request_profile = resolve_request_profile(args.request_profile, config, config_path)
+            quota_units_per_second = resolve_quota_units_per_second(
+                args.quota_units_per_second,
+                config,
+                config_path,
+                request_profile,
+            )
             client = build_gmail_client(
                 credentials_path,
                 token_cache_path,
@@ -5122,6 +5661,8 @@ def main(argv: list[str] | None = None) -> int:
                 gmail_user,
                 quota_units_per_second=quota_units_per_second,
             )
+            if args.use_index:
+                client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
             summary = run_report(
                 client,
                 query,
@@ -5130,6 +5671,19 @@ def main(argv: list[str] | None = None) -> int:
                 request_profile=request_profile,
             )
         elif args.command == "extract-media":
+            query = resolve_query(args.query)
+            credentials_path = resolve_credentials_path(args.credentials, config, config_path)
+            token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
+            gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
+            max_results = resolve_max_results(args.max_results, config, config_path)
+            settings = build_extraction_settings(args, config, config_path)
+            request_profile = resolve_request_profile(args.request_profile, config, config_path)
+            quota_units_per_second = resolve_quota_units_per_second(
+                args.quota_units_per_second,
+                config,
+                config_path,
+                request_profile,
+            )
             backup_dir = resolve_backup_dir(args.backup_dir, config, config_path).expanduser()
             progress_format = resolve_progress_format(args.progress_format, config, config_path)
             audit_label_settings = resolve_audit_label_settings(args, config, config_path)
@@ -5142,6 +5696,8 @@ def main(argv: list[str] | None = None) -> int:
                 assume_yes=args.yes,
                 quota_units_per_second=quota_units_per_second,
             )
+            if args.use_index:
+                client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
             summary = run_extract_media(
                 client,
                 query,
@@ -5164,6 +5720,10 @@ def main(argv: list[str] | None = None) -> int:
         return die(str(exc))
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
+    elif args.command == "index" and args.index_command == "build":
+        print(render_index_build(summary))
+    elif args.command == "index" and args.index_command == "stats":
+        print(render_index_stats(summary))
     elif args.command == "report":
         print(render_report(summary))
     else:

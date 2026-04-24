@@ -45,6 +45,7 @@ If you're just here to use a script, start here. This README is the friendly map
 - inserts a modified copy of the email back into Gmail with a visible backup note
 - replaces HTML inline media references with visible placeholders that show the saved filename and search token
 - can apply optional Gmail audit labels to cleaned copies and skipped originals
+- can build a private local SQLite Gmail index so repeated cleanup passes do not re-download the same raw messages
 - can report remaining Gmail matches as actionable, false positives, or skipped before you apply changes
 - can run a local `doctor` check for OAuth, Python modules, PDF tools, OCR tools, and password backends
 - moves the original message to Gmail Trash after the modified copy is inserted
@@ -194,6 +195,7 @@ types = ["image", "video"]
 # audit_labels = false
 # label_processed = "gmail-cleanup/processed"
 # label_review = "gmail-cleanup/review"
+# index_db = "/path/to/private-state/gmail-index.sqlite"
 # token_cache = "/path/to/private-state/token.json"
 # gmail_user = "me"
 # max_results = 50
@@ -276,6 +278,30 @@ Report what still matches the PDF preset without changing Gmail:
 gmail-cleanup report --preset pdf-archive
 ```
 
+Build a private local index for the same PDF archive query. This caches the Gmail match order plus compressed raw MIME, parsed headers, labels, attachment filenames, and hashes under the OS-local state directory:
+
+```bash
+gmail-cleanup index build --preset pdf-archive -v
+```
+
+Check index size and cached queries:
+
+```bash
+gmail-cleanup index stats
+```
+
+Use the index for a later report so cached messages are read locally instead of downloaded again:
+
+```bash
+gmail-cleanup report --preset pdf-archive --use-index
+```
+
+Use the index during apply. Gmail writes still go to Gmail, but cached message reads come from the local index when present:
+
+```bash
+gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
+```
+
 Run a local setup check:
 
 ```bash
@@ -292,6 +318,12 @@ Ask an agent for a machine-readable remaining-work report:
 
 ```bash
 gmail-cleanup report --preset pdf-archive --json
+```
+
+Ask an agent to build the reusable local index with structured progress:
+
+```bash
+gmail-cleanup index build --preset pdf-archive --progress-format jsonl --json -v
 ```
 
 Ask an agent for machine-readable local setup diagnostics:
@@ -382,6 +414,9 @@ Agent-friendly review artifacts are written as JSONL too:
 - `gmail-cleanup report` uses the same query, preset, and extraction settings as `extract-media`, but only lists and classifies matched messages. It is useful after a run to separate real remaining work from Gmail search false positives.
 - `gmail-cleanup doctor` does not call Gmail. It checks local config paths, token scopes, Python imports, external tools, and trash support so humans and agents can see what is ready before a long run.
 - `--audit-labels` creates or reuses `gmail-cleanup/processed` and `gmail-cleanup/review`. `--label-processed` and `--label-review` let you set explicit labels without enabling both defaults.
+- `gmail-cleanup index build` creates a private SQLite index at `~/.local/state/maj-scripts/gmail-cleanup/gmail-index.sqlite` on Linux, with equivalent OS-local state paths on macOS and Windows. Override it with `--index-db`, `GMAIL_CLEANUP_INDEX_DB`, or `index_db` in local config.
+- The index stores personal email metadata and compressed raw MIME for cached messages. Keep it outside this public repo, protect it like the token cache, and delete it when you no longer need the faster repeated passes.
+- `--use-index` is read-through: if the requested query and messages are already cached, reports and inspection read locally; missing records are fetched from Gmail and added to the index. Gmail insert/trash/label writes are never simulated locally.
 - Current PDF modes are `auto`, `render-pages`, `extract-images`, and `backup`.
 - PDFs are selected by MIME type when Gmail reports `application/pdf`, and by `.pdf` filename when Gmail reports a generic type such as `application/octet-stream`.
 - `--pdf-mode auto` prefers direct page-image extraction for scanned/image-heavy PDFs when possible, and otherwise renders every page to images.

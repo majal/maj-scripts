@@ -31,6 +31,7 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(top_level.returncode, 0, top_level.stderr)
         self.assertIn("extract-media", top_level.stdout)
         self.assertIn("report", top_level.stdout)
+        self.assertIn("index", top_level.stdout)
         self.assertIn("doctor", top_level.stdout)
 
         result = self.run_script("gmail-cleanup", "extract-media", "--help")
@@ -42,6 +43,11 @@ class SmokeTest(unittest.TestCase):
         report = self.run_script("gmail-cleanup", "report", "--help")
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertIn("--query", report.stdout)
+        self.assertIn("--use-index", report.stdout)
+
+        index = self.run_script("gmail-cleanup", "index", "build", "--help")
+        self.assertEqual(index.returncode, 0, index.stderr)
+        self.assertIn("--index-db", index.stdout)
 
     def test_gmail_cleanup_doctor_json(self) -> None:
         result = self.run_script("gmail-cleanup", "doctor", "--json")

@@ -25,6 +25,7 @@ class FakeGmailClient:
         self.list_calls = 0
         self.label_ids_by_name: dict[str, str] = {}
         self.modified_labels: list[tuple[str, tuple[str, ...]]] = []
+        self.raw_many_calls = 0
         self.trashed: list[str] = []
 
     def list_message_ids(self, query: str, max_results: int) -> list[str]:
@@ -37,6 +38,7 @@ class FakeGmailClient:
 
     def get_message_raw_many(self, message_ids, *, batch_size: int, max_inflight: int):
         del batch_size, max_inflight
+        self.raw_many_calls += 1
         return [self.records[message_id] for message_id in message_ids]
 
     def find_cleanup_replacement_message_id(self, thread_id: str, original_message_id: str) -> str | None:
@@ -728,6 +730,84 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(categories["zip-1"], "false_positive")
         self.assertEqual(categories["signed-1"], "skipped")
         self.assertEqual(report["matched_messages"], 3)
+
+    def test_index_build_caches_raw_messages_for_report(self) -> None:
+        settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("pdf",))
+        client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1"), self.build_record("msg-2")])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_db = Path(tmpdir) / "gmail-index.sqlite"
+            summary = self.gmail_cleanup.run_index_build(
+                client,
+                "filename:pdf -in:trash -in:spam",
+                25,
+                index_db,
+                request_profile="conservative",
+            )
+
+            self.assertEqual(summary["matched_messages"], 2)
+            self.assertEqual(summary["cached_messages"], 2)
+            self.assertEqual(client.list_calls, 1)
+            self.assertEqual(client.raw_many_calls, 1)
+
+            rerun = self.gmail_cleanup.run_index_build(
+                client,
+                "filename:pdf -in:trash -in:spam",
+                25,
+                index_db,
+                request_profile="conservative",
+            )
+            self.assertEqual(rerun["cached_messages"], 2)
+            self.assertEqual(rerun["fetched_messages"], 0)
+            self.assertEqual(rerun["reused_cached_messages"], 2)
+            self.assertEqual(client.list_calls, 2)
+            self.assertEqual(client.raw_many_calls, 1)
+
+            cached_client = self.gmail_cleanup.IndexedGmailClient(
+                client,
+                self.gmail_cleanup.GmailIndex(index_db),
+            )
+            report = self.gmail_cleanup.run_report(
+                cached_client,
+                "filename:pdf -in:trash -in:spam",
+                25,
+                settings,
+                request_profile="conservative",
+            )
+
+            self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+            self.assertEqual(client.list_calls, 2)
+            self.assertEqual(client.raw_many_calls, 1)
+
+    def test_index_fetches_delegate_when_cached_query_is_partial(self) -> None:
+        settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("pdf",))
+        client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1"), self.build_record("msg-2")])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            index_db = Path(tmpdir) / "gmail-index.sqlite"
+            self.gmail_cleanup.run_index_build(
+                client,
+                "filename:pdf -in:trash -in:spam",
+                1,
+                index_db,
+                request_profile="conservative",
+            )
+
+            cached_client = self.gmail_cleanup.IndexedGmailClient(
+                client,
+                self.gmail_cleanup.GmailIndex(index_db),
+            )
+            report = self.gmail_cleanup.run_report(
+                cached_client,
+                "filename:pdf -in:trash -in:spam",
+                2,
+                settings,
+                request_profile="conservative",
+            )
+
+            self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+            self.assertEqual(client.list_calls, 2)
+            self.assertEqual(client.raw_many_calls, 2)
 
     def test_default_request_profile_uses_quota_aware_moderate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
