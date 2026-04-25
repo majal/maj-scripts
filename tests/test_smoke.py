@@ -47,6 +47,8 @@ class SmokeTest(unittest.TestCase):
         self.assertEqual(report.returncode, 0, report.stderr)
         self.assertIn("--query", report.stdout)
         self.assertIn("--use-index", report.stdout)
+        self.assertIn("--backup-dir", report.stdout)
+        self.assertIn("--offline", report.stdout)
 
         index = self.run_script("gmail-cleanup", "index", "build", "--help")
         self.assertEqual(index.returncode, 0, index.stderr)

@@ -837,8 +837,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--credentials", type=Path, help="Path to the Google desktop OAuth client secret JSON.")
     report.add_argument("--token-cache", type=Path, help="Path to the cached OAuth token JSON.")
     report.add_argument("--gmail-user", default=None, help="Gmail user ID to call the API with. Defaults to me.")
+    report.add_argument("--backup-dir", type=Path, help="Use this backup manifest to annotate exported/completed migration status.")
     report.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
     report.add_argument("--use-index", action="store_true", help="Use the local Gmail index before downloading messages from Gmail.")
+    report.add_argument("--offline", action="store_true", help="Use only the local Gmail index. Requires --use-index and never contacts Gmail.")
     report.add_argument("--types", default=None, help="Comma-separated attachment selectors to classify.")
     report.add_argument("--before-year", type=int, default=None, help="Only classify attachments from messages before this year.")
     report.add_argument("--min-message-bytes", type=int, default=None, help="Only count messages whose selected attachments total at least this many bytes.")
@@ -5943,6 +5945,7 @@ def run_report(
     settings: ExtractionSettings,
     *,
     request_profile: str = "moderate",
+    backup_dir: Path | None = None,
 ) -> dict[str, object]:
     if max_results < 1:
         raise ValueError("--max-results must be 1 or greater")
@@ -5955,6 +5958,12 @@ def run_report(
     )
     items: list[dict[str, object]] = []
     counts = {"actionable": 0, "false_positive": 0, "skipped": 0}
+    completed_records = completed_manifest_records_by_original_id(backup_dir) if backup_dir is not None else {}
+    exported_records = exported_manifest_records_by_original_id(backup_dir) if backup_dir is not None else {}
+    manifest_counts = {"pending": 0, "exported_pending_gmail_sync": 0, "completed": 0}
+    pending_backup_candidates = 0
+    exported_pending_gmail_sync = 0
+    remaining_gmail_sync_candidates = 0
     for record in records:
         plan = plan_message(record, settings)
         message = parse_email_message(record.raw_bytes)
@@ -5964,22 +5973,46 @@ def run_report(
             category = "actionable"
         else:
             category = "false_positive"
+        completed_record = completed_records.get(plan.message_id)
+        exported_record = exported_records.get(plan.message_id)
+        if completed_record is not None:
+            migration_status = "completed"
+        elif exported_record is not None:
+            migration_status = "exported_pending_gmail_sync"
+        else:
+            migration_status = "pending"
+        if backup_dir is not None:
+            manifest_counts[migration_status] += 1
+            if category == "actionable":
+                if migration_status == "pending":
+                    pending_backup_candidates += 1
+                elif migration_status == "exported_pending_gmail_sync":
+                    exported_pending_gmail_sync += 1
+                if migration_status != "completed":
+                    remaining_gmail_sync_candidates += 1
         counts[category] += 1
-        items.append(
-            {
-                "category": category,
-                "date_header": plan.date_header,
-                "filenames": message_filename_records(message),
-                "label_ids": list(plan.label_ids),
-                "media_parts": [part for part in plan_to_dict(plan)["media_parts"]],
-                "message_id": plan.message_id,
-                "sender": plan.sender,
-                "skip_reason": plan.skip_reason,
-                "subject": plan.subject,
-                "thread_id": plan.thread_id,
-            }
-        )
-    return {
+        item = {
+            "category": category,
+            "date_header": plan.date_header,
+            "filenames": message_filename_records(message),
+            "label_ids": list(plan.label_ids),
+            "media_parts": [part for part in plan_to_dict(plan)["media_parts"]],
+            "message_id": plan.message_id,
+            "sender": plan.sender,
+            "skip_reason": plan.skip_reason,
+            "subject": plan.subject,
+            "thread_id": plan.thread_id,
+        }
+        if backup_dir is not None:
+            item["migration_status"] = migration_status
+            if completed_record is not None:
+                item["completed_at"] = completed_record.get("applied_at")
+                item["new_message_id"] = completed_record.get("new_message_id")
+            elif exported_record is not None:
+                item["exported_at"] = exported_record.get("exported_at")
+                item["exported_attachment_count"] = len(exported_record.get("attachments", []))
+        items.append(item)
+    report = {
         "counts": counts,
         "items": items,
         "matched_messages": len(message_ids),
@@ -5987,6 +6020,15 @@ def run_report(
         "query": query,
         "request_profile": request_profile,
     }
+    if backup_dir is not None:
+        report["local_manifest"] = {
+            "backup_dir": str(backup_dir),
+            "counts": manifest_counts,
+            "pending_backup_candidates": pending_backup_candidates,
+            "exported_pending_gmail_sync": exported_pending_gmail_sync,
+            "remaining_gmail_sync_candidates": remaining_gmail_sync_candidates,
+        }
+    return report
 
 
 def render_report(report: dict[str, object]) -> str:
@@ -5999,9 +6041,23 @@ def render_report(report: dict[str, object]) -> str:
         f"False positives: {counts['false_positive']}",
         f"Skipped: {counts['skipped']}",
     ]
+    local_manifest = report.get("local_manifest")
+    if local_manifest:
+        manifest_counts = local_manifest["counts"]
+        lines.extend(
+            [
+                f"Local manifest: {local_manifest['backup_dir']}",
+                f"Completed locally/Gmail synced: {manifest_counts['completed']}",
+                f"Exported locally, Gmail sync pending: {manifest_counts['exported_pending_gmail_sync']}",
+                f"Pending local backup: {manifest_counts['pending']}",
+                f"Remaining Gmail sync candidates: {local_manifest['remaining_gmail_sync_candidates']}",
+            ]
+        )
     for item in report["items"]:
+        migration_status = item.get("migration_status")
+        status_suffix = f" [{migration_status}]" if migration_status else ""
         lines.append(
-            f"- {item['category']}: {item['message_id']} {item['subject'] or '(no subject)'} "
+            f"- {item['category']}{status_suffix}: {item['message_id']} {item['subject'] or '(no subject)'} "
             f"from {item['sender'] or '(unknown sender)'}"
         )
         if item.get("skip_reason"):
@@ -6576,33 +6632,42 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "report":
             query = resolve_query(args.query)
-            credentials_path = resolve_credentials_path(args.credentials, config, config_path)
-            token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
-            gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
             max_results = resolve_max_results(args.max_results, config, config_path)
             settings = build_extraction_settings(args, config, config_path)
             request_profile = resolve_request_profile(args.request_profile, config, config_path)
-            quota_units_per_second = resolve_quota_units_per_second(
-                args.quota_units_per_second,
-                config,
-                config_path,
-                request_profile,
-            )
-            client = build_gmail_client(
-                credentials_path,
-                token_cache_path,
-                APPLY_SCOPES,
-                gmail_user,
-                quota_units_per_second=quota_units_per_second,
-            )
-            if args.use_index:
-                client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
+            if args.offline and not args.use_index:
+                raise ValueError("--offline requires --use-index")
+            if args.offline:
+                client = IndexOnlyGmailClient(GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
+            else:
+                credentials_path = resolve_credentials_path(args.credentials, config, config_path)
+                token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
+                gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
+                quota_units_per_second = resolve_quota_units_per_second(
+                    args.quota_units_per_second,
+                    config,
+                    config_path,
+                    request_profile,
+                )
+                client = build_gmail_client(
+                    credentials_path,
+                    token_cache_path,
+                    APPLY_SCOPES,
+                    gmail_user,
+                    quota_units_per_second=quota_units_per_second,
+                )
+                if args.use_index:
+                    client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
+            backup_dir = None
+            if args.backup_dir is not None or os.environ.get(DEFAULT_BACKUP_DIR_ENV) or "backup_dir" in config:
+                backup_dir = resolve_backup_dir(args.backup_dir, config, config_path).expanduser()
             summary = run_report(
                 client,
                 query,
                 max_results,
                 settings,
                 request_profile=request_profile,
+                backup_dir=backup_dir,
             )
         elif args.command == "extract-media":
             query = resolve_query(args.query)

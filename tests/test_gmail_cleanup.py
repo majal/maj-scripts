@@ -731,6 +731,55 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(categories["signed-1"], "skipped")
         self.assertEqual(report["matched_messages"], 3)
 
+    def test_report_marks_exported_and_completed_manifest_status(self) -> None:
+        client = FakeGmailClient(
+            self.gmail_cleanup,
+            [self.build_record("msg-1"), self.build_record("msg-2"), self.build_record("msg-3")],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir)
+            self.gmail_cleanup.append_manifest_record(
+                backup_dir / "manifest.jsonl",
+                {
+                    "action": "export_attachments",
+                    "attachments": [{"filename": "photo.mp4"}],
+                    "exported_at": "2026-04-24T23:53:30+00:00",
+                    "original_message_id": "msg-1",
+                },
+            )
+            self.gmail_cleanup.append_manifest_record(
+                backup_dir / "manifest.jsonl",
+                {
+                    "action": "extract_media",
+                    "applied_at": "2026-04-25T00:10:00+00:00",
+                    "attachments": [],
+                    "new_message_id": "clean-msg-2",
+                    "original_message_id": "msg-2",
+                },
+            )
+            report = self.gmail_cleanup.run_report(
+                client,
+                "has:attachment -in:trash -in:spam",
+                25,
+                self.default_settings(),
+                request_profile="conservative",
+                backup_dir=backup_dir,
+            )
+
+        self.assertEqual(report["counts"], {"actionable": 3, "false_positive": 0, "skipped": 0})
+        self.assertEqual(
+            report["local_manifest"]["counts"],
+            {"pending": 1, "exported_pending_gmail_sync": 1, "completed": 1},
+        )
+        self.assertEqual(report["local_manifest"]["pending_backup_candidates"], 1)
+        self.assertEqual(report["local_manifest"]["exported_pending_gmail_sync"], 1)
+        self.assertEqual(report["local_manifest"]["remaining_gmail_sync_candidates"], 2)
+        statuses = {item["message_id"]: item["migration_status"] for item in report["items"]}
+        self.assertEqual(statuses["msg-1"], "exported_pending_gmail_sync")
+        self.assertEqual(statuses["msg-2"], "completed")
+        self.assertEqual(statuses["msg-3"], "pending")
+
     def test_index_build_caches_raw_messages_for_report(self) -> None:
         settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("pdf",))
         client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1"), self.build_record("msg-2")])

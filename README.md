@@ -327,6 +327,12 @@ Export audio attachments as MP4 videos into the backup folder without changing G
 gmail-cleanup extract-media --preset audio-archive --backup-dir /path/to/local-backup --use-index --export-only -v
 ```
 
+Report the same preset with local manifest status. This separates pending backup work, files already exported locally, and messages already synced back to Gmail:
+
+```bash
+gmail-cleanup report --preset audio-archive --backup-dir /path/to/local-backup --use-index --offline
+```
+
 Use the index during apply. Gmail writes still go to Gmail, but cached message reads come from the local index when present:
 
 ```bash
@@ -453,6 +459,8 @@ Agent-friendly review artifacts are written as JSONL too:
 
 - The default mode is a dry run. Nothing in Gmail or on disk changes unless you pass `--apply` or `--export-only`.
 - `--export-only` writes selected files and manifest records to the backup folder but leaves Gmail unchanged.
+- `report --backup-dir ...` annotates each match with local migration status from `manifest.jsonl`: `pending`, `exported_pending_gmail_sync`, or `completed`. This is useful when a cached index still contains messages that have already been processed in Gmail.
+- `report --use-index --offline` reads only from the local SQLite index and manifest. It does not refresh OAuth tokens or contact Gmail.
 - `--preset pdf-archive` expands to `filename:pdf -in:trash -in:spam`, `--types pdf`, `--pdf-mode auto`, `--pdf-original trash`, `--pdf-password-mode low-hanging`, `--pdf-password-failure-action trash-original`, `--pdf-text-mode auto`, `--empty-after-removal note-only`, conservative request pacing, and `--max-results 5000`. You can still override individual options on the same command.
 - Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters. `audio-archive` also sets `--audio-mode video`.
 - The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
