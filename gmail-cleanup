@@ -2704,6 +2704,41 @@ def guess_mime_type_from_filename(filename: str) -> str:
     return guessed or "application/octet-stream"
 
 
+def sniff_image_mime_type(content_bytes: bytes) -> str | None:
+    if content_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content_bytes.startswith(b"RIFF") and content_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def extension_for_mime_type(mime_type: str) -> str:
+    return EXTENSION_OVERRIDES.get(mime_type) or mimetypes.guess_extension(mime_type) or ""
+
+
+def normalize_image_destination(
+    destination_name: str,
+    mime_type: str,
+    content_bytes: bytes,
+) -> tuple[str, str]:
+    actual_mime_type = sniff_image_mime_type(content_bytes)
+    if actual_mime_type is None:
+        return destination_name, mime_type
+    if not (mime_type.startswith("image/") or guess_mime_type_from_filename(destination_name).startswith("image/")):
+        return destination_name, mime_type
+    actual_extension = extension_for_mime_type(actual_mime_type)
+    if not actual_extension:
+        return destination_name, actual_mime_type
+    path = Path(destination_name)
+    if path.suffix.lower() == actual_extension:
+        return destination_name, actual_mime_type
+    return sanitize_filename(f"{path.stem}{actual_extension}"), actual_mime_type
+
+
 def build_pdf_page_search_token(base_search_token: str, page_number: int) -> str:
     return f"{base_search_token}-p{page_number:03d}"
 
@@ -2729,6 +2764,7 @@ def write_bytes_attachment(
     source_generation: str | None = None,
     source_page_number: int | None = None,
 ) -> WrittenAttachment:
+    destination_name, mime_type = normalize_image_destination(destination_name, mime_type, content_bytes)
     destination = matching_destination(message_dir, destination_name, content_bytes)
     if not destination.exists():
         destination.write_bytes(content_bytes)
@@ -4546,7 +4582,7 @@ def embed_marker_metadata(
         try:
             embed_marker_metadata_with_exiftool(exiftool_path, attachment, marker_text)
             log_progress(verbose, 3, f"Stamped metadata with exiftool for {attachment.filename}")
-        except RuntimeError:
+        except RuntimeError as exc:
             if attachment.source_generation in PDF_ORIGINAL_TRASH_GENERATIONS:
                 log_progress(
                     verbose,
@@ -4554,8 +4590,15 @@ def embed_marker_metadata(
                     f"Exiftool could not write metadata for original PDF {attachment.filename}; continuing before local Trash",
                 )
                 continue
+            if attachment.mime_type.startswith("image/"):
+                log_progress(
+                    verbose,
+                    2,
+                    f"Exiftool could not write metadata for image {attachment.filename}; continuing with filename and manifest markers: {exc}",
+                )
+                continue
             if not attachment.mime_type.startswith("video/"):
-                if not attachment.mime_type.startswith("image/") and attachment.mime_type != PDF_MIME_TYPE:
+                if attachment.mime_type != PDF_MIME_TYPE:
                     log_progress(
                         verbose,
                         2,

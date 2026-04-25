@@ -645,6 +645,42 @@ class GmailCleanupTest(unittest.TestCase):
         embed_with_exiftool.assert_called_once()
         embed_with_ffmpeg.assert_called_once()
 
+    def test_embed_marker_metadata_continues_on_image_write_failure(self) -> None:
+        attachment = self.gmail_cleanup.WrittenAttachment(
+            local_path=Path("/tmp/gcm-msg-1-01__photo.jpg"),
+            filename="gcm-msg-1-01__photo.jpg",
+            original_filename="photo.jpg",
+            search_token="gcm-msg-1-01",
+            mime_type="image/jpeg",
+            size_bytes=8,
+            sha256="abc123",
+            relative_path="msg-1/gcm-msg-1-01__photo.jpg",
+            disposition="attachment",
+            content_id=None,
+        )
+        plan = self.gmail_cleanup.plan_message(self.build_record())
+        with mock.patch.object(
+            self.gmail_cleanup,
+            "resolve_exiftool_path",
+            return_value="/usr/bin/exiftool",
+        ), mock.patch.object(
+            self.gmail_cleanup,
+            "embed_marker_metadata_with_exiftool",
+            side_effect=RuntimeError("not a valid image"),
+        ) as embed_with_exiftool, mock.patch.object(
+            self.gmail_cleanup,
+            "embed_marker_metadata_with_ffmpeg",
+        ) as embed_with_ffmpeg:
+            self.gmail_cleanup.embed_marker_metadata(
+                [attachment],
+                plan,
+                operation_id="op-123",
+                extracted_at=datetime(2026, 4, 24, 4, 15, tzinfo=timezone.utc),
+            )
+
+        embed_with_exiftool.assert_called_once()
+        embed_with_ffmpeg.assert_not_called()
+
     def test_matching_destination_reuses_existing_deterministic_backup_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
@@ -666,6 +702,27 @@ class GmailCleanupTest(unittest.TestCase):
             different = self.gmail_cleanup.matching_destination(directory, existing.name, b"OTHERDATA")
 
             self.assertEqual(different.name, "photo__2.jpg")
+
+    def test_write_bytes_attachment_normalizes_mislabeled_image_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir)
+            message_dir = backup_dir / "msg-1"
+            message_dir.mkdir()
+            written = self.gmail_cleanup.write_bytes_attachment(
+                backup_dir,
+                message_dir,
+                destination_name="gcm-msg-1-01__photo.png",
+                original_filename="photo.png",
+                search_token="gcm-msg-1-01",
+                mime_type="image/png",
+                content_bytes=b"\xff\xd8\xff\xe0JPEGDATA",
+                disposition="attachment",
+                content_id=None,
+            )
+
+        self.assertEqual(written.filename, "gcm-msg-1-01__photo.jpg")
+        self.assertEqual(written.mime_type, "image/jpeg")
+        self.assertEqual(written.relative_path, "msg-1/gcm-msg-1-01__photo.jpg")
 
     def test_parser_counts_verbose_flags(self) -> None:
         parser = self.gmail_cleanup.build_parser()
