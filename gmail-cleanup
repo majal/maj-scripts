@@ -61,6 +61,7 @@ DEFAULT_PDF_PASSWORD_FAMILY_FAIL_LIMIT_ENV = "GMAIL_CLEANUP_PDF_PASSWORD_FAMILY_
 DEFAULT_PDF_RENDER_DPI_ENV = "GMAIL_CLEANUP_PDF_RENDER_DPI"
 DEFAULT_PDF_RENDER_FORMAT_ENV = "GMAIL_CLEANUP_PDF_RENDER_FORMAT"
 DEFAULT_PDF_TEXT_MODE_ENV = "GMAIL_CLEANUP_PDF_TEXT_MODE"
+DEFAULT_AUDIO_MODE_ENV = "GMAIL_CLEANUP_AUDIO_MODE"
 DEFAULT_EMPTY_AFTER_REMOVAL_ENV = "GMAIL_CLEANUP_EMPTY_AFTER_REMOVAL"
 DEFAULT_REQUEST_PROFILE_ENV = "GMAIL_CLEANUP_REQUEST_PROFILE"
 DEFAULT_QUOTA_UNITS_PER_SECOND_ENV = "GMAIL_CLEANUP_QUOTA_UNITS_PER_SECOND"
@@ -125,6 +126,7 @@ VALID_PDF_PASSWORD_MODES = ("skip", "infer", "low-hanging")
 VALID_PDF_PASSWORD_FAILURE_ACTIONS = ("skip", "trash-original")
 VALID_PDF_RENDER_FORMATS = ("auto", "png", "jpg")
 VALID_PDF_TEXT_MODES = ("none", "native", "ocr", "auto")
+VALID_AUDIO_MODES = ("copy", "video", "video-plus-original")
 VALID_EMPTY_AFTER_REMOVAL_MODES = ("skip", "note-only")
 VALID_REQUEST_PROFILES = ("conservative", "moderate", "aggressive")
 VALID_PROGRESS_FORMATS = ("text", "jsonl")
@@ -275,6 +277,7 @@ ATTACHMENT_CLEANUP_PRESET_DEFAULTS = {
         "query": "has:attachment -in:trash -in:spam",
         "max_results": 50000,
         "types": "audio",
+        "audio_mode": "video",
         "request_profile": "conservative",
         "quota_units_per_second": 80.0,
     },
@@ -428,6 +431,7 @@ class ExtractionSettings:
     pdf_render_format: str
     pdf_text_mode: str
     empty_after_removal: str
+    audio_mode: str = "copy"
     before_year: int | None = None
     min_message_bytes: int = 0
     min_part_bytes: int = 0
@@ -620,6 +624,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     extract.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Write selected backup files and manifest records, but leave Gmail unchanged.",
+    )
+    extract.add_argument(
         "--types",
         default=None,
         help=(
@@ -732,6 +741,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     extract.add_argument(
+        "--audio-mode",
+        choices=VALID_AUDIO_MODES,
+        default=None,
+        help=(
+            "How audio attachments are saved: copy keeps the original audio file; "
+            "video writes a Google Photos-compatible MP4 with a still black frame; "
+            "video-plus-original writes both."
+        ),
+    )
+    extract.add_argument(
         "--empty-after-removal",
         choices=VALID_EMPTY_AFTER_REMOVAL_MODES,
         default=None,
@@ -824,6 +843,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--before-year", type=int, default=None, help="Only classify attachments from messages before this year.")
     report.add_argument("--min-message-bytes", type=int, default=None, help="Only count messages whose selected attachments total at least this many bytes.")
     report.add_argument("--min-part-bytes", type=int, default=None, help="Only count selected attachment parts at least this many bytes.")
+    report.add_argument("--audio-mode", choices=VALID_AUDIO_MODES, default=None, help="Audio backup output mode used by matching extract-media runs.")
     report.add_argument("--request-profile", choices=VALID_REQUEST_PROFILES, default=None, help="Inspection request profile.")
     report.add_argument("--quota-units-per-second", type=float, default=None, help="Target Gmail quota pacing.")
     report.add_argument("--json", action="store_true", help="Print the report as JSON.")
@@ -915,6 +935,7 @@ def default_extraction_settings() -> ExtractionSettings:
         pdf_render_format="auto",
         pdf_text_mode="none",
         empty_after_removal="skip",
+        audio_mode="copy",
     )
 
 
@@ -973,6 +994,7 @@ def build_extraction_settings(args: argparse.Namespace, config: dict[str, object
         pdf_render_format=resolve_pdf_render_format(getattr(args, "pdf_render_format", None), config, config_path),
         pdf_text_mode=resolve_pdf_text_mode(getattr(args, "pdf_text_mode", None), config, config_path),
         empty_after_removal=resolve_empty_after_removal(getattr(args, "empty_after_removal", None), config, config_path),
+        audio_mode=resolve_audio_mode(getattr(args, "audio_mode", None), config, config_path),
     )
 
 
@@ -1005,6 +1027,7 @@ def load_config(path: Path) -> dict[str, object]:
     allowed_keys = {
         "backup_dir",
         "audit_labels",
+        "audio_mode",
         "before_year",
         "credentials",
         "gmail_user",
@@ -1333,6 +1356,13 @@ def resolve_pdf_text_mode(explicit: str | None, config: dict[str, object], confi
     )
     if value not in VALID_PDF_TEXT_MODES:
         raise ValueError(f"Unsupported PDF text mode: {value}")
+    return value
+
+
+def resolve_audio_mode(explicit: str | None, config: dict[str, object], config_path: Path) -> str:
+    value = explicit or os.environ.get(DEFAULT_AUDIO_MODE_ENV) or config_string_value(config, "audio_mode", config_path) or "copy"
+    if value not in VALID_AUDIO_MODES:
+        raise ValueError(f"Unsupported audio mode: {value}")
     return value
 
 
@@ -2751,6 +2781,108 @@ def write_file_attachment(
     )
 
 
+def build_audio_video_filename(search_token: str, original_filename: str) -> str:
+    stem = sanitize_filename(Path(original_filename).stem or "audio")
+    return build_saved_filename(search_token, f"{stem}__audio-video.mp4")
+
+
+def convert_audio_to_video_file(
+    source_path: Path,
+    output_path: Path,
+    *,
+    original_filename: str,
+    search_token: str,
+    assume_yes: bool = False,
+) -> None:
+    ffmpeg_path = resolve_ffmpeg_path(assume_yes=assume_yes)
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=1280x720:r=1",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-shortest",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-tune",
+        "stillimage",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "256k",
+        "-movflags",
+        "+faststart",
+        "-metadata",
+        f"title={original_filename}",
+        "-metadata",
+        f"comment=gmail-cleanup marker {search_token}",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        raise RuntimeError(f"Failed to convert audio attachment {original_filename} to video: {detail}") from exc
+
+
+def write_audio_video_attachment(
+    backup_dir: Path,
+    message_dir: Path,
+    media_part: BufferedMediaPart,
+    *,
+    assume_yes: bool = False,
+) -> WrittenAttachment:
+    destination_name = build_audio_video_filename(media_part.search_token, media_part.filename)
+    destination = matching_destination(message_dir, destination_name, b"")
+    if not destination.exists():
+        suffix = attachment_extension(media_part.filename) or ".audio"
+        with tempfile.NamedTemporaryFile(
+            prefix="gmail-cleanup-audio-",
+            suffix=suffix,
+            dir=message_dir,
+            delete=False,
+        ) as handle:
+            source_path = Path(handle.name)
+            handle.write(media_part.content_bytes)
+        try:
+            convert_audio_to_video_file(
+                source_path,
+                destination,
+                original_filename=media_part.filename,
+                search_token=media_part.search_token,
+                assume_yes=assume_yes,
+            )
+        finally:
+            if source_path.exists():
+                source_path.unlink()
+    content_bytes = destination.read_bytes()
+    return WrittenAttachment(
+        local_path=destination,
+        filename=destination.name,
+        original_filename=media_part.filename,
+        search_token=media_part.search_token,
+        mime_type="video/mp4",
+        size_bytes=len(content_bytes),
+        sha256=hashlib.sha256(content_bytes).hexdigest(),
+        relative_path=str(destination.relative_to(backup_dir)),
+        disposition=media_part.disposition,
+        content_id=media_part.content_id,
+        source_attachment_mime_type=media_part.mime_type,
+        source_generation="audio-video",
+    )
+
+
 def resolve_pdfimages_path(*, assume_yes: bool = False) -> str:
     return ensure_system_tool("pdfimages", "poppler", "to extract images from PDFs", assume_yes=assume_yes)
 
@@ -4091,6 +4223,17 @@ def write_backup_files(
             written.extend(pdf_written)
             pdf_text_blocks.extend(pdf_text)
             continue
+        if media_part.mime_type.startswith("audio/") and settings.audio_mode in {"video", "video-plus-original"}:
+            written.append(
+                write_audio_video_attachment(
+                    backup_dir,
+                    message_dir,
+                    media_part,
+                    assume_yes=assume_yes,
+                )
+            )
+            if settings.audio_mode == "video":
+                continue
         written.append(
             write_bytes_attachment(
                 backup_dir,
@@ -4481,6 +4624,17 @@ def completed_manifest_records_by_original_id(backup_dir: Path) -> dict[str, dic
     return completed
 
 
+def exported_manifest_records_by_original_id(backup_dir: Path) -> dict[str, dict[str, object]]:
+    completed: dict[str, dict[str, object]] = {}
+    for record in read_jsonl_records(backup_dir / "manifest.jsonl"):
+        if record.get("action") != "export_attachments":
+            continue
+        original_message_id = record.get("original_message_id")
+        if isinstance(original_message_id, str):
+            completed[original_message_id] = record
+    return completed
+
+
 def append_completed_manifest_record(backup_dir: Path, record: dict[str, object]) -> dict[str, object]:
     original_message_id = record.get("original_message_id")
     if isinstance(original_message_id, str):
@@ -4491,8 +4645,19 @@ def append_completed_manifest_record(backup_dir: Path, record: dict[str, object]
     return record
 
 
+def append_export_manifest_record(backup_dir: Path, record: dict[str, object]) -> dict[str, object]:
+    original_message_id = record.get("original_message_id")
+    if isinstance(original_message_id, str):
+        existing = exported_manifest_records_by_original_id(backup_dir).get(original_message_id)
+        if existing is not None:
+            return existing
+    append_manifest_record(backup_dir / "manifest.jsonl", record)
+    return record
+
+
 def settings_checkpoint_payload(settings: ExtractionSettings) -> dict[str, object]:
     return {
+        "audio_mode": settings.audio_mode,
         "attachment_types": list(settings.attachment_types),
         "before_year": settings.before_year,
         "empty_after_removal": settings.empty_after_removal,
@@ -4752,6 +4917,55 @@ def execute_message_plan(
     return append_completed_manifest_record(backup_dir, manifest_record)
 
 
+def export_message_plan(
+    plan: PlannedMessage,
+    backup_dir: Path,
+    query: str,
+    settings: ExtractionSettings,
+    verbose: int = 0,
+    *,
+    assume_yes: bool = False,
+) -> dict[str, object]:
+    exported_at = datetime.now(timezone.utc)
+    operation_id = f"{exported_at.strftime('%Y%m%dT%H%M%SZ')}-{plan.message_id}-export"
+    backup_folder_name = plan.message_id
+    message = parse_email_message(plan.raw_bytes)
+    buffered = collect_buffered_media(message, plan)
+    _, written, pdf_text_blocks = write_backup_files(
+        backup_dir,
+        plan,
+        backup_folder_name,
+        buffered,
+        settings,
+        verbose=verbose,
+        assume_yes=assume_yes,
+    )
+    del pdf_text_blocks
+    log_progress(
+        verbose,
+        2,
+        f"Exported {len(written)} backup file(s) for {plan.message_id} into {backup_folder_name}/",
+    )
+    embed_marker_metadata(written, plan, operation_id, exported_at, verbose=verbose, assume_yes=assume_yes)
+    trash_written_attachments_marked_for_trash(written, verbose=verbose, assume_yes=assume_yes)
+    manifest_record = {
+        "action": "export_attachments",
+        "attachments": [written_attachment_to_dict(item) for item in written],
+        "backup_dir": str(backup_dir),
+        "gmail_modified": False,
+        "message_backup_folder": backup_folder_name,
+        "operation_id": operation_id,
+        "original_message_id": plan.message_id,
+        "query": query,
+        "sender": plan.sender,
+        "settings": settings_checkpoint_payload(settings),
+        "subject": plan.subject,
+        "thread_id": plan.thread_id,
+        "exported_at": exported_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    }
+    return append_export_manifest_record(backup_dir, manifest_record)
+
+
 def written_attachment_to_dict(item: WrittenAttachment) -> dict[str, object]:
     return {
         "filename": item.filename,
@@ -4926,6 +5140,22 @@ def render_summary(summary: dict[str, object]) -> str:
                 f"  - {item['original_message_id']} -> {item['new_message_id']} "
                 f"({len(item['attachments'])} file(s), {item['message_backup_folder']}/)"
             )
+    exported = summary.get("exported", [])
+    if exported:
+        lines.append(f"Exported messages: {len(exported)}")
+        for item in exported:
+            lines.append(
+                f"  - {item['original_message_id']} "
+                f"({len(item.get('attachments', []))} file(s), {item['message_backup_folder']}/)"
+            )
+    resumed_exported = summary.get("resumed_exported", [])
+    if resumed_exported:
+        lines.append(f"Previously exported messages skipped by resume: {len(resumed_exported)}")
+        for item in resumed_exported:
+            lines.append(
+                f"  - {item['original_message_id']} "
+                f"({len(item.get('attachments', []))} file(s), {item['message_backup_folder']}/)"
+            )
     resumed = summary.get("resumed_applied", [])
     if resumed:
         lines.append(f"Previously applied messages skipped by resume: {len(resumed)}")
@@ -4976,7 +5206,7 @@ class GmailIndex:
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser()
         private_parent(self.path)
-        self.connection = sqlite3.connect(str(self.path))
+        self.connection = sqlite3.connect(str(self.path), check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.ensure_schema()
         if not sys.platform.startswith("win"):
@@ -5299,6 +5529,39 @@ class IndexedGmailClient:
 
     def modify_message_labels(self, message_id: str, add_label_ids: tuple[str, ...]) -> None:
         self.delegate.modify_message_labels(message_id, add_label_ids)
+
+
+class IndexOnlyGmailClient:
+    def __init__(self, index: GmailIndex) -> None:
+        self.index = index
+
+    def list_message_ids(self, query: str, max_results: int) -> list[str]:
+        if not self.index.query_is_cached(query, max_results):
+            raise RuntimeError(
+                "Local index does not contain enough cached messages for this query and limit. "
+                "Run `gmail-cleanup index build` first, or omit --use-index so Gmail can be queried."
+            )
+        return self.index.query_message_ids(query, max_results)
+
+    def get_message_raw(self, message_id: str) -> GmailMessageRecord:
+        record = self.index.get_message(message_id)
+        if record is None:
+            raise RuntimeError(f"Local index is missing raw message: {message_id}")
+        return record
+
+    def get_message_raw_many(self, message_ids, *, batch_size: int, max_inflight: int):
+        del batch_size, max_inflight
+        records: list[GmailMessageRecord] = []
+        missing: list[str] = []
+        for message_id in message_ids:
+            record = self.index.get_message(message_id)
+            if record is None:
+                missing.append(message_id)
+            else:
+                records.append(record)
+        if missing:
+            raise RuntimeError(f"Local index is missing {len(missing)} raw message(s): {', '.join(missing[:5])}")
+        return records
 
 
 def run_index_build(
@@ -6023,29 +6286,39 @@ def run_extract_media(
     assume_yes: bool = False,
     resume: bool = True,
     audit_label_settings: AuditLabelSettings | None = None,
+    export_only: bool = False,
 ) -> dict[str, object]:
     if max_results < 1:
         raise ValueError("--max-results must be 1 or greater")
+    if apply_mode and export_only:
+        raise ValueError("--apply and --export-only cannot be used together")
     reporter = ProgressReporter(verbose=verbose, progress_format=progress_format)
+    run_mode = "apply" if apply_mode else "export-only" if export_only else "dry-run"
     reporter.log_event(
         1,
         f"Preparing Gmail search with query {query!r} (max_results={max_results})",
         "run_started",
         query=query,
         max_results=max_results,
-        mode="apply" if apply_mode else "dry-run",
+        mode=run_mode,
         request_profile=request_profile,
     )
     inspection_state = InspectionState()
     applied: list[dict[str, object]] = []
+    exported: list[dict[str, object]] = []
     resumed_applied: list[dict[str, object]] = []
+    resumed_exported: list[dict[str, object]] = []
     runtime_skipped: list[PlannedMessage] = []
     completed_records: dict[str, dict[str, object]] = {}
+    exported_records: dict[str, dict[str, object]] = {}
     queued_resume_ids: list[str] = []
-    if apply_mode:
+    if apply_mode or export_only:
         backup_dir.mkdir(parents=True, exist_ok=True)
+    if apply_mode:
         completed_records = completed_manifest_records_by_original_id(backup_dir) if resume else {}
         queued_resume_ids = queued_message_ids_for_resume(backup_dir, query, max_results, settings, completed_records) if resume else []
+    if export_only:
+        exported_records = exported_manifest_records_by_original_id(backup_dir) if resume else {}
     audit_labels = resolve_audit_labels(client, audit_label_settings, apply_mode=apply_mode)
     if queued_resume_ids:
         message_ids = queued_resume_ids
@@ -6072,12 +6345,13 @@ def run_extract_media(
             query=query,
             matched_messages=len(message_ids),
         )
-    if apply_mode:
+    if apply_mode or export_only:
         plan_queue: queue.Queue[PlannedMessage | object] = queue.Queue(maxsize=APPLY_PLAN_QUEUE_DEPTH)
+        apply_queue_context = (backup_dir, query, max_results) if apply_mode else None
         inspection_thread = threading.Thread(
             target=inspect_matching_messages,
             args=(client, message_ids, settings, reporter, request_profile, inspection_state),
-            kwargs={"plan_queue": plan_queue, "apply_queue_context": (backup_dir, query, max_results)},
+            kwargs={"plan_queue": plan_queue, "apply_queue_context": apply_queue_context},
             daemon=True,
         )
         inspection_thread.start()
@@ -6086,6 +6360,58 @@ def run_extract_media(
             if queued_item is PLAN_QUEUE_SENTINEL:
                 break
             plan = queued_item
+            if export_only:
+                completed_record = exported_records.get(plan.message_id)
+                if completed_record is not None:
+                    resumed_exported.append(completed_record)
+                    reporter.log_event(
+                        1,
+                        f"Already exported {plan.message_id}; skipping from manifest resume state",
+                        "export_resume_skipped",
+                        message_id=plan.message_id,
+                    )
+                    continue
+                index = len(exported) + len(runtime_skipped) + len(resumed_exported) + 1
+                total_hint = max(index, len(inspection_state.planned))
+                reporter.log_event(
+                    1,
+                    f"Exporting {index}/{total_hint} {plan.message_id} with {len(plan.media_parts)} attachment part(s)",
+                    "export_started",
+                    index=index,
+                    total=total_hint,
+                    message_id=plan.message_id,
+                    total_known=not inspection_thread.is_alive(),
+                )
+                try:
+                    exported_record = export_message_plan(
+                        plan,
+                        backup_dir,
+                        query,
+                        settings,
+                        verbose=verbose,
+                        assume_yes=assume_yes,
+                    )
+                except SkippableMessageError as exc:
+                    skipped_plan = replace(plan, skip_reason=str(exc))
+                    runtime_skipped.append(skipped_plan)
+                    reporter.log_event(
+                        1,
+                        f"Skipped {plan.message_id} [{exc}]",
+                        "export_skipped",
+                        message_id=plan.message_id,
+                        reason=str(exc),
+                    )
+                    continue
+                exported.append(exported_record)
+                reporter.log_event(
+                    1,
+                    f"Exported {index}/{total_hint} {plan.message_id}",
+                    "export_completed",
+                    index=index,
+                    total=total_hint,
+                    message_id=plan.message_id,
+                )
+                continue
             completed_record = completed_records.get(plan.message_id)
             if completed_record is not None:
                 resumed_applied.append(completed_record)
@@ -6155,7 +6481,11 @@ def run_extract_media(
         planned = [plan for plan in planned if plan.message_id not in skipped_ids]
     if apply_mode and skipped:
         apply_review_label_to_skipped(client, skipped, audit_labels, verbose=verbose)
-    summary = summarize_run(query, backup_dir, message_ids, planned, skipped, applied, apply_mode)
+    summary = summarize_run(query, backup_dir, message_ids, planned, skipped, applied if apply_mode else [], apply_mode)
+    if export_only:
+        summary["mode"] = "export-only"
+    summary["exported"] = exported
+    summary["resumed_exported"] = resumed_exported
     summary["resumed_applied"] = resumed_applied
     summary["audit_labels"] = {
         "processed": audit_labels.processed_name,
@@ -6164,7 +6494,9 @@ def run_extract_media(
     reporter.event(
         "run_completed",
         applied=len(applied),
+        exported=len(exported),
         resumed=len(resumed_applied),
+        resumed_exported=len(resumed_exported),
         skipped=len(skipped),
         candidate_messages=summary["candidate_messages"],
         matched_messages=summary["matched_messages"],
@@ -6274,9 +6606,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "extract-media":
             query = resolve_query(args.query)
-            credentials_path = resolve_credentials_path(args.credentials, config, config_path)
-            token_cache_path = resolve_token_cache_path(args.token_cache, config, config_path)
-            gmail_user = resolve_gmail_user(args.gmail_user, config, config_path)
+            index_only_export = bool(args.use_index and args.export_only)
+            credentials_path = None if index_only_export else resolve_credentials_path(args.credentials, config, config_path)
+            token_cache_path = None if index_only_export else resolve_token_cache_path(args.token_cache, config, config_path)
+            gmail_user = None if index_only_export else resolve_gmail_user(args.gmail_user, config, config_path)
             max_results = resolve_max_results(args.max_results, config, config_path)
             settings = build_extraction_settings(args, config, config_path)
             request_profile = resolve_request_profile(args.request_profile, config, config_path)
@@ -6289,17 +6622,22 @@ def main(argv: list[str] | None = None) -> int:
             backup_dir = resolve_backup_dir(args.backup_dir, config, config_path).expanduser()
             progress_format = resolve_progress_format(args.progress_format, config, config_path)
             audit_label_settings = resolve_audit_label_settings(args, config, config_path)
-            scopes = APPLY_SCOPES if args.apply else (READONLY_SCOPE,)
-            client = build_gmail_client(
-                credentials_path,
-                token_cache_path,
-                scopes,
-                gmail_user,
-                assume_yes=args.yes,
-                quota_units_per_second=quota_units_per_second,
-            )
-            if args.use_index:
-                client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
+            if args.apply and args.export_only:
+                raise ValueError("--apply and --export-only cannot be used together")
+            if args.use_index and args.export_only:
+                client = IndexOnlyGmailClient(GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
+            else:
+                scopes = APPLY_SCOPES if args.apply else (READONLY_SCOPE,)
+                client = build_gmail_client(
+                    credentials_path,
+                    token_cache_path,
+                    scopes,
+                    gmail_user or "me",
+                    assume_yes=args.yes,
+                    quota_units_per_second=quota_units_per_second,
+                )
+                if args.use_index:
+                    client = IndexedGmailClient(client, GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
             summary = run_extract_media(
                 client,
                 query,
@@ -6313,6 +6651,7 @@ def main(argv: list[str] | None = None) -> int:
                 assume_yes=args.yes,
                 resume=not args.no_resume,
                 audit_label_settings=audit_label_settings,
+                export_only=args.export_only,
             )
         else:
             parser.print_help()

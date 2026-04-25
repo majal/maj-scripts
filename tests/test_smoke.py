@@ -40,6 +40,8 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("--apply", result.stdout)
         self.assertIn("--preset", result.stdout)
         self.assertIn("--min-message-bytes", result.stdout)
+        self.assertIn("--export-only", result.stdout)
+        self.assertIn("--audio-mode", result.stdout)
 
         report = self.run_script("gmail-cleanup", "report", "--help")
         self.assertEqual(report.returncode, 0, report.stderr)

@@ -188,6 +188,7 @@ types = ["image", "video"]
 # pdf_render_format = "auto"
 # pdf_render_dpi = 300
 # pdf_text_mode = "none"
+# audio_mode = "copy"
 # empty_after_removal = "skip"
 # request_profile = "moderate"
 # quota_units_per_second = 125
@@ -320,6 +321,12 @@ gmail-cleanup report --preset audio-archive --use-index
 gmail-cleanup report --preset old-media --use-index
 ```
 
+Export audio attachments as MP4 videos into the backup folder without changing Gmail. This is useful when a phone-based Google Photos workflow only uploads photo/video file types:
+
+```bash
+gmail-cleanup extract-media --preset audio-archive --backup-dir /path/to/local-backup --use-index --export-only -v
+```
+
 Use the index during apply. Gmail writes still go to Gmail, but cached message reads come from the local index when present:
 
 ```bash
@@ -444,11 +451,13 @@ Agent-friendly review artifacts are written as JSONL too:
 
 #### Important Behavior / Defaults
 
-- The default mode is a dry run. Nothing in Gmail or on disk changes unless you pass `--apply`.
+- The default mode is a dry run. Nothing in Gmail or on disk changes unless you pass `--apply` or `--export-only`.
+- `--export-only` writes selected files and manifest records to the backup folder but leaves Gmail unchanged.
 - `--preset pdf-archive` expands to `filename:pdf -in:trash -in:spam`, `--types pdf`, `--pdf-mode auto`, `--pdf-original trash`, `--pdf-password-mode low-hanging`, `--pdf-password-failure-action trash-original`, `--pdf-text-mode auto`, `--empty-after-removal note-only`, conservative request pacing, and `--max-results 5000`. You can still override individual options on the same command.
-- Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters.
+- Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters. `audio-archive` also sets `--audio-mode video`.
 - The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
 - `--before-year`, `--min-message-bytes`, and `--min-part-bytes` are local filters applied after messages are inspected or loaded from the index. They are useful when you want repeated cleanup passes without changing the Gmail query.
+- `--audio-mode copy` keeps original audio files. `video` writes an MP4 with a still black frame and AAC audio for Google Photos-style video backup flows. `video-plus-original` writes both.
 - `gmail-cleanup report` uses the same query, preset, and extraction settings as `extract-media`, but only lists and classifies matched messages. It is useful after a run to separate real remaining work from Gmail search false positives.
 - `gmail-cleanup doctor` does not call Gmail. It checks local config paths, token scopes, Python imports, external tools, and trash support so humans and agents can see what is ready before a long run.
 - `--audit-labels` creates or reuses `gmail-cleanup/processed` and `gmail-cleanup/review`. `--label-processed` and `--label-review` let you set explicit labels without enabling both defaults.

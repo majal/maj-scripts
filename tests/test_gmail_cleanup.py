@@ -842,6 +842,78 @@ class GmailCleanupTest(unittest.TestCase):
             ["letter.docx", "bundle.zip", "song.mp3", "script.js"],
         )
 
+    def test_audio_mode_video_writes_mp4_video_artifact(self) -> None:
+        message = EmailMessage()
+        message["Subject"] = "Audio"
+        message["From"] = "sender@example.com"
+        message["To"] = "maj@example.com"
+        message.set_content("Audio attached.")
+        message.add_attachment(b"MP3DATA", maintype="audio", subtype="mpeg", filename="song.mp3")
+        record = self.gmail_cleanup.GmailMessageRecord(
+            message_id="audio-1",
+            thread_id="thread-audio",
+            label_ids=("INBOX",),
+            raw_bytes=message.as_bytes(),
+        )
+        settings = self.gmail_cleanup.replace(
+            self.default_settings(),
+            attachment_types=("audio",),
+            audio_mode="video",
+        )
+        plan = self.gmail_cleanup.plan_message(record, settings)
+        buffered = self.gmail_cleanup.collect_buffered_media(self.gmail_cleanup.parse_email_message(record.raw_bytes), plan)
+
+        def fake_run(command, **kwargs):
+            del kwargs
+            Path(command[-1]).write_bytes(b"MP4DATA")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            self.gmail_cleanup,
+            "resolve_ffmpeg_path",
+            return_value="ffmpeg",
+        ), mock.patch.object(self.gmail_cleanup.subprocess, "run", side_effect=fake_run) as run:
+            _, written, _ = self.gmail_cleanup.write_backup_files(
+                Path(tmpdir),
+                plan,
+                plan.message_id,
+                buffered,
+                settings,
+                assume_yes=True,
+            )
+
+        self.assertEqual(len(written), 1)
+        self.assertEqual(written[0].mime_type, "video/mp4")
+        self.assertEqual(written[0].source_attachment_mime_type, "audio/mpeg")
+        self.assertEqual(written[0].source_generation, "audio-video")
+        self.assertEqual(written[0].filename, "gcm-audio-1-01__song__audio-video.mp4")
+        command = run.call_args.args[0]
+        self.assertIn("-c:a", command)
+        self.assertIn("aac", command)
+
+    def test_export_only_writes_backup_without_changing_gmail(self) -> None:
+        client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1")])
+
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(self.gmail_cleanup, "embed_marker_metadata"):
+            summary = self.gmail_cleanup.run_extract_media(
+                client,
+                "has:attachment -in:trash -in:spam",
+                Path(tmpdir),
+                25,
+                False,
+                self.default_settings(),
+                request_profile="conservative",
+                export_only=True,
+            )
+            records = self.gmail_cleanup.read_jsonl_records(Path(tmpdir) / "manifest.jsonl")
+
+        self.assertEqual(summary["mode"], "export-only")
+        self.assertEqual(len(summary["exported"]), 1)
+        self.assertEqual(client.inserted, [])
+        self.assertEqual(client.trashed, [])
+        self.assertEqual(records[0]["action"], "export_attachments")
+        self.assertFalse(records[0]["gmail_modified"])
+
     def test_large_media_preset_filters_by_selected_message_bytes(self) -> None:
         parser = self.gmail_cleanup.build_parser()
         args = parser.parse_args(["report", "--preset", "large-media"])
