@@ -158,6 +158,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - Prefer `## Your Local Setup` over separate top-level setup and launcher sections.
 - In the main README TOC, prefer top-level setup topics like `Friendly Launchers`, `Python`, `Git`, and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.
+- For long script sections, a local mini TOC may be placed immediately after the script description. Keep those links inside the script section and do not add them to the main README TOC.
 - The `## Scripts` section should appear before Your Local Setup.
 - Use `↑ TOC` for major sections and primary subsections, not every nested platform subsection.
 - When a primary subsection contains nested subsections, place its `↑ TOC` at the end of the last nested subsection, not before the nested content starts.

@@ -35,6 +35,20 @@ If you're just here to use a script, start here. This README is the friendly map
 
 `gmail-cleanup` is a local-first Gmail attachment cleanup CLI.
 
+Quick links inside this script section:
+
+- [What it does](#gmail-cleanup-what-it-does)
+- [Supported platforms](#gmail-cleanup-supported-platforms)
+- [Dependencies](#gmail-cleanup-dependencies)
+- [Install / first run](#gmail-cleanup-install--first-run-summary)
+- [Personal OAuth setup](#gmail-cleanup-personal-oauth-setup-step-by-step)
+- [Advanced Protection note](#gmail-cleanup-advanced-protection-note)
+- [Common usage examples](#gmail-cleanup-common-usage-examples)
+- [Important behavior / defaults](#gmail-cleanup-important-behavior--defaults)
+- [Notes / caveats](#gmail-cleanup-notes--caveats)
+
+<a id="gmail-cleanup-what-it-does"></a>
+
 #### What It Does
 
 - searches Gmail with a normal Gmail query
@@ -51,6 +65,8 @@ If you're just here to use a script, start here. This README is the friendly map
 - can run a local `doctor` check for OAuth, Python modules, PDF tools, OCR tools, and password backends
 - moves the original message to Gmail Trash after the modified copy is inserted
 
+<a id="gmail-cleanup-supported-platforms"></a>
+
 #### Supported Platforms
 
 - macOS
@@ -58,6 +74,8 @@ If you're just here to use a script, start here. This README is the friendly map
 - Windows
 
 OAuth sign-in opens a local browser flow.
+
+<a id="gmail-cleanup-dependencies"></a>
 
 #### Dependencies
 
@@ -84,6 +102,8 @@ System tools used on demand:
 
 When a required dependency is missing, `gmail-cleanup` can suggest an install command and offer to run it. Use `-y` to auto-accept those prompts.
 
+<a id="gmail-cleanup-install--first-run-summary"></a>
+
 #### Install / First Run Summary
 
 1. Create or reuse a Google Cloud project for this tool.
@@ -108,6 +128,8 @@ Point the script at the downloaded desktop OAuth client JSON:
 ```bash
 export GMAIL_CLEANUP_OAUTH_CLIENT_SECRET=/path/to/client-secret.json
 ```
+
+<a id="gmail-cleanup-personal-oauth-setup-step-by-step"></a>
 
 #### Personal OAuth Setup, Step by Step
 
@@ -159,6 +181,8 @@ If you ever want to rotate or revoke access:
 - delete the local token cache file
 - remove the app from your Google Account third-party access page
 - rerun a dry run to approve access again
+
+<a id="gmail-cleanup-advanced-protection-note"></a>
 
 #### Advanced Protection Note
 
@@ -212,125 +236,48 @@ Start with a dry run. The first successful sign-in will open a local browser OAu
 gmail-cleanup extract-media --query 'has:attachment' --backup-dir /path/to/local-backup
 ```
 
+<a id="gmail-cleanup-common-usage-examples"></a>
+
 #### Common Usage Examples
 
-Preview which image and video attachments would be extracted:
+Preview and then apply media cleanup:
 
 ```bash
 gmail-cleanup extract-media --query 'has:attachment older_than:365d' --backup-dir /path/to/local-backup
-```
-
-Actually back up media files, rewrite the kept Gmail copy, and trash the original:
-
-```bash
 gmail-cleanup extract-media --query 'has:attachment larger:5M' --backup-dir /path/to/local-backup --apply
 ```
 
-Include PDFs and turn them into page images, preferring direct page-image extraction for scanned PDFs and trashing the staged local PDF afterward:
-
-```bash
-gmail-cleanup extract-media --query 'has:attachment older_than:365d larger:5M' --types image,video,pdf --pdf-mode auto --pdf-original trash --apply -v
-```
-
-Include PDFs, delegate low-hanging weak password recovery to any detected external backend, keep native PDF text in the cleaned email, and record unresolved passworded PDFs for manual review:
-
-```bash
-gmail-cleanup extract-media --query 'filename:pdf' --types pdf --pdf-mode auto --pdf-original trash --pdf-password-mode low-hanging --pdf-password-date-range 1930-2035 --pdf-text-mode native --max-results 5000 --apply -v
-```
-
-Run the full PDF archive cycle against non-Trash/non-Spam mail: convert or extract PDF pages to images, retain searchable text when possible, remove the Gmail PDF attachments, move staged local originals to OS Trash, and remove unopened passworded PDFs too after leaving a note:
-
-```bash
-gmail-cleanup extract-media \
-  --query 'filename:pdf -in:trash -in:spam' \
-  --backup-dir /path/to/local-backup \
-  --max-results 5000 \
-  --types pdf \
-  --pdf-mode auto \
-  --pdf-original trash \
-  --pdf-password-mode low-hanging \
-  --pdf-password-failure-action trash-original \
-  --pdf-password-date-range 1930-2035 \
-  --pdf-text-mode auto \
-  --empty-after-removal note-only \
-  --request-profile conservative \
-  --quota-units-per-second 80 \
-  --apply \
-  -v
-```
-
-The same PDF archive cycle is available as a preset so humans and agents do not need to retype the long option list:
-
-```bash
-gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --apply -v
-```
-
-Apply Gmail audit labels while running the preset. Cleaned replacement messages get the processed label; skipped originals get the review label:
-
-```bash
-gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --audit-labels --apply -v
-```
-
-Use custom audit label names:
-
-```bash
-gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --label-processed 'gmail-cleanup/done' --label-review 'gmail-cleanup/manual-review' --apply
-```
-
-Report what still matches the PDF preset without changing Gmail:
+Run the PDF archive preset. The preset expands to the longer PDF options listed under [Important behavior / defaults](#gmail-cleanup-important-behavior--defaults):
 
 ```bash
 gmail-cleanup report --preset pdf-archive
+gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --apply -v
+gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --audit-labels --apply -v
 ```
 
-Build a private local index for the same PDF archive query. This caches the Gmail match order plus compressed raw MIME, parsed headers, labels, attachment filenames, and hashes under the OS-local state directory:
+Build and reuse a private local index so repeated reports read cached messages locally:
 
 ```bash
 gmail-cleanup index build --preset pdf-archive -v
-```
-
-Check index size and cached queries:
-
-```bash
 gmail-cleanup index stats
-```
-
-Analyze the cached index locally to see cleanup opportunities by selector, extension, MIME type, duplicate payloads, sender domain, and year:
-
-```bash
 gmail-cleanup index analyze --query 'has:attachment -in:trash -in:spam'
-```
-
-Use the index for a later report so cached messages are read locally instead of downloaded again:
-
-```bash
 gmail-cleanup report --preset pdf-archive --use-index
 ```
 
-Report the next high-value cleanup pass from the cache. `large-media` means image/video messages whose selected media total at least 1,000,000 bytes:
+Try the non-PDF cleanup presets from the local index:
 
 ```bash
 gmail-cleanup report --preset large-media --use-index
-```
-
-Other cached cleanup presets target common non-media attachment families:
-
-```bash
 gmail-cleanup report --preset office-docs --use-index
 gmail-cleanup report --preset archives --use-index
 gmail-cleanup report --preset audio-archive --use-index
 gmail-cleanup report --preset old-media --use-index
 ```
 
-Export audio attachments as MP4 videos into the backup folder without changing Gmail. This is useful when a phone-based Google Photos workflow only uploads photo/video file types:
+Export audio attachments as MP4 videos without changing Gmail, then report local manifest status offline:
 
 ```bash
 gmail-cleanup extract-media --preset audio-archive --backup-dir /path/to/local-backup --use-index --export-only -v
-```
-
-Report the same preset with local manifest status. This separates pending backup work, files already exported locally, and messages already synced back to Gmail:
-
-```bash
 gmail-cleanup report --preset audio-archive --backup-dir /path/to/local-backup --use-index --offline
 ```
 
@@ -338,116 +285,33 @@ Use the index during apply. Gmail writes still go to Gmail, but cached message r
 
 ```bash
 gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
-```
-
-Apply one of the non-PDF presets after reviewing its report. Non-image, non-video, and non-PDF metadata stamping is best-effort, so the Gmail note, saved filename, and manifest are the durable markers for office/archive/audio files:
-
-```bash
 gmail-cleanup extract-media --preset large-media --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
 ```
 
-Run a local setup check:
-
-```bash
-gmail-cleanup doctor
-```
-
-Use the same cycle from an agent or unattended runner, with structured progress on stderr and a JSON final summary on stdout:
-
-```bash
-gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --progress-format jsonl --json --apply
-```
-
-Ask an agent for a machine-readable remaining-work report:
-
-```bash
-gmail-cleanup report --preset pdf-archive --json
-```
-
-Ask an agent to build the reusable local index with structured progress:
-
-```bash
-gmail-cleanup index build --preset pdf-archive --progress-format jsonl --json -v
-```
-
-Ask an agent to summarize cached cleanup opportunities without calling Gmail:
-
-```bash
-gmail-cleanup index analyze --query 'has:attachment -in:trash -in:spam' --json
-```
-
-Ask an agent for machine-readable local setup diagnostics:
-
-```bash
-gmail-cleanup doctor --json
-```
-
-Include PDFs but keep the original PDF as the backup artifact instead of deriving page images:
+Use PDF variants when you need a one-off behavior instead of the preset default:
 
 ```bash
 gmail-cleanup extract-media --query 'filename:pdf older_than:365d' --types pdf --pdf-mode backup --apply
-```
-
-Force rendered PDF pages as PNG at 300 DPI:
-
-```bash
 gmail-cleanup extract-media --query 'filename:pdf' --types pdf --pdf-mode render-pages --pdf-render-format png --pdf-render-dpi 300 --apply
-```
-
-When removing attachments would otherwise leave an empty email, keep a searchable note-only replacement instead of skipping it:
-
-```bash
 gmail-cleanup extract-media --query 'filename:pdf' --types pdf --empty-after-removal note-only --apply
 ```
 
-Show per-message progress during a long apply run:
+Run setup diagnostics and machine-readable agent flows:
 
 ```bash
-gmail-cleanup extract-media --query 'has:attachment larger:5M' --backup-dir /path/to/local-backup --apply -v
+gmail-cleanup doctor
+gmail-cleanup doctor --json
+gmail-cleanup report --preset pdf-archive --json
+gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-backup --progress-format jsonl --json --apply
 ```
 
-Inspect more than 500 matches by giving a larger limit; the Gmail API paging is handled for you:
-
-```bash
-gmail-cleanup extract-media --query 'filename:pdf' --types pdf --max-results 5000
-```
-
-Increase detail for file-level and inspection-level progress:
-
-```bash
-gmail-cleanup extract-media --query 'has:attachment larger:5M' --backup-dir /path/to/local-backup --apply -vv
-gmail-cleanup extract-media --query 'has:attachment larger:5M' --backup-dir /path/to/local-backup --apply -vvv
-```
-
-Emit structured JSONL progress on stderr for agents or unattended runs:
-
-```bash
-gmail-cleanup extract-media --query 'filename:pdf' --types pdf --progress-format jsonl --json
-```
-
-Use a different inspection profile when you want to trade speed for fewer Gmail concurrency errors:
-
-```bash
-gmail-cleanup extract-media --query 'filename:pdf' --types pdf --request-profile conservative --max-results 5000
-gmail-cleanup extract-media --query 'filename:pdf' --types pdf --request-profile aggressive --quota-units-per-second 175 --max-results 5000
-```
-
-Auto-accept dependency install prompts during a local run:
-
-```bash
-gmail-cleanup extract-media --query 'has:attachment' --apply -y
-```
-
-Limit the inspection pass while you test a query:
+Tune long or experimental runs:
 
 ```bash
 gmail-cleanup extract-media --query 'label:inbox has:attachment' --backup-dir /path/to/local-backup --max-results 10
-```
-
-Write the final summary as JSON:
-
-```bash
-gmail-cleanup extract-media --query 'has:attachment filename:jpg' --backup-dir /path/to/local-backup --json
+gmail-cleanup extract-media --query 'filename:pdf' --types pdf --max-results 5000 --request-profile conservative
+gmail-cleanup extract-media --query 'has:attachment larger:5M' --backup-dir /path/to/local-backup --apply -vv
+gmail-cleanup extract-media --query 'has:attachment' --apply -y
 ```
 
 Agent-friendly review artifacts are written as JSONL too:
@@ -455,6 +319,8 @@ Agent-friendly review artifacts are written as JSONL too:
 - `manifest.jsonl` for applied messages
 - `apply-queue.jsonl` for the planned apply queue, so interrupted runs can resume without listing the whole Gmail query again
 - `passworded-pdfs.jsonl` for passworded PDFs that were left unchanged for manual review
+
+<a id="gmail-cleanup-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
@@ -503,6 +369,8 @@ Agent-friendly review artifacts are written as JSONL too:
 - `-y` auto-accepts dependency install prompts.
 - Local-only defaults can live in `~/.config/maj-scripts/gmail-cleanup/config.toml` on Linux, with equivalent OS-local paths on macOS and Windows.
 - External password backend preference order is: `john` plus `pdf2john`, then `pdfcrack`, then `qpdf`, then the built-in fallback checker.
+
+<a id="gmail-cleanup-notes--caveats"></a>
 
 #### Notes / Caveats
 
@@ -704,6 +572,18 @@ wh help
 
 `whisper` is a self-bootstrapping subtitle and transcription CLI.
 
+Quick links inside this script section:
+
+- [What it does](#whisper-what-it-does)
+- [Supported platforms](#whisper-supported-platforms)
+- [Dependencies](#whisper-dependencies)
+- [Install / first run](#whisper-install--first-run-summary)
+- [Common usage examples](#whisper-common-usage-examples)
+- [Important behavior / defaults](#whisper-important-behavior--defaults)
+- [Notes / caveats](#whisper-notes--caveats)
+
+<a id="whisper-what-it-does"></a>
+
 #### What It Does
 
 - accepts a media file or folder
@@ -713,6 +593,8 @@ wh help
 - normalizes common Bible-reference formatting mistakes by default, such as `Psalm 83 18` to `Psalm 83:18`
 - writes subtitles by default, can also write plain-text transcripts, and can mux soft subtitle tracks into video containers
 
+<a id="whisper-supported-platforms"></a>
+
 #### Supported Platforms
 
 - macOS
@@ -720,6 +602,8 @@ wh help
 - Windows
 
 MLX support is for Apple Silicon on macOS. Other environments use `faster-whisper`.
+
+<a id="whisper-dependencies"></a>
 
 #### Dependencies
 
@@ -734,7 +618,9 @@ Useful system dependency:
 
 Script-specific note:
 
-- On Apple Silicon, MLX runtimes can auto-select a more stable managed-runtime Python.
+- MLX setup is managed by the script on Apple Silicon. Other machines use the managed `faster-whisper` runtime.
+
+<a id="whisper-install--first-run-summary"></a>
 
 #### Install / First Run Summary
 
@@ -759,6 +645,8 @@ On first run, `whisper` will:
 - choose a managed runtime
 - install required Python packages into that runtime
 - prompt before downloading packages unless `-y` / `--yes` is used
+
+<a id="whisper-common-usage-examples"></a>
 
 #### Common Usage Examples
 
@@ -802,8 +690,6 @@ whisper /path/to/file.mp4 --suppress-phrases=/path/to/whisper-suppress.txt
 Write a plain-text transcript next to the normal subtitle output:
 
 ```bash
-whisper /path/to/file.mp4 -t
-whisper /path/to/file.mp4 --transcript
 whisper /path/to/file.mp4 -t --paragraphs
 ```
 
@@ -811,15 +697,17 @@ Write only the transcript:
 
 ```bash
 whisper /path/to/file.mp4 -T
-whisper /path/to/file.mp4 --transcript-only
 ```
+
+Long option names are available too, such as `--transcript` and `--transcript-only`.
 
 Write a speaker-labeled transcript:
 
 ```bash
 whisper /path/to/file.mp4 -T --speaker-labels --paragraphs
-whisper /path/to/file.mp4 -T --diarize
 ```
+
+`--diarize` is kept as a technical alias for `--speaker-labels`.
 
 Preview the work plan without setup, installs, or transcription:
 
@@ -907,8 +795,9 @@ Run MLX comparison diagnostics:
 ```bash
 whisper /path/to/file.mp4 --mlx-word-timestamps=off
 whisper /path/to/file.mp4 --mlx-output-format=text
-whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-format=text
 ```
+
+<a id="whisper-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
@@ -952,6 +841,8 @@ whisper /path/to/file.mp4 --model=tiny --mlx-word-timestamps=off --mlx-output-fo
   - `--mlx-output-format=auto|subtitle|text`
   - `--mlx-model-default=wrapper|official`
 - The normal wrapper behavior stays subtitle-oriented unless you explicitly ask for a different comparison mode.
+
+<a id="whisper-notes--caveats"></a>
 
 #### Notes / Caveats
 
