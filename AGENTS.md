@@ -8,6 +8,24 @@ Repo name: `maj-scripts-vibe`
 
 `maj-scripts-vibe` is expected to grow into a collection of unrelated or loosely related scripts.
 
+This repo is for public, user-facing utility scripts that can be tested and
+documented as standalone tools. It is not the replacement home for private
+`~/bin` operator scripts and it is not a system overlay repo.
+
+Boundary rules:
+
+- Private `~/bin` migrations, local ops helpers, systemd timer installers, and
+  fleet maintenance scripts belong in `bin-vibe`.
+- emeth4 workstation overlay files and reinstall policy belong in
+  `maj-newemeth`.
+- Cloud/VPS server bootstrap overlays belong in `maj-newserver`.
+- If a script requires private local paths, tokens, machine-specific service
+  files, or root-only config to make sense, stop and consider `bin-vibe` or an
+  overlay repo before adding it here.
+- Keep this repo suitable for public GitHub by default: examples should use
+  placeholders and off-repo config paths, and tests should not depend on the
+  operator's live machine state.
+
 The documentation model is:
 
 - `README.md` is the user-facing index and navigation hub
