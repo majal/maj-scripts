@@ -336,6 +336,89 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(attempts["count"], 2)
 
+    def test_build_gmail_client_reauthorizes_after_invalid_scope_refresh(self) -> None:
+        module = self.gmail_cleanup
+        requested_scopes = module.APPLY_SCOPES
+
+        class StaleCredentials:
+            expired = True
+            refresh_token = "refresh-token"
+            valid = False
+
+            def has_scopes(self, scopes):
+                del scopes
+                return True
+
+            def refresh(self, request):
+                del request
+                raise RuntimeError("invalid_scope: Bad Request")
+
+        class FreshCredentials:
+            expired = False
+            refresh_token = "refresh-token"
+            valid = True
+
+            def has_scopes(self, scopes):
+                return tuple(scopes) == requested_scopes
+
+            def to_json(self):
+                return json.dumps({"token": "fresh-token", "scopes": list(requested_scopes)})
+
+        class FakeCredentials:
+            @classmethod
+            def from_authorized_user_file(cls, path, scopes):
+                del path, scopes
+                return StaleCredentials()
+
+            @classmethod
+            def from_authorized_user_info(cls, info, scopes):
+                del info, scopes
+                return FreshCredentials()
+
+        class FakeInstalledAppFlow:
+            ran = False
+
+            @classmethod
+            def from_client_secrets_file(cls, path, scopes):
+                del path, scopes
+                return cls()
+
+            def run_local_server(self, port):
+                del port
+                type(self).ran = True
+                return FreshCredentials()
+
+        class FakeAuthorizedHttp:
+            def __init__(self, credentials, http):
+                del credentials, http
+
+        class FakeHttplib2:
+            class Http:
+                def __init__(self, timeout):
+                    del timeout
+
+        def fake_build(*args, **kwargs):
+            del args, kwargs
+            return object()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_path = Path(tmpdir) / "client.json"
+            token_path = Path(tmpdir) / "token.json"
+            credentials_path.write_text("{}", encoding="utf-8")
+            token_path.write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(
+                module,
+                "load_google_modules",
+                return_value=(object, FakeCredentials, FakeInstalledAppFlow, fake_build, FakeAuthorizedHttp, FakeHttplib2, RuntimeError),
+            ):
+                module.build_gmail_client(credentials_path, token_path, requested_scopes, "me")
+
+            saved = json.loads(token_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(FakeInstalledAppFlow.ran)
+        self.assertEqual(saved["scopes"], list(requested_scopes))
+
     def test_apply_mode_skips_already_completed_manifest_record(self) -> None:
         client = FakeGmailClient(self.gmail_cleanup, [self.build_record()])
 
@@ -1193,8 +1276,14 @@ class GmailCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             staged_pdf = Path(tmpdir) / "report.pdf"
             staged_pdf.write_bytes(b"%PDF-1.7")
+            recipe_store = Path(tmpdir) / "recipes.json"
+            secret_store = Path(tmpdir) / "secrets.json"
             failure_store = Path(tmpdir) / "failures.json"
-            with mock.patch.object(self.gmail_cleanup, "PASSWORD_FAILURE_STORE_PATH", failure_store), mock.patch.object(
+            with mock.patch.object(self.gmail_cleanup, "PASSWORD_RECIPE_STORE_PATH", recipe_store), mock.patch.object(
+                self.gmail_cleanup,
+                "PASSWORD_SECRET_STORE_PATH",
+                secret_store,
+            ), mock.patch.object(self.gmail_cleanup, "PASSWORD_FAILURE_STORE_PATH", failure_store), mock.patch.object(
                 self.gmail_cleanup,
                 "select_pdf_password_backend",
                 return_value="john",

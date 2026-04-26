@@ -1554,6 +1554,10 @@ def is_retryable_gmail_transport_error(exc: BaseException) -> bool:
     )
 
 
+def is_invalid_scope_refresh_error(exc: BaseException) -> bool:
+    return "invalid_scope" in str(exc)
+
+
 def is_retryable_gmail_write_error(exc: BaseException) -> bool:
     return is_retryable_gmail_request_error(exc) or is_retryable_gmail_transport_error(exc)
 
@@ -2086,7 +2090,12 @@ def build_gmail_client(
         if not creds.has_scopes(scopes):
             creds = None
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception as exc:
+            if not is_invalid_scope_refresh_error(exc):
+                raise
+            creds = None
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), list(scopes))
         creds = flow.run_local_server(port=0)
