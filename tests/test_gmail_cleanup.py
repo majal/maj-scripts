@@ -798,6 +798,21 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(categories["signed-1"], "skipped")
         self.assertEqual(report["matched_messages"], 3)
 
+    def test_report_can_include_gmail_review_links(self) -> None:
+        client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1")])
+
+        report = self.gmail_cleanup.run_report(
+            client,
+            "has:attachment -in:trash -in:spam",
+            25,
+            self.default_settings(),
+            gmail_link_account="1",
+        )
+        rendered = self.gmail_cleanup.render_report(report)
+
+        self.assertEqual(report["items"][0]["gmail_url"], "https://mail.google.com/mail/u/1/#all/thread-1")
+        self.assertIn("link: https://mail.google.com/mail/u/1/#all/thread-1", rendered)
+
     def test_report_marks_exported_and_completed_manifest_status(self) -> None:
         client = FakeGmailClient(
             self.gmail_cleanup,

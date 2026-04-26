@@ -53,6 +53,8 @@ APPLY_SCOPES = (
 DEFAULT_BACKUP_DIR_ENV = "GMAIL_CLEANUP_BACKUP_DIR"
 DEFAULT_CONFIG_ENV = "GMAIL_CLEANUP_CONFIG"
 DEFAULT_CREDENTIALS_ENV = "GMAIL_CLEANUP_OAUTH_CLIENT_SECRET"
+DEFAULT_GMAIL_WEB_ACCOUNT = "0"
+DEFAULT_GMAIL_WEB_ACCOUNT_ENV = "GMAIL_CLEANUP_GMAIL_WEB_ACCOUNT"
 DEFAULT_GMAIL_USER_ENV = "GMAIL_CLEANUP_GMAIL_USER"
 DEFAULT_MAX_RESULTS_ENV = "GMAIL_CLEANUP_MAX_RESULTS"
 DEFAULT_PDF_MODE_ENV = "GMAIL_CLEANUP_PDF_MODE"
@@ -840,6 +842,12 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--credentials", type=Path, help="Path to the Google desktop OAuth client secret JSON.")
     report.add_argument("--token-cache", type=Path, help="Path to the cached OAuth token JSON.")
     report.add_argument("--gmail-user", default=None, help="Gmail user ID to call the API with. Defaults to me.")
+    report.add_argument("--gmail-links", action="store_true", help="Include Gmail web links for manual review.")
+    report.add_argument(
+        "--gmail-web-account",
+        default=None,
+        help=f"Gmail web account slot used in report links. Defaults to ${DEFAULT_GMAIL_WEB_ACCOUNT_ENV}, config, or {DEFAULT_GMAIL_WEB_ACCOUNT}.",
+    )
     report.add_argument("--backup-dir", type=Path, help="Use this backup manifest to annotate exported/completed migration status.")
     report.add_argument("--index-db", type=Path, help=f"Path to the local SQLite Gmail index. Defaults to {DEFAULT_INDEX_DB_PATH}.")
     report.add_argument("--use-index", action="store_true", help="Use the local Gmail index before downloading messages from Gmail.")
@@ -1035,6 +1043,7 @@ def load_config(path: Path) -> dict[str, object]:
         "audio_mode",
         "before_year",
         "credentials",
+        "gmail_web_account",
         "gmail_user",
         "index_db",
         "label_processed",
@@ -1176,6 +1185,16 @@ def resolve_index_db_path(explicit: Path | None, config: dict[str, object], conf
 def resolve_gmail_user(explicit: str | None, config: dict[str, object], config_path: Path) -> str:
     value = explicit or os.environ.get(DEFAULT_GMAIL_USER_ENV) or config_string_value(config, "gmail_user", config_path) or "me"
     return value.strip() or "me"
+
+
+def resolve_gmail_web_account(explicit: str | None, config: dict[str, object], config_path: Path) -> str:
+    value = (
+        explicit
+        or os.environ.get(DEFAULT_GMAIL_WEB_ACCOUNT_ENV)
+        or config_string_value(config, "gmail_web_account", config_path)
+        or DEFAULT_GMAIL_WEB_ACCOUNT
+    )
+    return value.strip() or DEFAULT_GMAIL_WEB_ACCOUNT
 
 
 def resolve_max_results(explicit: int | None, config: dict[str, object], config_path: Path) -> int:
@@ -2130,6 +2149,10 @@ def plan_message(record: GmailMessageRecord, settings: ExtractionSettings | None
 def header_value(message: EmailMessage, name: str) -> str:
     value = message.get(name, "")
     return str(value).strip()
+
+
+def gmail_thread_url(thread_id: str, account: str = DEFAULT_GMAIL_WEB_ACCOUNT) -> str:
+    return f"https://mail.google.com/mail/u/{quote(account, safe='')}/#all/{quote(thread_id, safe='')}"
 
 
 def collect_media_parts(message: EmailMessage, message_id: str, settings: ExtractionSettings) -> list[SelectedMediaPart]:
@@ -6021,6 +6044,7 @@ def run_report(
     *,
     request_profile: str = "moderate",
     backup_dir: Path | None = None,
+    gmail_link_account: str | None = None,
 ) -> dict[str, object]:
     if max_results < 1:
         raise ValueError("--max-results must be 1 or greater")
@@ -6086,6 +6110,8 @@ def run_report(
             elif exported_record is not None:
                 item["exported_at"] = exported_record.get("exported_at")
                 item["exported_attachment_count"] = len(exported_record.get("attachments", []))
+        if gmail_link_account is not None:
+            item["gmail_url"] = gmail_thread_url(plan.thread_id, gmail_link_account)
         items.append(item)
     report = {
         "counts": counts,
@@ -6137,6 +6163,8 @@ def render_report(report: dict[str, object]) -> str:
         )
         if item.get("skip_reason"):
             lines.append(f"    reason: {item['skip_reason']}")
+        if item.get("gmail_url"):
+            lines.append(f"    link: {item['gmail_url']}")
         filenames = item.get("filenames") or []
         for filename in filenames:
             lines.append(f"    file: {filename['filename']} ({filename['content_type']})")
@@ -6736,6 +6764,7 @@ def main(argv: list[str] | None = None) -> int:
             backup_dir = None
             if args.backup_dir is not None or os.environ.get(DEFAULT_BACKUP_DIR_ENV) or "backup_dir" in config:
                 backup_dir = resolve_backup_dir(args.backup_dir, config, config_path).expanduser()
+            gmail_link_account = resolve_gmail_web_account(args.gmail_web_account, config, config_path) if args.gmail_links else None
             summary = run_report(
                 client,
                 query,
@@ -6743,6 +6772,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 request_profile=request_profile,
                 backup_dir=backup_dir,
+                gmail_link_account=gmail_link_account,
             )
         elif args.command == "extract-media":
             query = resolve_query(args.query)

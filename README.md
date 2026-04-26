@@ -227,6 +227,7 @@ types = ["image", "video"]
 # index_db = "/path/to/private-state/gmail-index.sqlite"
 # token_cache = "/path/to/private-state/token.json"
 # gmail_user = "me"
+# gmail_web_account = "0"
 # max_results = 50
 ```
 
@@ -272,6 +273,13 @@ gmail-cleanup report --preset office-docs --use-index
 gmail-cleanup report --preset archives --use-index
 gmail-cleanup report --preset audio-archive --use-index
 gmail-cleanup report --preset old-media --use-index
+```
+
+Add Gmail web links to a report when you want to manually review the matched threads:
+
+```bash
+gmail-cleanup report --preset pdf-archive --use-index --offline --gmail-links
+gmail-cleanup report --preset office-docs --use-index --gmail-links --gmail-web-account 1
 ```
 
 Export audio attachments as MP4 videos without changing Gmail, then report local manifest status offline:
@@ -328,6 +336,7 @@ Agent-friendly review artifacts are written as JSONL too:
 - `--export-only` writes selected files and manifest records to the backup folder but leaves Gmail unchanged.
 - `report --backup-dir ...` annotates each match with local migration status from `manifest.jsonl`: `pending`, `exported_pending_gmail_sync`, or `completed`. This is useful when a cached index still contains messages that have already been processed in Gmail.
 - `report --use-index --offline` reads only from the local SQLite index and manifest. It does not refresh OAuth tokens or contact Gmail.
+- `report --gmail-links` adds Gmail web URLs for manual review. The links use account slot `0` by default; pass `--gmail-web-account 1`, set `GMAIL_CLEANUP_GMAIL_WEB_ACCOUNT`, or add `gmail_web_account` to local config if Gmail opens the wrong signed-in account.
 - `--preset pdf-archive` expands to `filename:pdf -in:trash -in:spam`, `--types pdf`, `--pdf-mode auto`, `--pdf-original trash`, `--pdf-password-mode low-hanging`, `--pdf-password-failure-action trash-original`, `--pdf-text-mode auto`, `--empty-after-removal note-only`, conservative request pacing, and `--max-results 5000`. You can still override individual options on the same command.
 - Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters. `audio-archive` also sets `--audio-mode video`.
 - The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
