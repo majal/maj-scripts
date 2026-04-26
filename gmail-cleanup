@@ -2768,6 +2768,7 @@ def write_bytes_attachment(
     destination = matching_destination(message_dir, destination_name, content_bytes)
     if not destination.exists():
         destination.write_bytes(content_bytes)
+    relative_path = destination.relative_to(backup_dir).as_posix()
     return WrittenAttachment(
         local_path=destination,
         filename=destination.name,
@@ -2776,7 +2777,7 @@ def write_bytes_attachment(
         mime_type=mime_type,
         size_bytes=len(content_bytes),
         sha256=hashlib.sha256(content_bytes).hexdigest(),
-        relative_path=str(destination.relative_to(backup_dir)),
+        relative_path=relative_path,
         disposition=disposition,
         content_id=content_id,
         group_search_token=group_search_token,
@@ -2905,6 +2906,7 @@ def write_audio_video_attachment(
             if source_path.exists():
                 source_path.unlink()
     content_bytes = destination.read_bytes()
+    relative_path = destination.relative_to(backup_dir).as_posix()
     return WrittenAttachment(
         local_path=destination,
         filename=destination.name,
@@ -2913,7 +2915,7 @@ def write_audio_video_attachment(
         mime_type="video/mp4",
         size_bytes=len(content_bytes),
         sha256=hashlib.sha256(content_bytes).hexdigest(),
-        relative_path=str(destination.relative_to(backup_dir)),
+        relative_path=relative_path,
         disposition=media_part.disposition,
         content_id=media_part.content_id,
         source_attachment_mime_type=media_part.mime_type,
@@ -5263,6 +5265,13 @@ class GmailIndex:
     def close(self) -> None:
         self.connection.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.close()
+
     def ensure_schema(self) -> None:
         self.connection.executescript(
             """
@@ -5524,6 +5533,16 @@ class IndexedGmailClient:
         self.delegate = delegate
         self.index = index
 
+    def close(self) -> None:
+        self.index.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.close()
+
     def list_message_ids(self, query: str, max_results: int) -> list[str]:
         if self.index.query_is_cached(query, max_results):
             return self.index.query_message_ids(query, max_results)
@@ -5579,6 +5598,16 @@ class IndexedGmailClient:
 class IndexOnlyGmailClient:
     def __init__(self, index: GmailIndex) -> None:
         self.index = index
+
+    def close(self) -> None:
+        self.index.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.close()
 
     def list_message_ids(self, query: str, max_results: int) -> list[str]:
         if not self.index.query_is_cached(query, max_results):

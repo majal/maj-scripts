@@ -869,21 +869,21 @@ class GmailCleanupTest(unittest.TestCase):
             self.assertEqual(client.list_calls, 2)
             self.assertEqual(client.raw_many_calls, 1)
 
-            cached_client = self.gmail_cleanup.IndexedGmailClient(
+            with self.gmail_cleanup.IndexedGmailClient(
                 client,
                 self.gmail_cleanup.GmailIndex(index_db),
-            )
-            report = self.gmail_cleanup.run_report(
-                cached_client,
-                "filename:pdf -in:trash -in:spam",
-                25,
-                settings,
-                request_profile="conservative",
-            )
+            ) as cached_client:
+                report = self.gmail_cleanup.run_report(
+                    cached_client,
+                    "filename:pdf -in:trash -in:spam",
+                    25,
+                    settings,
+                    request_profile="conservative",
+                )
 
-            self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
-            self.assertEqual(client.list_calls, 2)
-            self.assertEqual(client.raw_many_calls, 1)
+                self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+                self.assertEqual(client.list_calls, 2)
+                self.assertEqual(client.raw_many_calls, 1)
 
     def test_index_fetches_delegate_when_cached_query_is_partial(self) -> None:
         settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("pdf",))
@@ -899,21 +899,21 @@ class GmailCleanupTest(unittest.TestCase):
                 request_profile="conservative",
             )
 
-            cached_client = self.gmail_cleanup.IndexedGmailClient(
+            with self.gmail_cleanup.IndexedGmailClient(
                 client,
                 self.gmail_cleanup.GmailIndex(index_db),
-            )
-            report = self.gmail_cleanup.run_report(
-                cached_client,
-                "filename:pdf -in:trash -in:spam",
-                2,
-                settings,
-                request_profile="conservative",
-            )
+            ) as cached_client:
+                report = self.gmail_cleanup.run_report(
+                    cached_client,
+                    "filename:pdf -in:trash -in:spam",
+                    2,
+                    settings,
+                    request_profile="conservative",
+                )
 
-            self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
-            self.assertEqual(client.list_calls, 2)
-            self.assertEqual(client.raw_many_calls, 2)
+                self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+                self.assertEqual(client.list_calls, 2)
+                self.assertEqual(client.raw_many_calls, 2)
 
     def test_cleanup_category_selectors_can_target_common_attachment_families(self) -> None:
         message = EmailMessage()
