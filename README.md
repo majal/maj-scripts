@@ -96,6 +96,7 @@ System tools used on demand:
 - a Google desktop OAuth client secret JSON stored outside this public repo
 - `exiftool` for embedding the recovery marker into saved files during `--apply`
 - `ffmpeg` and `ffprobe` for video metadata fallback and some image conversions
+- LibreOffice (`soffice`) for best-effort embedded image extraction from legacy Office files such as `.doc`, `.xls`, and `.ppt`
 - Poppler tools (`pdfimages`, `pdfinfo`, `pdftocairo`, `pdftotext`) when you include PDFs
 - `ocrmypdf` is preferred for PDF OCR sidecar text when you enable OCR modes; `tesseract` is the fallback OCR engine
 - for passworded PDFs, `gmail-cleanup` will scan for external recovery tools and prefer `john` plus a `pdf2john` helper, then `pdfcrack`, then `qpdf`
@@ -226,6 +227,9 @@ types = ["image", "video"]
 # label_processed = "gmail-cleanup/processed"
 # label_review = "gmail-cleanup/review"
 # index_db = "/path/to/private-state/gmail-index.sqlite"
+# embedded_image_dir = "/path/to/photos-dropzone"
+# readable_folders = true
+# soffice = "/usr/bin/soffice"
 # token_cache = "/path/to/private-state/token.json"
 # gmail_user = "me"
 # gmail_web_account = "0"
@@ -349,7 +353,7 @@ Agent-friendly review artifacts are written as JSONL too:
 - The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
 - Detached signature/key sidecars with `.sig` or `.asc` filenames are ignored by cleanup selectors, including `other`, so report leftovers do not look like real PDF/media work.
 - `--readable-folders` keeps the message ID in each backup folder and appends a short sanitized subject snippet for easier local scanning.
-- `--embedded-image-dir` writes images found inside zip-based Office/OpenDocument files, such as `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, and `.odp`, into a second local drop folder while the original document stays in `--backup-dir`. Older binary Office formats such as `.doc`, `.xls`, and `.ppt` are still saved as documents, but embedded image extraction is best-effort and may not apply to them.
+- `--embedded-image-dir` writes images found inside Office/OpenDocument files into a second local drop folder while the original document stays in `--backup-dir`. Zip-based files such as `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, and `.odp` are scanned directly. For legacy formats such as `.doc`, `.xls`, and `.ppt`, the script falls back to LibreOffice when `soffice` is available; override the executable with `--soffice`, `GMAIL_CLEANUP_SOFFICE`, or `soffice` in local config.
 - `--before-year`, `--min-message-bytes`, and `--min-part-bytes` are local filters applied after messages are inspected or loaded from the index. They are useful when you want repeated cleanup passes without changing the Gmail query.
 - `--audio-mode copy` keeps original audio files. `video` writes an MP4 with a still black frame and AAC audio for Google Photos-style video backup flows. `video-plus-original` writes both.
 - `gmail-cleanup report` uses the same query, preset, and extraction settings as `extract-media`, but only lists and classifies matched messages. It is useful after a run to separate real remaining work from Gmail search false positives.

@@ -869,6 +869,71 @@ class GmailCleanupTest(unittest.TestCase):
             self.assertEqual(exported_record["derived_media"][0]["source_generation"], "embedded-image")
             self.assertEqual(exported_record["derived_media"][0]["group_search_token"], "gcm-office-1-01")
 
+    def test_legacy_office_export_can_extract_embedded_images_with_libreoffice(self) -> None:
+        media_part = self.gmail_cleanup.BufferedMediaPart(
+            path=(1,),
+            filename="legacy-report.doc",
+            saved_filename="gcm-legacy-01__legacy-report.doc",
+            search_token="gcm-legacy-01",
+            mime_type="application/msword",
+            content_bytes=b"legacy-office-bytes",
+            disposition="attachment",
+            content_id=None,
+        )
+
+        def fake_soffice_run(command, **kwargs):
+            del kwargs
+            output_dir = Path(command[command.index("--outdir") + 1])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "legacy-report_html_abc123.png").write_bytes(b"\x89PNG\r\n\x1a\nPNGDATA")
+            return self.gmail_cleanup.subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            embedded_dir = Path(tmpdir) / "gp"
+            with (
+                mock.patch.object(self.gmail_cleanup, "find_soffice_executable", return_value="/usr/bin/soffice"),
+                mock.patch.object(self.gmail_cleanup.subprocess, "run", side_effect=fake_soffice_run),
+            ):
+                written = self.gmail_cleanup.extract_embedded_images_from_document(
+                    media_part,
+                    embedded_dir,
+                    "legacy-1__Old-Report",
+                    soffice_path="/usr/bin/soffice",
+                )
+
+            expected = embedded_dir / "legacy-1__Old-Report" / "gcm-legacy-01-loimg001__legacy-report__legacy-report_html_abc123.png"
+            self.assertTrue(expected.is_file())
+            self.assertEqual(written[0].local_path, expected)
+            self.assertEqual(written[0].search_token, "gcm-legacy-01-loimg001")
+            self.assertEqual(written[0].source_generation, "embedded-image-libreoffice")
+            self.assertEqual(written[0].group_search_token, "gcm-legacy-01")
+
+    def test_legacy_office_embedded_image_scan_skips_when_libreoffice_is_unavailable(self) -> None:
+        media_part = self.gmail_cleanup.BufferedMediaPart(
+            path=(1,),
+            filename="legacy-report.doc",
+            saved_filename="gcm-legacy-01__legacy-report.doc",
+            search_token="gcm-legacy-01",
+            mime_type="application/msword",
+            content_bytes=b"legacy-office-bytes",
+            disposition="attachment",
+            content_id=None,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                mock.patch.object(self.gmail_cleanup, "find_soffice_executable", return_value=None),
+                mock.patch.object(self.gmail_cleanup.subprocess, "run") as run_mock,
+            ):
+                written = self.gmail_cleanup.extract_embedded_images_from_document(
+                    media_part,
+                    Path(tmpdir) / "gp",
+                    "legacy-1__Old-Report",
+                )
+
+        self.assertEqual(written, [])
+        run_mock.assert_not_called()
+
     def test_parser_counts_verbose_flags(self) -> None:
         parser = self.gmail_cleanup.build_parser()
         args = parser.parse_args(["extract-media", "--query", "has:attachment", "-vvv"])

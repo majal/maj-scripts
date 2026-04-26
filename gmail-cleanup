@@ -83,6 +83,7 @@ DEFAULT_MIN_PART_BYTES_ENV = "GMAIL_CLEANUP_MIN_PART_BYTES"
 DEFAULT_TOKEN_ENV = "GMAIL_CLEANUP_TOKEN_CACHE"
 DEFAULT_TYPES_ENV = "GMAIL_CLEANUP_TYPES"
 DEFAULT_EMBEDDED_IMAGE_DIR_ENV = "GMAIL_CLEANUP_EMBEDDED_IMAGE_DIR"
+DEFAULT_SOFFICE_ENV = "GMAIL_CLEANUP_SOFFICE"
 SKIPPED_LABEL_IDS = {"TRASH", "SPAM", "DRAFT"}
 UNSUPPORTED_CONTENT_TYPES = {
     "multipart/signed",
@@ -217,6 +218,7 @@ PDF_ORIGINAL_TRASH_GENERATIONS = {
 }
 PDF_NOTE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 EMBEDDED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+SOFFICE_EMBEDDED_IMAGE_TIMEOUT_SECONDS = 120
 READABLE_BACKUP_SUBJECT_CHARS = 60
 PASSWORD_HINT_PATTERN = re.compile(r"(?:password|passcode|pin)\s*(?:is|:)?\s*([A-Za-z0-9][A-Za-z0-9@._/-]{2,63})", re.IGNORECASE)
 PASSWORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._/-]{3,63}")
@@ -454,6 +456,7 @@ class ExtractionSettings:
     min_part_bytes: int = 0
     readable_folders: bool = False
     embedded_image_dir: Path | None = None
+    soffice_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -683,8 +686,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--embedded-image-dir",
         type=Path,
         help=(
-            "Optional second drop directory for images found inside zip-based Office/OpenDocument files. "
+            "Optional second drop directory for images found inside Office/OpenDocument files. "
             f"Defaults to ${DEFAULT_EMBEDDED_IMAGE_DIR_ENV} or embedded_image_dir in config when set."
+        ),
+    )
+    extract.add_argument(
+        "--soffice",
+        help=(
+            "Optional LibreOffice/soffice executable path for legacy Office embedded-image extraction. "
+            f"Defaults to ${DEFAULT_SOFFICE_ENV}, soffice in config, or auto-detecting soffice/libreoffice."
         ),
     )
     extract.add_argument(
@@ -978,6 +988,7 @@ def default_extraction_settings() -> ExtractionSettings:
         audio_mode="copy",
         readable_folders=False,
         embedded_image_dir=None,
+        soffice_path=None,
     )
 
 
@@ -1039,6 +1050,7 @@ def build_extraction_settings(args: argparse.Namespace, config: dict[str, object
         audio_mode=resolve_audio_mode(getattr(args, "audio_mode", None), config, config_path),
         readable_folders=resolve_readable_folders(getattr(args, "readable_folders", False), config, config_path),
         embedded_image_dir=resolve_embedded_image_dir(getattr(args, "embedded_image_dir", None), config, config_path),
+        soffice_path=resolve_soffice_path(getattr(args, "soffice", None), config, config_path),
     )
 
 
@@ -1097,6 +1109,7 @@ def load_config(path: Path) -> dict[str, object]:
         "quota_units_per_second",
         "progress_format",
         "readable_folders",
+        "soffice",
         "token_cache",
         "types",
     }
@@ -1185,6 +1198,11 @@ def resolve_backup_dir(explicit: Path | None, config: dict[str, object], config_
 def resolve_embedded_image_dir(explicit: Path | None, config: dict[str, object], config_path: Path) -> Path | None:
     path = explicit or path_from_env(DEFAULT_EMBEDDED_IMAGE_DIR_ENV) or config_path_value(config, "embedded_image_dir", config_path)
     return path.expanduser() if path is not None else None
+
+
+def resolve_soffice_path(explicit: str | None, config: dict[str, object], config_path: Path) -> str | None:
+    value = explicit or os.environ.get(DEFAULT_SOFFICE_ENV) or config_string_value(config, "soffice", config_path)
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def resolve_credentials_path(explicit: Path | None, config: dict[str, object], config_path: Path) -> Path:
@@ -2900,7 +2918,36 @@ def build_embedded_image_filename(search_token: str, original_filename: str, mem
     return sanitize_filename(f"{search_token}-img{image_index:03d}__{original_stem}__{member_stem}{suffix}")
 
 
-def extract_embedded_images_from_document(
+def build_libreoffice_embedded_image_filename(search_token: str, original_filename: str, output_name: str, image_index: int) -> str:
+    original_stem = sanitize_filename(Path(original_filename).stem or "document")
+    output_path = Path(output_name)
+    output_stem = sanitize_filename(output_path.stem or "image")
+    suffix = output_path.suffix.lower() if len(output_path.suffix) <= 12 else ""
+    if suffix not in EMBEDDED_IMAGE_EXTENSIONS:
+        suffix = ""
+    return sanitize_filename(f"{search_token}-loimg{image_index:03d}__{original_stem}__{output_stem}{suffix}")
+
+
+def find_soffice_executable(configured: str | None = None) -> str | None:
+    candidates = (configured,) if configured else ("soffice", "libreoffice")
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        expanded = os.path.expanduser(candidate.strip())
+        if not expanded:
+            continue
+        if os.sep in expanded or (os.altsep is not None and os.altsep in expanded):
+            path = Path(expanded)
+            if path.is_file():
+                return str(path)
+            continue
+        resolved = shutil.which(expanded)
+        if resolved:
+            return resolved
+    return None
+
+
+def extract_zip_embedded_images_from_document(
     media_part: BufferedMediaPart,
     embedded_image_dir: Path | None,
     backup_folder_name: str,
@@ -2953,6 +3000,142 @@ def extract_embedded_images_from_document(
     if written:
         log_progress(verbose, 2, f"Extracted {len(written)} embedded image(s) from {media_part.filename}")
     return written
+
+
+def extract_libreoffice_embedded_images_from_document(
+    media_part: BufferedMediaPart,
+    embedded_image_dir: Path | None,
+    backup_folder_name: str,
+    *,
+    soffice_path: str | None = None,
+    verbose: int = 0,
+) -> list[WrittenAttachment]:
+    if embedded_image_dir is None:
+        return []
+    extension = attachment_extension(media_part.filename)
+    if extension not in OFFICE_ATTACHMENT_EXTENSIONS:
+        return []
+    soffice = find_soffice_executable(soffice_path)
+    if soffice is None:
+        log_progress(verbose, 2, f"LibreOffice not available for embedded image scan of {media_part.filename}")
+        return []
+    with tempfile.TemporaryDirectory(prefix="gmail-cleanup-soffice-") as temp_name:
+        temp_dir = Path(temp_name)
+        input_dir = temp_dir / "input"
+        output_dir = temp_dir / "output"
+        profile_dir = temp_dir / "profile"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        profile_dir.mkdir()
+        source_name = sanitize_filename(media_part.filename)
+        if not Path(source_name).suffix and extension:
+            source_name = sanitize_filename(f"{source_name}{extension}")
+        source_path = input_dir / source_name
+        source_path.write_bytes(media_part.content_bytes)
+        command = [
+            soffice,
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--norestore",
+            f"-env:UserInstallation={profile_dir.as_uri()}",
+            "--convert-to",
+            "html",
+            "--outdir",
+            str(output_dir),
+            str(source_path),
+        ]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=SOFFICE_EMBEDDED_IMAGE_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            log_progress(verbose, 2, f"LibreOffice executable vanished before scanning {media_part.filename}: {soffice}")
+            return []
+        except subprocess.TimeoutExpired:
+            log_progress(verbose, 1, f"LibreOffice embedded image scan timed out for {media_part.filename}")
+            return []
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or exc.stdout or "").strip().splitlines()
+            suffix = f": {stderr[-1]}" if stderr else ""
+            log_progress(verbose, 2, f"LibreOffice embedded image scan failed for {media_part.filename}{suffix}")
+            return []
+
+        written: list[WrittenAttachment] = []
+        media_dir = embedded_image_dir / backup_folder_name
+        image_index = 0
+        for candidate in sorted(output_dir.rglob("*")):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in EMBEDDED_IMAGE_EXTENSIONS:
+                continue
+            try:
+                image_bytes = candidate.read_bytes()
+            except OSError:
+                continue
+            if not image_bytes:
+                continue
+            guessed_mime_type = guess_mime_type_from_filename(candidate.name)
+            mime_type = sniff_image_mime_type(image_bytes) or guessed_mime_type
+            if not mime_type.startswith("image/"):
+                continue
+            image_index += 1
+            media_dir.mkdir(parents=True, exist_ok=True)
+            relative_member = candidate.relative_to(output_dir).as_posix()
+            image_token = f"{media_part.search_token}-loimg{image_index:03d}"
+            written.append(
+                write_bytes_attachment(
+                    embedded_image_dir,
+                    media_dir,
+                    destination_name=build_libreoffice_embedded_image_filename(
+                        media_part.search_token,
+                        media_part.filename,
+                        relative_member,
+                        image_index,
+                    ),
+                    original_filename=f"{media_part.filename}:{relative_member}",
+                    search_token=image_token,
+                    mime_type=mime_type,
+                    content_bytes=image_bytes,
+                    disposition="derived",
+                    content_id=None,
+                    group_search_token=media_part.search_token,
+                    source_attachment_mime_type=media_part.mime_type,
+                    source_generation="embedded-image-libreoffice",
+                )
+            )
+    if written:
+        log_progress(verbose, 2, f"Extracted {len(written)} LibreOffice embedded image(s) from {media_part.filename}")
+    return written
+
+
+def extract_embedded_images_from_document(
+    media_part: BufferedMediaPart,
+    embedded_image_dir: Path | None,
+    backup_folder_name: str,
+    *,
+    soffice_path: str | None = None,
+    verbose: int = 0,
+) -> list[WrittenAttachment]:
+    written = extract_zip_embedded_images_from_document(
+        media_part,
+        embedded_image_dir,
+        backup_folder_name,
+        verbose=verbose,
+    )
+    if written:
+        return written
+    return extract_libreoffice_embedded_images_from_document(
+        media_part,
+        embedded_image_dir,
+        backup_folder_name,
+        soffice_path=soffice_path,
+        verbose=verbose,
+    )
 
 
 def write_file_attachment(
@@ -4463,6 +4646,7 @@ def write_backup_files(
                 media_part,
                 settings.embedded_image_dir,
                 backup_folder_name,
+                soffice_path=settings.soffice_path,
                 verbose=verbose,
             )
         )
@@ -4898,6 +5082,7 @@ def settings_checkpoint_payload(settings: ExtractionSettings) -> dict[str, objec
         "pdf_render_format": settings.pdf_render_format,
         "pdf_text_mode": settings.pdf_text_mode,
         "readable_folders": settings.readable_folders,
+        "soffice_path": settings.soffice_path,
     }
 
 
