@@ -22,6 +22,11 @@ Boundary rules:
 - If a script requires private local paths, tokens, machine-specific service
   files, or root-only config to make sense, stop and consider `bin-vibe` or an
   overlay repo before adding it here.
+- Power, boot, and hibernate helpers may live here only when they are public
+  diagnostic/setup tools with conservative safeguards, clear dry-run/report
+  behavior, and no machine-specific bootloader policy. Durable workstation
+  bootloader, crypttab, fstab, hibernate, and reinstall policy belongs in
+  `maj-newemeth`; private operational recovery helpers belong in `bin-vibe`.
 - Keep this repo suitable for public GitHub by default: examples should use
   placeholders and off-repo config paths, and tests should not depend on the
   operator's live machine state.
