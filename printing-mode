@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly ENABLED_UNITS=(
+  cups.socket
+  cups.path
+  cups.service
+  avahi-daemon.socket
+  avahi-daemon.service
+  cups-browsed.service
+)
+
+readonly STATIC_UNITS=(
+  ipp-usb.service
+)
+
+ACTION="status"
+DRY_RUN=0
+MASK_ON_DISABLE=0
+UNMASK_ON_ENABLE=1
+
+usage() {
+  cat <<'EOF'
+Toggle the Linux printing and printer-discovery stack.
+
+Usage:
+  printing-mode status
+  printing-mode enable [--dry-run] [--no-unmask]
+  printing-mode disable [--dry-run] [--mask]
+  printing-mode -h|--help
+
+Actions:
+  status      Show installed printing/discovery units and their states.
+  enable      Enable and start CUPS, printer discovery, Avahi, and USB IPP.
+  disable     Stop and disable CUPS, printer discovery, Avahi, and USB IPP.
+
+Options:
+  --dry-run     Print the systemctl commands without running them.
+  --mask        With disable, also mask units so socket/path activation cannot
+                start them again until a later enable unmask runs.
+  --no-unmask   With enable, do not unmask previously masked units first.
+  -h, --help    Show this help.
+
+Notes:
+  - This script targets systemd Linux systems.
+  - It skips units that are not installed on the current machine.
+  - Disabling Avahi also disables general mDNS/.local discovery, not only
+    printer discovery.
+EOF
+}
+
+log() {
+  printf '%s\n' "$*"
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    status|enable|disable)
+      ACTION="$1"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --mask)
+      MASK_ON_DISABLE=1
+      shift
+      ;;
+    --no-unmask)
+      UNMASK_ON_ENABLE=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  die "this script only supports Linux"
+fi
+
+command -v systemctl >/dev/null 2>&1 || die "systemctl not found"
+
+SUDO=()
+if [[ "${ACTION}" != "status" && "${EUID}" -ne 0 ]]; then
+  command -v sudo >/dev/null 2>&1 || die "sudo is required for ${ACTION}"
+  SUDO=(sudo)
+fi
+
+run_systemctl() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    printf '+'
+    if [[ "${#SUDO[@]}" -gt 0 ]]; then
+      printf ' %q' "${SUDO[@]}"
+    fi
+    printf ' systemctl'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "${SUDO[@]}" systemctl "$@"
+}
+
+unit_property() {
+  local unit="$1"
+  local property="$2"
+  systemctl show "$unit" --property="$property" --value 2>/dev/null || true
+}
+
+unit_exists() {
+  local unit="$1"
+  local load_state
+  load_state="$(unit_property "$unit" LoadState)"
+  [[ -n "${load_state}" && "${load_state}" != "not-found" ]]
+}
+
+unit_file_state() {
+  local unit="$1"
+  local state
+  state="$(unit_property "$unit" UnitFileState)"
+  [[ -n "${state}" ]] || state="unknown"
+  printf '%s\n' "$state"
+}
+
+enable_capable_units() {
+  local unit state
+  for unit in "${ENABLED_UNITS[@]}"; do
+    unit_exists "$unit" || continue
+    state="$(unit_file_state "$unit")"
+    if [[ "${state}" == "static" ]]; then
+      continue
+    fi
+    printf '%s\n' "$unit"
+  done
+}
+
+installed_static_units() {
+  local unit
+  for unit in "${STATIC_UNITS[@]}"; do
+    unit_exists "$unit" || continue
+    printf '%s\n' "$unit"
+  done
+}
+
+print_status() {
+  local all_units=("${ENABLED_UNITS[@]}" "${STATIC_UNITS[@]}")
+  local unit load enabled active sub
+
+  printf '%-24s %-10s %-12s %-12s %-12s\n' "UNIT" "LOAD" "ENABLED" "ACTIVE" "SUB"
+  printf '%-24s %-10s %-12s %-12s %-12s\n' "----" "----" "-------" "------" "---"
+  for unit in "${all_units[@]}"; do
+    load="$(unit_property "$unit" LoadState)"
+    [[ -n "${load}" ]] || load="not-found"
+    if [[ "${load}" == "not-found" ]]; then
+      printf '%-24s %-10s %-12s %-12s %-12s\n' "$unit" "$load" "-" "-" "-"
+      continue
+    fi
+    enabled="$(unit_file_state "$unit")"
+    active="$(unit_property "$unit" ActiveState)"
+    sub="$(unit_property "$unit" SubState)"
+    printf '%-24s %-10s %-12s %-12s %-12s\n' "$unit" "$load" "$enabled" "$active" "$sub"
+  done
+}
+
+readarray_or_empty() {
+  local array_name="$1"
+  local command_name="$2"
+  local -n target="$array_name"
+  target=()
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    target+=("${line}")
+  done < <("$command_name")
+}
+
+enable_printing() {
+  local enable_units static_units
+  readarray_or_empty enable_units enable_capable_units
+  readarray_or_empty static_units installed_static_units
+
+  if [[ "${#enable_units[@]}" -eq 0 && "${#static_units[@]}" -eq 0 ]]; then
+    log "No known printing units are installed on this machine."
+    return 0
+  fi
+
+  if [[ "${UNMASK_ON_ENABLE}" -eq 1 && "${#enable_units[@]}" -gt 0 ]]; then
+    run_systemctl unmask "${enable_units[@]}"
+  fi
+
+  if [[ "${#enable_units[@]}" -gt 0 ]]; then
+    run_systemctl enable --now "${enable_units[@]}"
+  fi
+
+  if [[ "${#static_units[@]}" -gt 0 ]]; then
+    run_systemctl start "${static_units[@]}" || true
+  fi
+}
+
+disable_printing() {
+  local enable_units static_units
+  readarray_or_empty enable_units enable_capable_units
+  readarray_or_empty static_units installed_static_units
+
+  if [[ "${#static_units[@]}" -gt 0 ]]; then
+    run_systemctl stop "${static_units[@]}" || true
+  fi
+
+  if [[ "${#enable_units[@]}" -gt 0 ]]; then
+    run_systemctl stop "${enable_units[@]}" || true
+    run_systemctl disable "${enable_units[@]}"
+  fi
+
+  if [[ "${MASK_ON_DISABLE}" -eq 1 && "${#enable_units[@]}" -gt 0 ]]; then
+    run_systemctl mask "${enable_units[@]}"
+  fi
+}
+
+case "${ACTION}" in
+  status)
+    print_status
+    ;;
+  enable)
+    enable_printing
+    ;;
+  disable)
+    disable_printing
+    ;;
+  *)
+    die "unsupported action: ${ACTION}"
+    ;;
+esac
