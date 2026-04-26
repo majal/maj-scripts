@@ -6,10 +6,11 @@ import ssl
 import tempfile
 import threading
 import unittest
+import zipfile
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -807,6 +808,67 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(written.mime_type, "image/jpeg")
         self.assertEqual(written.relative_path, "msg-1/gcm-msg-1-01__photo.jpg")
 
+    def test_readable_backup_folder_uses_short_subject_slug(self) -> None:
+        plan = self.gmail_cleanup.plan_message(self.build_record("msg-1"))
+        settings = self.gmail_cleanup.replace(self.default_settings(), readable_folders=True)
+
+        folder_name = self.gmail_cleanup.backup_folder_name_for_plan(plan, settings)
+
+        self.assertEqual(folder_name, "msg-1__Quarterly-update")
+
+    def test_office_export_can_extract_embedded_images_to_second_drop_dir(self) -> None:
+        office_bytes = BytesIO()
+        with zipfile.ZipFile(office_bytes, "w") as archive:
+            archive.writestr("word/document.xml", "<document/>")
+            archive.writestr("word/media/image1.png", b"\x89PNG\r\n\x1a\nPNGDATA")
+        message = EmailMessage()
+        message["Subject"] = "Project Update 2026"
+        message["From"] = "sender@example.com"
+        message["To"] = "maj@example.com"
+        message["Date"] = "Thu, 24 Apr 2026 12:00:00 +0800"
+        message.set_content("Attached.")
+        message.add_attachment(
+            office_bytes.getvalue(),
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="report.docx",
+        )
+        record = self.gmail_cleanup.GmailMessageRecord(
+            message_id="office-1",
+            thread_id="thread-office",
+            label_ids=("INBOX",),
+            raw_bytes=message.as_bytes(),
+        )
+        settings = self.gmail_cleanup.replace(
+            self.default_settings(),
+            attachment_types=("office",),
+            readable_folders=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backup_dir = Path(tmpdir) / "docs"
+            embedded_dir = Path(tmpdir) / "gp"
+            settings = self.gmail_cleanup.replace(settings, embedded_image_dir=embedded_dir)
+            with mock.patch.object(self.gmail_cleanup, "embed_marker_metadata"):
+                summary = self.gmail_cleanup.run_extract_media(
+                    FakeGmailClient(self.gmail_cleanup, [record]),
+                    query="has:attachment",
+                    backup_dir=backup_dir,
+                    max_results=25,
+                    apply_mode=False,
+                    settings=settings,
+                    export_only=True,
+                )
+
+            exported_record = summary["exported"][0]
+            folder_name = "office-1__Project-Update-2026"
+            self.assertTrue((backup_dir / folder_name / "gcm-office-1-01__report.docx").is_file())
+            self.assertTrue((embedded_dir / folder_name / "gcm-office-1-01-img001__report__image1.png").is_file())
+            self.assertEqual(exported_record["message_backup_folder"], folder_name)
+            self.assertEqual(exported_record["derived_media_dir"], str(embedded_dir))
+            self.assertEqual(exported_record["derived_media"][0]["source_generation"], "embedded-image")
+            self.assertEqual(exported_record["derived_media"][0]["group_search_token"], "gcm-office-1-01")
+
     def test_parser_counts_verbose_flags(self) -> None:
         parser = self.gmail_cleanup.build_parser()
         args = parser.parse_args(["extract-media", "--query", "has:attachment", "-vvv"])
@@ -1155,7 +1217,7 @@ class GmailCleanupTest(unittest.TestCase):
             "resolve_ffmpeg_path",
             return_value="ffmpeg",
         ), mock.patch.object(self.gmail_cleanup.subprocess, "run", side_effect=fake_run) as run:
-            _, written, _ = self.gmail_cleanup.write_backup_files(
+            _, written, _, derived_media = self.gmail_cleanup.write_backup_files(
                 Path(tmpdir),
                 plan,
                 plan.message_id,
@@ -1165,6 +1227,7 @@ class GmailCleanupTest(unittest.TestCase):
             )
 
         self.assertEqual(len(written), 1)
+        self.assertEqual(derived_media, [])
         self.assertEqual(written[0].mime_type, "video/mp4")
         self.assertEqual(written[0].source_attachment_mime_type, "audio/mpeg")
         self.assertEqual(written[0].source_generation, "audio-video")

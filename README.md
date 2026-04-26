@@ -297,6 +297,12 @@ gmail-cleanup extract-media --preset pdf-archive --backup-dir /path/to/local-bac
 gmail-cleanup extract-media --preset large-media --backup-dir /path/to/local-backup --use-index --audit-labels --apply -v
 ```
 
+Keep document exports readable and send embedded Office images to a separate Photos-style drop folder:
+
+```bash
+gmail-cleanup extract-media --preset office-docs --backup-dir /path/to/docs-bucket --embedded-image-dir /path/to/photos-dropzone --readable-folders --use-index --apply -v
+```
+
 Use PDF variants when you need a one-off behavior instead of the preset default:
 
 ```bash
@@ -342,6 +348,8 @@ Agent-friendly review artifacts are written as JSONL too:
 - Cleanup presets also exist for `large-media`, `office-docs`, `archives`, `audio-archive`, and `old-media`. These use `has:attachment -in:trash -in:spam`, `--max-results 50000`, conservative request pacing, and selector-specific filters. `audio-archive` also sets `--audio-mode video`.
 - The default attachment selectors are `image,video`. Other selectors are `pdf`, `media`, `large-media`, `office`, `archive`, `audio`, `legacy`, `code`, `calendar`, and `other`.
 - Detached signature/key sidecars with `.sig` or `.asc` filenames are ignored by cleanup selectors, including `other`, so report leftovers do not look like real PDF/media work.
+- `--readable-folders` keeps the message ID in each backup folder and appends a short sanitized subject snippet for easier local scanning.
+- `--embedded-image-dir` writes images found inside zip-based Office/OpenDocument files, such as `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, and `.odp`, into a second local drop folder while the original document stays in `--backup-dir`. Older binary Office formats such as `.doc`, `.xls`, and `.ppt` are still saved as documents, but embedded image extraction is best-effort and may not apply to them.
 - `--before-year`, `--min-message-bytes`, and `--min-part-bytes` are local filters applied after messages are inspected or loaded from the index. They are useful when you want repeated cleanup passes without changing the Gmail query.
 - `--audio-mode copy` keeps original audio files. `video` writes an MP4 with a still black frame and AAC audio for Google Photos-style video backup flows. `video-plus-original` writes both.
 - `gmail-cleanup report` uses the same query, preset, and extraction settings as `extract-media`, but only lists and classifies matched messages. It is useful after a run to separate real remaining work from Gmail search false positives.

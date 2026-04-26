@@ -10,6 +10,7 @@ import hashlib
 import html
 import http.client
 import importlib.util
+import io
 import json
 import mimetypes
 import os
@@ -25,6 +26,8 @@ import sys
 import threading
 import tempfile
 import time
+import unicodedata
+import zipfile
 import zlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
@@ -79,6 +82,7 @@ DEFAULT_MIN_MESSAGE_BYTES_ENV = "GMAIL_CLEANUP_MIN_MESSAGE_BYTES"
 DEFAULT_MIN_PART_BYTES_ENV = "GMAIL_CLEANUP_MIN_PART_BYTES"
 DEFAULT_TOKEN_ENV = "GMAIL_CLEANUP_TOKEN_CACHE"
 DEFAULT_TYPES_ENV = "GMAIL_CLEANUP_TYPES"
+DEFAULT_EMBEDDED_IMAGE_DIR_ENV = "GMAIL_CLEANUP_EMBEDDED_IMAGE_DIR"
 SKIPPED_LABEL_IDS = {"TRASH", "SPAM", "DRAFT"}
 UNSUPPORTED_CONTENT_TYPES = {
     "multipart/signed",
@@ -212,6 +216,8 @@ PDF_ORIGINAL_TRASH_GENERATIONS = {
     PDF_UNREADABLE_ORIGINAL_TRASH_GENERATION,
 }
 PDF_NOTE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+EMBEDDED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+READABLE_BACKUP_SUBJECT_CHARS = 60
 PASSWORD_HINT_PATTERN = re.compile(r"(?:password|passcode|pin)\s*(?:is|:)?\s*([A-Za-z0-9][A-Za-z0-9@._/-]{2,63})", re.IGNORECASE)
 PASSWORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._/-]{3,63}")
 NUMERIC_TOKEN_PATTERN = re.compile(r"\d{4,}")
@@ -446,6 +452,8 @@ class ExtractionSettings:
     before_year: int | None = None
     min_message_bytes: int = 0
     min_part_bytes: int = 0
+    readable_folders: bool = False
+    embedded_image_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -665,6 +673,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Only select attachment parts at least this many bytes.",
+    )
+    extract.add_argument(
+        "--readable-folders",
+        action="store_true",
+        help="Name backup folders as message-id plus a short sanitized subject snippet.",
+    )
+    extract.add_argument(
+        "--embedded-image-dir",
+        type=Path,
+        help=(
+            "Optional second drop directory for images found inside zip-based Office/OpenDocument files. "
+            f"Defaults to ${DEFAULT_EMBEDDED_IMAGE_DIR_ENV} or embedded_image_dir in config when set."
+        ),
     )
     extract.add_argument(
         "--pdf-mode",
@@ -955,6 +976,8 @@ def default_extraction_settings() -> ExtractionSettings:
         pdf_text_mode="none",
         empty_after_removal="skip",
         audio_mode="copy",
+        readable_folders=False,
+        embedded_image_dir=None,
     )
 
 
@@ -1014,6 +1037,8 @@ def build_extraction_settings(args: argparse.Namespace, config: dict[str, object
         pdf_text_mode=resolve_pdf_text_mode(getattr(args, "pdf_text_mode", None), config, config_path),
         empty_after_removal=resolve_empty_after_removal(getattr(args, "empty_after_removal", None), config, config_path),
         audio_mode=resolve_audio_mode(getattr(args, "audio_mode", None), config, config_path),
+        readable_folders=resolve_readable_folders(getattr(args, "readable_folders", False), config, config_path),
+        embedded_image_dir=resolve_embedded_image_dir(getattr(args, "embedded_image_dir", None), config, config_path),
     )
 
 
@@ -1067,9 +1092,11 @@ def load_config(path: Path) -> dict[str, object]:
         "pdf_render_format",
         "pdf_text_mode",
         "empty_after_removal",
+        "embedded_image_dir",
         "request_profile",
         "quota_units_per_second",
         "progress_format",
+        "readable_folders",
         "token_cache",
         "types",
     }
@@ -1153,6 +1180,11 @@ def resolve_backup_dir(explicit: Path | None, config: dict[str, object], config_
             f"${DEFAULT_BACKUP_DIR_ENV}, or add backup_dir to {config_path}."
         )
     return path
+
+
+def resolve_embedded_image_dir(explicit: Path | None, config: dict[str, object], config_path: Path) -> Path | None:
+    path = explicit or path_from_env(DEFAULT_EMBEDDED_IMAGE_DIR_ENV) or config_path_value(config, "embedded_image_dir", config_path)
+    return path.expanduser() if path is not None else None
 
 
 def resolve_credentials_path(explicit: Path | None, config: dict[str, object], config_path: Path) -> Path:
@@ -1451,6 +1483,11 @@ def resolve_progress_format(explicit: str | None, config: dict[str, object], con
     if value not in VALID_PROGRESS_FORMATS:
         raise ValueError(f"Unsupported progress format: {value}")
     return value
+
+
+def resolve_readable_folders(explicit: bool, config: dict[str, object], config_path: Path) -> bool:
+    configured = config_bool_value(config, "readable_folders", config_path)
+    return explicit or bool(configured)
 
 
 def resolve_audit_label_settings(args: argparse.Namespace, config: dict[str, object], config_path: Path) -> AuditLabelSettings:
@@ -2325,6 +2362,21 @@ def sanitize_filename(name: str) -> str:
     return sanitized or "attachment"
 
 
+def subject_slug(subject: str, max_chars: int = READABLE_BACKUP_SUBJECT_CHARS) -> str:
+    normalized = unicodedata.normalize("NFKD", subject)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", ascii_text).strip("-")
+    if not slug:
+        return "no-subject"
+    return slug[:max_chars].strip("-") or "no-subject"
+
+
+def backup_folder_name_for_plan(plan: PlannedMessage, settings: ExtractionSettings) -> str:
+    if not settings.readable_folders:
+        return plan.message_id
+    return sanitize_filename(f"{plan.message_id}__{subject_slug(plan.subject or '')}")
+
+
 def build_search_token(message_id: str, ordinal: int) -> str:
     return f"gcm-{message_id}-{ordinal:02d}"
 
@@ -2836,6 +2888,71 @@ def write_bytes_attachment(
         source_generation=source_generation,
         source_page_number=source_page_number,
     )
+
+
+def build_embedded_image_filename(search_token: str, original_filename: str, member_name: str, image_index: int) -> str:
+    original_stem = sanitize_filename(Path(original_filename).stem or "document")
+    member_path = Path(member_name)
+    member_stem = sanitize_filename(member_path.stem or "image")
+    suffix = member_path.suffix.lower() if len(member_path.suffix) <= 12 else ""
+    if suffix not in EMBEDDED_IMAGE_EXTENSIONS:
+        suffix = ""
+    return sanitize_filename(f"{search_token}-img{image_index:03d}__{original_stem}__{member_stem}{suffix}")
+
+
+def extract_embedded_images_from_document(
+    media_part: BufferedMediaPart,
+    embedded_image_dir: Path | None,
+    backup_folder_name: str,
+    *,
+    verbose: int = 0,
+) -> list[WrittenAttachment]:
+    if embedded_image_dir is None:
+        return []
+    extension = attachment_extension(media_part.filename)
+    if extension not in OFFICE_ATTACHMENT_EXTENSIONS:
+        return []
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(media_part.content_bytes))
+    except zipfile.BadZipFile:
+        log_progress(verbose, 3, f"No zip-based embedded image scan for {media_part.filename}")
+        return []
+    written: list[WrittenAttachment] = []
+    media_dir = embedded_image_dir / backup_folder_name
+    with archive:
+        image_index = 0
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            member_name = member.filename
+            suffix = Path(member_name).suffix.lower()
+            if suffix not in EMBEDDED_IMAGE_EXTENSIONS:
+                continue
+            image_bytes = archive.read(member)
+            if not image_bytes:
+                continue
+            image_index += 1
+            media_dir.mkdir(parents=True, exist_ok=True)
+            image_token = f"{media_part.search_token}-img{image_index:03d}"
+            written.append(
+                write_bytes_attachment(
+                    embedded_image_dir,
+                    media_dir,
+                    destination_name=build_embedded_image_filename(media_part.search_token, media_part.filename, member_name, image_index),
+                    original_filename=f"{media_part.filename}:{member_name}",
+                    search_token=image_token,
+                    mime_type=guess_mime_type_from_filename(member_name),
+                    content_bytes=image_bytes,
+                    disposition="derived",
+                    content_id=None,
+                    group_search_token=media_part.search_token,
+                    source_attachment_mime_type=media_part.mime_type,
+                    source_generation="embedded-image",
+                )
+            )
+    if written:
+        log_progress(verbose, 2, f"Extracted {len(written)} embedded image(s) from {media_part.filename}")
+    return written
 
 
 def write_file_attachment(
@@ -4289,16 +4406,17 @@ def write_pdf_outputs(
 def write_backup_files(
     backup_dir: Path,
     plan: PlannedMessage,
-    message_id: str,
+    backup_folder_name: str,
     media_parts: list[BufferedMediaPart],
     settings: ExtractionSettings,
     *,
     verbose: int = 0,
     assume_yes: bool = False,
-) -> tuple[Path, list[WrittenAttachment], list[PdfTextBlock]]:
-    message_dir = backup_dir / message_id
+) -> tuple[Path, list[WrittenAttachment], list[PdfTextBlock], list[WrittenAttachment]]:
+    message_dir = backup_dir / backup_folder_name
     message_dir.mkdir(parents=True, exist_ok=True)
     written: list[WrittenAttachment] = []
+    derived_media: list[WrittenAttachment] = []
     pdf_text_blocks: list[PdfTextBlock] = []
     for media_part in media_parts:
         if media_part.mime_type == PDF_MIME_TYPE:
@@ -4340,7 +4458,15 @@ def write_backup_files(
                 source_generation="attachment-copy",
             )
         )
-    return message_dir, written, pdf_text_blocks
+        derived_media.extend(
+            extract_embedded_images_from_document(
+                media_part,
+                settings.embedded_image_dir,
+                backup_folder_name,
+                verbose=verbose,
+            )
+        )
+    return message_dir, written, pdf_text_blocks, derived_media
 
 
 IMAGE_METADATA_TAGS = (
@@ -4759,6 +4885,7 @@ def settings_checkpoint_payload(settings: ExtractionSettings) -> dict[str, objec
         "attachment_types": list(settings.attachment_types),
         "before_year": settings.before_year,
         "empty_after_removal": settings.empty_after_removal,
+        "embedded_image_dir": str(settings.embedded_image_dir) if settings.embedded_image_dir is not None else None,
         "min_message_bytes": settings.min_message_bytes,
         "min_part_bytes": settings.min_part_bytes,
         "pdf_mode": settings.pdf_mode,
@@ -4770,6 +4897,7 @@ def settings_checkpoint_payload(settings: ExtractionSettings) -> dict[str, objec
         "pdf_render_dpi": settings.pdf_render_dpi,
         "pdf_render_format": settings.pdf_render_format,
         "pdf_text_mode": settings.pdf_text_mode,
+        "readable_folders": settings.readable_folders,
     }
 
 
@@ -4950,14 +5078,14 @@ def execute_message_plan(
 ) -> dict[str, object]:
     extracted_at = datetime.now(timezone.utc)
     operation_id = f"{extracted_at.strftime('%Y%m%dT%H%M%SZ')}-{plan.message_id}"
-    backup_folder_name = plan.message_id
+    backup_folder_name = backup_folder_name_for_plan(plan, settings)
     had_existing_backup_folder = (backup_dir / backup_folder_name).exists()
     log_progress(verbose, 2, f"Rewriting {format_message_label(plan)}")
     _, buffered = rewrite_message_for_backup(plan, extracted_at, backup_folder_name, operation_id, settings=settings)
-    _, written, pdf_text_blocks = write_backup_files(
+    _, written, pdf_text_blocks, derived_media = write_backup_files(
         backup_dir,
         plan,
-        plan.message_id,
+        backup_folder_name,
         buffered,
         settings,
         verbose=verbose,
@@ -4968,7 +5096,7 @@ def execute_message_plan(
         2,
         f"Wrote {len(written)} backup file(s) for {plan.message_id} into {backup_folder_name}/",
     )
-    embed_marker_metadata(written, plan, operation_id, extracted_at, verbose=verbose, assume_yes=assume_yes)
+    embed_marker_metadata(written + derived_media, plan, operation_id, extracted_at, verbose=verbose, assume_yes=assume_yes)
     trash_written_attachments_marked_for_trash(written, verbose=verbose, assume_yes=assume_yes)
     rewritten_raw, _ = rewrite_message_for_backup(
         plan,
@@ -4999,10 +5127,12 @@ def execute_message_plan(
         "applied_at": extracted_at.astimezone(timezone.utc).isoformat(timespec="seconds"),
         "attachments": [written_attachment_to_dict(item) for item in written],
         "backup_dir": str(backup_dir),
+        "derived_media": [written_attachment_to_dict(item) for item in derived_media],
+        "derived_media_dir": str(settings.embedded_image_dir) if settings.embedded_image_dir is not None else None,
         "gmail_labels": {
             "processed": audit_labels.processed_name if audit_labels is not None else None,
         },
-        "metadata_embedded": all(written_attachment_metadata_embedded(item) for item in written),
+        "metadata_embedded": all(written_attachment_metadata_embedded(item) for item in written + derived_media),
         "message_backup_folder": backup_folder_name,
         "new_message_id": new_message_id,
         "operation_id": operation_id,
@@ -5026,10 +5156,10 @@ def export_message_plan(
 ) -> dict[str, object]:
     exported_at = datetime.now(timezone.utc)
     operation_id = f"{exported_at.strftime('%Y%m%dT%H%M%SZ')}-{plan.message_id}-export"
-    backup_folder_name = plan.message_id
+    backup_folder_name = backup_folder_name_for_plan(plan, settings)
     message = parse_email_message(plan.raw_bytes)
     buffered = collect_buffered_media(message, plan)
-    _, written, pdf_text_blocks = write_backup_files(
+    _, written, pdf_text_blocks, derived_media = write_backup_files(
         backup_dir,
         plan,
         backup_folder_name,
@@ -5044,12 +5174,14 @@ def export_message_plan(
         2,
         f"Exported {len(written)} backup file(s) for {plan.message_id} into {backup_folder_name}/",
     )
-    embed_marker_metadata(written, plan, operation_id, exported_at, verbose=verbose, assume_yes=assume_yes)
+    embed_marker_metadata(written + derived_media, plan, operation_id, exported_at, verbose=verbose, assume_yes=assume_yes)
     trash_written_attachments_marked_for_trash(written, verbose=verbose, assume_yes=assume_yes)
     manifest_record = {
         "action": "export_attachments",
         "attachments": [written_attachment_to_dict(item) for item in written],
         "backup_dir": str(backup_dir),
+        "derived_media": [written_attachment_to_dict(item) for item in derived_media],
+        "derived_media_dir": str(settings.embedded_image_dir) if settings.embedded_image_dir is not None else None,
         "gmail_modified": False,
         "message_backup_folder": backup_folder_name,
         "operation_id": operation_id,
