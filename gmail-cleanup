@@ -193,6 +193,12 @@ CODE_ATTACHMENT_EXTENSIONS = {
     ".vbs",
 }
 CALENDAR_ATTACHMENT_EXTENSIONS = {".ics"}
+IGNORED_SIDECAR_EXTENSIONS = {".asc", ".sig"}
+IGNORED_SIDECAR_MIME_TYPES = {
+    "application/pgp-keys",
+    "application/pgp-signature",
+    "application/pkcs7-signature",
+}
 DEFAULT_PROCESSED_LABEL = "gmail-cleanup/processed"
 DEFAULT_REVIEW_LABEL = "gmail-cleanup/review"
 DEFAULT_PDF_RENDER_DPI = 300
@@ -2215,11 +2221,21 @@ def attachment_extension(filename: str | None) -> str:
     return suffix if len(suffix) <= 24 else ""
 
 
+def is_ignored_sidecar_part(part: EmailMessage) -> bool:
+    return (
+        attachment_extension(part.get_filename()) in IGNORED_SIDECAR_EXTENSIONS
+        or part.get_content_type().lower() in IGNORED_SIDECAR_MIME_TYPES
+    )
+
+
 def attachment_categories_for_part(part: EmailMessage) -> set[str]:
     content_type = infer_attachment_mime_type(part)
     maintype = content_type.split("/", 1)[0]
     extension = attachment_extension(part.get_filename())
     categories: set[str] = set()
+    if is_ignored_sidecar_part(part):
+        categories.add("ignored-sidecar")
+        return categories
     if maintype == "image":
         categories.update(("image", "media"))
     if maintype == "video":
@@ -5260,9 +5276,15 @@ def message_filename_records(message: EmailMessage) -> list[dict[str, object]]:
                 "content_type": part.get_content_type().lower(),
                 "disposition": part.get_content_disposition(),
                 "filename": filename,
+                "ignored_sidecar": is_ignored_sidecar_part(part),
             }
         )
     return records
+
+
+def message_has_only_ignored_sidecars(message: EmailMessage) -> bool:
+    attachment_parts = [part for part in message.walk() if is_analyzable_attachment_part(part)]
+    return bool(attachment_parts) and all(is_ignored_sidecar_part(part) for part in attachment_parts)
 
 
 def iso_now() -> str:
@@ -6065,7 +6087,7 @@ def run_report(
         max_inflight=int(profile_config["max_inflight"]),
     )
     items: list[dict[str, object]] = []
-    counts = {"actionable": 0, "false_positive": 0, "skipped": 0}
+    counts = {"actionable": 0, "ignored_sidecar": 0, "false_positive": 0, "skipped": 0}
     completed_records = completed_manifest_records_by_original_id(backup_dir) if backup_dir is not None else {}
     exported_records = exported_manifest_records_by_original_id(backup_dir) if backup_dir is not None else {}
     manifest_counts = {"pending": 0, "exported_pending_gmail_sync": 0, "completed": 0}
@@ -6079,6 +6101,8 @@ def run_report(
             category = "skipped"
         elif plan.media_parts:
             category = "actionable"
+        elif message_has_only_ignored_sidecars(message):
+            category = "ignored_sidecar"
         else:
             category = "false_positive"
         completed_record = completed_records.get(plan.message_id)
@@ -6148,6 +6172,7 @@ def render_report(report: dict[str, object]) -> str:
         f"Query: {report['query']}",
         f"Matched Gmail messages: {report['matched_messages']}",
         f"Actionable: {counts['actionable']}",
+        f"Ignored sidecars: {counts['ignored_sidecar']}",
         f"False positives: {counts['false_positive']}",
         f"Skipped: {counts['skipped']}",
     ]
@@ -6176,7 +6201,10 @@ def render_report(report: dict[str, object]) -> str:
             lines.append(f"    link: {item['gmail_url']}")
         filenames = item.get("filenames") or []
         for filename in filenames:
-            lines.append(f"    file: {filename['filename']} ({filename['content_type']})")
+            if item["category"] == "skipped" and filename.get("ignored_sidecar"):
+                continue
+            prefix = "ignored sidecar" if filename.get("ignored_sidecar") else "file"
+            lines.append(f"    {prefix}: {filename['filename']} ({filename['content_type']})")
     return "\n".join(lines)
 
 

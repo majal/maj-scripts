@@ -874,12 +874,80 @@ class GmailCleanupTest(unittest.TestCase):
             request_profile="conservative",
         )
 
-        self.assertEqual(report["counts"], {"actionable": 1, "false_positive": 1, "skipped": 1})
+        self.assertEqual(report["counts"], {"actionable": 1, "ignored_sidecar": 0, "false_positive": 1, "skipped": 1})
         categories = {item["message_id"]: item["category"] for item in report["items"]}
         self.assertEqual(categories["msg-1"], "actionable")
         self.assertEqual(categories["zip-1"], "false_positive")
         self.assertEqual(categories["signed-1"], "skipped")
         self.assertEqual(report["matched_messages"], 3)
+
+    def test_report_classifies_signature_sidecars_as_ignored(self) -> None:
+        sidecar_message = EmailMessage()
+        sidecar_message["Subject"] = "Detached PDF signature"
+        sidecar_message["From"] = "sender@example.com"
+        sidecar_message["To"] = "maj@example.com"
+        sidecar_message["Date"] = "Thu, 24 Apr 2026 12:00:00 +0800"
+        sidecar_message.set_content("Only the detached signature matched the PDF filename search.")
+        sidecar_message.add_attachment(
+            b"SIGDATA",
+            maintype="application",
+            subtype="octet-stream",
+            filename="statement.pdf.sig",
+        )
+        sidecar_record = self.gmail_cleanup.GmailMessageRecord(
+            message_id="sidecar-1",
+            thread_id="thread-sidecar",
+            label_ids=("INBOX",),
+            raw_bytes=sidecar_message.as_bytes(),
+        )
+        settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("pdf",))
+        client = FakeGmailClient(self.gmail_cleanup, [sidecar_record])
+
+        report = self.gmail_cleanup.run_report(
+            client,
+            "filename:pdf -in:trash -in:spam",
+            25,
+            settings,
+            request_profile="conservative",
+        )
+        rendered = self.gmail_cleanup.render_report(report)
+
+        self.assertEqual(report["counts"], {"actionable": 0, "ignored_sidecar": 1, "false_positive": 0, "skipped": 0})
+        self.assertEqual(report["items"][0]["category"], "ignored_sidecar")
+        self.assertTrue(report["items"][0]["filenames"][0]["ignored_sidecar"])
+        self.assertIn("Ignored sidecars: 1", rendered)
+        self.assertIn("ignored sidecar: statement.pdf.sig", rendered)
+
+    def test_signature_sidecars_are_not_selected_as_other_attachments(self) -> None:
+        sidecar_message = EmailMessage()
+        sidecar_message["Subject"] = "Signature sidecars"
+        sidecar_message["From"] = "sender@example.com"
+        sidecar_message["To"] = "maj@example.com"
+        sidecar_message["Date"] = "Thu, 24 Apr 2026 12:00:00 +0800"
+        sidecar_message.set_content("Detached signature and key sidecars.")
+        sidecar_message.add_attachment(
+            b"SIGDATA",
+            maintype="application",
+            subtype="octet-stream",
+            filename="statement.pdf.sig",
+        )
+        sidecar_message.add_attachment(
+            b"KEYDATA",
+            maintype="text",
+            subtype="plain",
+            filename="Majal Abe Mirasol.asc",
+        )
+        record = self.gmail_cleanup.GmailMessageRecord(
+            message_id="sidecar-1",
+            thread_id="thread-sidecar",
+            label_ids=("INBOX",),
+            raw_bytes=sidecar_message.as_bytes(),
+        )
+        settings = self.gmail_cleanup.replace(self.default_settings(), attachment_types=("other",))
+
+        plan = self.gmail_cleanup.plan_message(record, settings)
+
+        self.assertEqual(plan.media_parts, ())
 
     def test_report_can_include_gmail_review_links(self) -> None:
         client = FakeGmailClient(self.gmail_cleanup, [self.build_record("msg-1")])
@@ -932,7 +1000,7 @@ class GmailCleanupTest(unittest.TestCase):
                 backup_dir=backup_dir,
             )
 
-        self.assertEqual(report["counts"], {"actionable": 3, "false_positive": 0, "skipped": 0})
+        self.assertEqual(report["counts"], {"actionable": 3, "ignored_sidecar": 0, "false_positive": 0, "skipped": 0})
         self.assertEqual(
             report["local_manifest"]["counts"],
             {"pending": 1, "exported_pending_gmail_sync": 1, "completed": 1},
@@ -989,7 +1057,7 @@ class GmailCleanupTest(unittest.TestCase):
                     request_profile="conservative",
                 )
 
-                self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+                self.assertEqual(report["counts"], {"actionable": 2, "ignored_sidecar": 0, "false_positive": 0, "skipped": 0})
                 self.assertEqual(client.list_calls, 2)
                 self.assertEqual(client.raw_many_calls, 1)
 
@@ -1019,7 +1087,7 @@ class GmailCleanupTest(unittest.TestCase):
                     request_profile="conservative",
                 )
 
-                self.assertEqual(report["counts"], {"actionable": 2, "false_positive": 0, "skipped": 0})
+                self.assertEqual(report["counts"], {"actionable": 2, "ignored_sidecar": 0, "false_positive": 0, "skipped": 0})
                 self.assertEqual(client.list_calls, 2)
                 self.assertEqual(client.raw_many_calls, 2)
 
