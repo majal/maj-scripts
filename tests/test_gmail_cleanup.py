@@ -748,6 +748,38 @@ class GmailCleanupTest(unittest.TestCase):
         self.assertEqual(settings.pdf_text_mode, "auto")
         self.assertEqual(settings.empty_after_removal, "note-only")
 
+    def test_extract_media_dry_run_reuses_existing_apply_scoped_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_cache = Path(tmpdir) / "token.json"
+            token_cache.write_text(
+                json.dumps(
+                    {
+                        "scopes": list(self.gmail_cleanup.APPLY_SCOPES),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            scopes = self.gmail_cleanup.extract_media_auth_scopes(token_cache, apply_mode=False)
+
+        self.assertEqual(scopes, self.gmail_cleanup.APPLY_SCOPES)
+
+    def test_extract_media_dry_run_defaults_to_readonly_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_cache = Path(tmpdir) / "missing-token.json"
+
+            scopes = self.gmail_cleanup.extract_media_auth_scopes(token_cache, apply_mode=False)
+
+        self.assertEqual(scopes, self.gmail_cleanup.DRY_RUN_SCOPES)
+
+    def test_extract_media_apply_uses_apply_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            token_cache = Path(tmpdir) / "missing-token.json"
+
+            scopes = self.gmail_cleanup.extract_media_auth_scopes(token_cache, apply_mode=True)
+
+        self.assertEqual(scopes, self.gmail_cleanup.APPLY_SCOPES)
+
     def test_report_classifies_actionable_false_positive_and_skipped(self) -> None:
         zip_message = EmailMessage()
         zip_message["Subject"] = "ZIP with pdf in name"
