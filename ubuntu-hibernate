@@ -1,0 +1,952 @@
+#!/usr/bin/env python3
+"""Guided hibernate diagnostics and setup for Ubuntu 26.04."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import textwrap
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+SUPPORTED_VERSION_ID = "26.04"
+SCRIPT_NAME = "ubuntu-hibernate"
+SLEEP_CONF = Path("/etc/systemd/sleep.conf.d/90-ubuntu-hibernate.conf")
+RESUME_CONF = Path("/etc/initramfs-tools/conf.d/resume")
+BACKUP_ROOT = Path("/var/backups/ubuntu-hibernate")
+
+SLEEP_CONF_CONTENT = """# Managed by ubuntu-hibernate.
+# Local override for systemd hibernate advertisement and kernel sleep mode.
+[Sleep]
+AllowHibernation=yes
+HibernateMode=platform shutdown
+HibernateState=disk
+"""
+
+
+@dataclass
+class CommandResult:
+    args: list[str]
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    skipped: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+@dataclass
+class SwapEntry:
+    name: str
+    kind: str
+    size_bytes: int
+    used_bytes: int
+    priority: int
+    uuid: str | None = None
+    fstype: str | None = None
+    canonical_name: str | None = None
+    mapper_name: str | None = None
+    ephemeral: bool = False
+    ephemeral_reason: str | None = None
+
+    @property
+    def is_file(self) -> bool:
+        return self.kind == "file"
+
+    @property
+    def is_zram(self) -> bool:
+        return self.name.startswith("/dev/zram")
+
+    @property
+    def is_zvol(self) -> bool:
+        return self.name.startswith("/dev/zd")
+
+    @property
+    def resume_supported_by_setup(self) -> bool:
+        return bool(self.uuid) and not self.is_file and not self.is_zram and not self.is_zvol and not self.ephemeral
+
+
+@dataclass
+class Check:
+    id: str
+    title: str
+    status: str
+    summary: str
+    details: list[str] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+def root_join(root: Path, absolute_path: Path | str) -> Path:
+    path = Path(absolute_path)
+    if root == Path("/"):
+        return path
+    return root / str(path).lstrip("/")
+
+
+def read_text(root: Path, absolute_path: Path | str) -> str:
+    try:
+        return root_join(root, absolute_path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return ""
+
+
+def parse_key_value_file(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"')
+        values[key] = value
+    return values
+
+
+def parse_proc_swaps(text: str) -> list[SwapEntry]:
+    swaps: list[SwapEntry] = []
+    for line in text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            size_bytes = int(parts[2]) * 1024
+            used_bytes = int(parts[3]) * 1024
+            priority = int(parts[4])
+        except ValueError:
+            continue
+        swaps.append(SwapEntry(parts[0], parts[1], size_bytes, used_bytes, priority))
+    return swaps
+
+
+def parse_mem_total(text: str) -> int:
+    for line in text.splitlines():
+        if not line.startswith("MemTotal:"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                return int(parts[1]) * 1024
+            except ValueError:
+                return 0
+    return 0
+
+
+def parse_disk_modes(text: str) -> tuple[list[str], str | None]:
+    modes: list[str] = []
+    active: str | None = None
+    for token in text.split():
+        if token.startswith("[") and token.endswith("]"):
+            mode = token.strip("[]")
+            active = mode
+            modes.append(mode)
+        else:
+            modes.append(token)
+    return modes, active
+
+
+def parse_crypttab(text: str) -> dict[str, dict[str, str]]:
+    entries: dict[str, dict[str, str]] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        entries[parts[0]] = {
+            "source": parts[1],
+            "keyfile": parts[2] if len(parts) > 2 else "none",
+            "options": parts[3] if len(parts) > 3 else "",
+        }
+    return entries
+
+
+def command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def run_command(args: list[str], timeout: int | None = 15) -> CommandResult:
+    if not command_exists(args[0]):
+        return CommandResult(args=args, returncode=127, stderr=f"{args[0]} not found", skipped=True)
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return CommandResult(args=args, returncode=124, stdout=stdout, stderr=stderr or "command timed out")
+    except OSError as exc:
+        return CommandResult(args=args, returncode=126, stderr=str(exc))
+    return CommandResult(args=args, returncode=result.returncode, stdout=result.stdout, stderr=result.stderr)
+
+
+def blkid_value(device: str, tag: str) -> str | None:
+    result = run_command(["blkid", "-s", tag, "-o", "value", device])
+    if not result.ok:
+        if tag == "UUID":
+            return uuid_from_dev_links(device)
+        return lsblk_value(device, tag)
+    value = result.stdout.strip()
+    return value or None
+
+
+def lsblk_value(device: str, tag: str) -> str | None:
+    column = {"UUID": "UUID", "TYPE": "FSTYPE"}.get(tag)
+    if not column:
+        return None
+    result = run_command(["lsblk", "-nro", column, device])
+    if not result.ok:
+        return None
+    value = result.stdout.splitlines()[0].strip() if result.stdout.splitlines() else ""
+    return value or None
+
+
+def uuid_from_dev_links(device: str) -> str | None:
+    by_uuid = Path("/dev/disk/by-uuid")
+    if not by_uuid.is_dir():
+        return None
+    device_real = run_command(["readlink", "-f", device])
+    if not device_real.ok or not device_real.stdout.strip():
+        return None
+    target = device_real.stdout.strip()
+    for link in by_uuid.iterdir():
+        link_real = run_command(["readlink", "-f", str(link)])
+        if link_real.ok and link_real.stdout.strip() == target:
+            return link.name
+    return None
+
+
+def mapper_name_for_device(device: str) -> str | None:
+    path = Path(device)
+    if str(path).startswith("/dev/mapper/"):
+        return path.name
+    if path.name.startswith("dm-"):
+        result = run_command(["dmsetup", "info", "-c", "--noheadings", "-o", "name", device])
+        if result.ok:
+            name = result.stdout.strip()
+            return name or None
+    return None
+
+
+def enrich_swaps(swaps: list[SwapEntry], crypttab: dict[str, dict[str, str]]) -> None:
+    for swap in swaps:
+        if swap.name.startswith("/dev/"):
+            resolved = run_command(["readlink", "-f", swap.name])
+            if resolved.ok:
+                swap.canonical_name = resolved.stdout.strip() or None
+            swap.uuid = blkid_value(swap.name, "UUID")
+            swap.fstype = blkid_value(swap.name, "TYPE")
+            swap.mapper_name = mapper_name_for_device(swap.name) or (
+                mapper_name_for_device(swap.canonical_name) if swap.canonical_name else None
+            )
+
+        if swap.mapper_name and swap.mapper_name in crypttab:
+            keyfile = crypttab[swap.mapper_name].get("keyfile", "")
+            if keyfile in {"/dev/urandom", "/dev/random", "/dev/zero", "random"}:
+                swap.ephemeral = True
+                swap.ephemeral_reason = f"{swap.mapper_name} uses ephemeral crypttab keyfile {keyfile}"
+
+
+def format_bytes(value: int) -> str:
+    if value <= 0:
+        return "0 B"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(amount)} {unit}"
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{value} B"
+
+
+def add_check(
+    checks: list[Check],
+    check_id: str,
+    title: str,
+    status: str,
+    summary: str,
+    details: list[str] | None = None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    checks.append(Check(check_id, title, status, summary, details or [], data or {}))
+
+
+def overall_status(checks: list[Check]) -> str:
+    statuses = {check.status for check in checks}
+    if "fail" in statuses:
+        return "fail"
+    if "warn" in statuses:
+        return "warn"
+    return "pass"
+
+
+def choose_resume_candidate(swaps: list[SwapEntry]) -> SwapEntry | None:
+    candidates = [swap for swap in swaps if swap.resume_supported_by_setup]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda swap: (swap.size_bytes, swap.priority))
+
+
+def collect_report(root: Path | None = None) -> dict[str, Any]:
+    root = root or Path(os.environ.get("UBUNTU_HIBERNATE_ROOT", "/"))
+    checks: list[Check] = []
+
+    os_release = parse_key_value_file(read_text(root, "/etc/os-release"))
+    os_id = os_release.get("ID", "")
+    version_id = os_release.get("VERSION_ID", "")
+    pretty_name = os_release.get("PRETTY_NAME", "unknown Linux")
+    if os_id == "ubuntu" and version_id == SUPPORTED_VERSION_ID:
+        add_check(checks, "os", "Operating system", "pass", f"Detected supported target: {pretty_name}.")
+    elif os_id == "ubuntu":
+        add_check(
+            checks,
+            "os",
+            "Operating system",
+            "warn",
+            f"Detected {pretty_name}; setup is tested for Ubuntu {SUPPORTED_VERSION_ID}.",
+            ["Run diagnostics freely. Use --allow-unsupported only if you understand the risk."],
+        )
+    else:
+        add_check(
+            checks,
+            "os",
+            "Operating system",
+            "warn",
+            f"Detected {pretty_name}; this tool is designed for Ubuntu {SUPPORTED_VERSION_ID}.",
+        )
+
+    power_state = read_text(root, "/sys/power/state").strip()
+    power_states = power_state.split()
+    if "disk" in power_states:
+        add_check(checks, "kernel-state", "Kernel hibernate state", "pass", "/sys/power/state includes disk.")
+    else:
+        add_check(
+            checks,
+            "kernel-state",
+            "Kernel hibernate state",
+            "fail",
+            "/sys/power/state does not include disk, so the running kernel is not advertising hibernation.",
+            [f"Current states: {power_state or 'unavailable'}"],
+        )
+
+    disk_raw = read_text(root, "/sys/power/disk").strip()
+    disk_modes, active_disk_mode = parse_disk_modes(disk_raw)
+    if disk_modes and any(mode in {"platform", "shutdown"} for mode in disk_modes):
+        add_check(
+            checks,
+            "kernel-mode",
+            "Kernel hibernate mode",
+            "pass",
+            f"/sys/power/disk offers {', '.join(disk_modes)}.",
+            [f"Current mode: {active_disk_mode or 'unknown'}"],
+        )
+    elif disk_modes:
+        add_check(
+            checks,
+            "kernel-mode",
+            "Kernel hibernate mode",
+            "warn",
+            f"/sys/power/disk offers {', '.join(disk_modes)}, but not platform or shutdown.",
+            [f"Current mode: {active_disk_mode or 'unknown'}"],
+        )
+    else:
+        add_check(checks, "kernel-mode", "Kernel hibernate mode", "warn", "/sys/power/disk is unavailable.")
+
+    can_hibernate = "unknown"
+    busctl = run_command(
+        [
+            "busctl",
+            "get-property",
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            "CanHibernate",
+        ]
+    )
+    if busctl.ok:
+        can_hibernate = busctl.stdout.strip().removeprefix("s ").strip().strip('"') or "unknown"
+        if can_hibernate == "yes":
+            add_check(checks, "logind", "systemd-logind hibernate", "pass", "logind currently reports CanHibernate=yes.")
+        else:
+            add_check(
+                checks,
+                "logind",
+                "systemd-logind hibernate",
+                "warn",
+                f"logind currently reports CanHibernate={can_hibernate}.",
+                ["This may improve after resume config, sleep policy, and initramfs are updated."],
+            )
+    else:
+        add_check(
+            checks,
+            "logind",
+            "systemd-logind hibernate",
+            "warn",
+            "Could not ask logind for CanHibernate.",
+            [busctl.stderr.strip() or "busctl did not return a usable value."],
+        )
+
+    mem_total = parse_mem_total(read_text(root, "/proc/meminfo"))
+    crypttab = parse_crypttab(read_text(root, "/etc/crypttab"))
+    swaps = parse_proc_swaps(read_text(root, "/proc/swaps"))
+    enrich_swaps(swaps, crypttab)
+    candidate = choose_resume_candidate(swaps)
+    total_swap = sum(swap.size_bytes for swap in swaps if not swap.is_zram)
+    largest_swap = max(swaps, key=lambda swap: swap.size_bytes, default=None)
+    file_swaps = [swap for swap in swaps if swap.is_file]
+    zram_swaps = [swap for swap in swaps if swap.is_zram]
+
+    if not swaps:
+        add_check(
+            checks,
+            "swap",
+            "Swap space",
+            "fail",
+            "No active swap is listed in /proc/swaps.",
+            ["Hibernate needs a persistent resume target large enough for the saved memory image."],
+        )
+    elif candidate is None:
+        status = "warn" if file_swaps else "fail"
+        summary = "No active block-device swap target is ready for automatic setup."
+        details = []
+        if file_swaps:
+            details.append("Swap files can work, but they require bootloader resume_offset wiring; this first release does not edit bootloaders.")
+        if zram_swaps:
+            details.append("zram is memory-backed and cannot hold a hibernate image across power loss.")
+        if largest_swap:
+            details.append(f"Largest swap seen: {largest_swap.name} ({largest_swap.kind}, {format_bytes(largest_swap.size_bytes)}).")
+        add_check(checks, "swap", "Swap space", status, summary, details)
+    elif candidate.size_bytes < mem_total:
+        add_check(
+            checks,
+            "swap",
+            "Swap space",
+            "fail",
+            f"Best resume candidate is smaller than RAM: {format_bytes(candidate.size_bytes)} swap vs {format_bytes(mem_total)} RAM.",
+            [f"Candidate: {candidate.name}", "A conservative setup wants swap at least as large as physical RAM."],
+        )
+    else:
+        add_check(
+            checks,
+            "swap",
+            "Swap space",
+            "pass",
+            f"Found active block-device swap candidate {candidate.name} ({format_bytes(candidate.size_bytes)}).",
+            [f"RAM: {format_bytes(mem_total)}", f"Total non-zram swap: {format_bytes(total_swap)}"],
+        )
+
+    update_initramfs = command_exists("update-initramfs")
+    resume_hook = root_join(root, "/usr/share/initramfs-tools/hooks/resume").exists()
+    resume_script = root_join(root, "/usr/share/initramfs-tools/scripts/local-premount/resume").exists()
+    if update_initramfs and resume_hook and resume_script:
+        add_check(checks, "initramfs", "initramfs-tools resume support", "pass", "initramfs-tools resume hook and local-premount resume script are present.")
+    else:
+        details = []
+        if not update_initramfs:
+            details.append("update-initramfs was not found in PATH.")
+        if not resume_hook:
+            details.append("/usr/share/initramfs-tools/hooks/resume was not found.")
+        if not resume_script:
+            details.append("/usr/share/initramfs-tools/scripts/local-premount/resume was not found.")
+        add_check(checks, "initramfs", "initramfs-tools resume support", "fail", "Required initramfs resume pieces are missing.", details)
+
+    resume_config = parse_key_value_file(read_text(root, RESUME_CONF))
+    current_resume = resume_config.get("RESUME")
+    recommended_resume = f"UUID={candidate.uuid}" if candidate and candidate.uuid else None
+    if recommended_resume and current_resume == recommended_resume:
+        add_check(checks, "resume-config", "Resume config", "pass", f"{RESUME_CONF} already points at {recommended_resume}.")
+    elif recommended_resume and current_resume:
+        add_check(
+            checks,
+            "resume-config",
+            "Resume config",
+            "warn",
+            f"{RESUME_CONF} points at {current_resume}, but this run recommends {recommended_resume}.",
+        )
+    elif recommended_resume:
+        add_check(
+            checks,
+            "resume-config",
+            "Resume config",
+            "warn",
+            f"{RESUME_CONF} is not set yet; setup can write {recommended_resume}.",
+        )
+    else:
+        add_check(checks, "resume-config", "Resume config", "warn", "No safe RESUME= target could be selected automatically.")
+
+    cmdline = read_text(root, "/proc/cmdline").strip()
+    cmdline_parts = set(cmdline.split())
+    if "noresume" in cmdline_parts:
+        add_check(checks, "cmdline", "Kernel command line", "fail", "The running kernel command line contains noresume.")
+    elif any(part.startswith("resume=") for part in cmdline_parts):
+        add_check(checks, "cmdline", "Kernel command line", "pass", "The running kernel command line already contains resume=.")
+    else:
+        status = "info" if candidate else "warn"
+        add_check(
+            checks,
+            "cmdline",
+            "Kernel command line",
+            status,
+            "The running kernel command line does not contain resume=.",
+            ["For block-device swap on Ubuntu initramfs-tools, RESUME= in the initramfs config is usually enough.", "Swap files still need resume_offset bootloader wiring."],
+        )
+
+    if candidate and candidate.ephemeral:
+        add_check(
+            checks,
+            "encryption",
+            "Encrypted swap",
+            "fail",
+            candidate.ephemeral_reason or "The selected swap target appears to use an ephemeral encryption key.",
+            ["Hibernate cannot resume from a swap device that gets a new random key every boot."],
+        )
+    elif candidate and candidate.mapper_name and candidate.mapper_name in crypttab:
+        add_check(
+            checks,
+            "encryption",
+            "Encrypted swap",
+            "info",
+            f"Selected swap target is mapped as {candidate.mapper_name}.",
+            ["Make sure the device can be unlocked early enough during boot."],
+        )
+    elif crypttab:
+        add_check(checks, "encryption", "Encrypted swap", "info", "crypttab exists; no ephemeral selected swap target was detected.")
+    else:
+        add_check(checks, "encryption", "Encrypted swap", "info", "No /etc/crypttab entries were detected.")
+
+    nvidia_detected = False
+    gpu_details: list[str] = []
+    lspci = run_command(["lspci"])
+    if lspci.ok:
+        for line in lspci.stdout.splitlines():
+            if any(label in line for label in ("VGA compatible controller", "3D controller", "Display controller")):
+                gpu_details.append(line)
+                if "NVIDIA" in line.upper():
+                    nvidia_detected = True
+    if root_join(root, "/proc/driver/nvidia/version").exists() or command_exists("nvidia-smi"):
+        nvidia_detected = True
+    if nvidia_detected:
+        add_check(
+            checks,
+            "gpu",
+            "GPU caution",
+            "warn",
+            "NVIDIA graphics were detected.",
+            gpu_details or ["NVIDIA tooling or driver files were detected."],
+        )
+    else:
+        add_check(checks, "gpu", "GPU caution", "info", "No NVIDIA GPU signal was detected.", gpu_details)
+
+    sleep_conf_exists = root_join(root, SLEEP_CONF).exists()
+    add_check(
+        checks,
+        "sleep-policy",
+        "systemd sleep policy",
+        "pass" if sleep_conf_exists else "info",
+        f"{SLEEP_CONF} {'exists' if sleep_conf_exists else 'is not installed yet'}.",
+    )
+
+    report = {
+        "tool": SCRIPT_NAME,
+        "supported_target": f"Ubuntu {SUPPORTED_VERSION_ID}",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "overall_status": overall_status(checks),
+        "host": {
+            "os_pretty_name": pretty_name,
+            "os_id": os_id,
+            "version_id": version_id,
+            "kernel": os.uname().release if hasattr(os, "uname") else "",
+            "machine": os.uname().machine if hasattr(os, "uname") else "",
+            "can_hibernate": can_hibernate,
+            "mem_total_bytes": mem_total,
+            "power_state": power_state,
+            "power_disk": disk_raw,
+        },
+        "swaps": [asdict(swap) for swap in swaps],
+        "recommended_resume": recommended_resume,
+        "checks": [asdict(check) for check in checks],
+    }
+    return report
+
+
+def print_doctor(report: dict[str, Any]) -> None:
+    print(f"{SCRIPT_NAME} doctor")
+    print(f"Target: {report['supported_target']}")
+    print(f"Detected: {report['host']['os_pretty_name']} / kernel {report['host']['kernel']}")
+    print(f"Overall: {report['overall_status'].upper()}")
+    print()
+    for check in report["checks"]:
+        status = check["status"].upper()
+        print(f"[{status}] {check['title']}: {check['summary']}")
+        for detail in check.get("details", []):
+            print(f"  - {detail}")
+    print()
+    print("Next:")
+    if report["overall_status"] == "fail":
+        print("  Fix the FAIL items first, then run `ubuntu-hibernate doctor` again.")
+    else:
+        print("  Run `sudo ubuntu-hibernate setup` to apply the conservative setup this tool can verify.")
+        print("  Run `ubuntu-hibernate test` for the safe manual test checklist.")
+
+
+def report_to_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# ubuntu-hibernate report",
+        "",
+        f"- Generated: `{report['generated_at']}`",
+        f"- Target: `{report['supported_target']}`",
+        f"- Detected: `{report['host']['os_pretty_name']}`",
+        f"- Kernel: `{report['host']['kernel']}`",
+        f"- Overall: `{report['overall_status']}`",
+        "",
+        "## Checks",
+        "",
+    ]
+    for check in report["checks"]:
+        lines.append(f"### {check['title']}")
+        lines.append("")
+        lines.append(f"- Status: `{check['status']}`")
+        lines.append(f"- Summary: {check['summary']}")
+        for detail in check.get("details", []):
+            lines.append(f"- Detail: {detail}")
+        lines.append("")
+
+    lines.extend(["## Swap", ""])
+    if not report["swaps"]:
+        lines.append("No active swap entries were found.")
+    for swap in report["swaps"]:
+        lines.append(f"- `{swap['name']}`: `{swap['kind']}`, {format_bytes(swap['size_bytes'])}, UUID `{swap.get('uuid') or 'none'}`")
+    lines.append("")
+    lines.extend(
+        [
+            "## Suggested Next Step",
+            "",
+            "`ubuntu-hibernate setup --dry-run` shows the exact files and commands that setup would use.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_output(path: Path | None, text: str) -> None:
+    if path is None:
+        print(text)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    print(f"Wrote {path}")
+
+
+def find_check(report: dict[str, Any], check_id: str) -> dict[str, Any] | None:
+    for check in report["checks"]:
+        if check["id"] == check_id:
+            return check
+    return None
+
+
+def setup_blockers(report: dict[str, Any], allow_unsupported: bool) -> list[str]:
+    blockers: list[str] = []
+    host = report["host"]
+    if not allow_unsupported and not (host["os_id"] == "ubuntu" and host["version_id"] == SUPPORTED_VERSION_ID):
+        blockers.append(f"This setup path is tested for Ubuntu {SUPPORTED_VERSION_ID}; rerun with --allow-unsupported to override.")
+    for check_id in ("kernel-state", "swap", "initramfs", "cmdline", "encryption"):
+        check = find_check(report, check_id)
+        if check and check["status"] == "fail":
+            blockers.append(check["summary"])
+    if not report.get("recommended_resume"):
+        blockers.append("No block-device swap UUID is available for RESUME=.")
+    return blockers
+
+
+def require_root(action: str, dry_run: bool = False) -> None:
+    if dry_run:
+        return
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise SystemExit(f"{action} changes system files. Please rerun with sudo, or use --dry-run first.")
+
+
+def confirm_or_exit(prompt: str, yes: bool) -> None:
+    if yes:
+        return
+    if not sys.stdin.isatty():
+        raise SystemExit("Refusing to continue without a terminal confirmation. Rerun with --yes if you already reviewed the plan.")
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    if answer not in {"y", "yes"}:
+        raise SystemExit("No changes made.")
+
+
+def backup_files(paths: list[Path]) -> Path:
+    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = BACKUP_ROOT / timestamp
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    manifest: dict[str, Any] = {"created_at": timestamp, "files": []}
+    for path in paths:
+        entry: dict[str, Any] = {"path": str(path), "existed": path.exists()}
+        if path.exists():
+            relative = Path(str(path).lstrip("/"))
+            destination = backup_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            entry["backup"] = str(relative)
+        manifest["files"].append(entry)
+    (backup_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return backup_dir
+
+
+def write_file_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def shell_command(args: list[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
+def run_or_print(args: list[str], dry_run: bool, timeout: int | None = None) -> None:
+    if dry_run:
+        print(f"+ {shell_command(args)}")
+        return
+    result = run_command(args, timeout=timeout)
+    if not result.ok:
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        raise SystemExit(f"Command failed: {shell_command(args)}")
+    if result.stdout:
+        print(result.stdout, end="")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = collect_report(Path(args.root))
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print_doctor(report)
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    report = collect_report(Path(args.root))
+    if args.json:
+        write_output(args.output, json.dumps(report, indent=2, sort_keys=True))
+    else:
+        write_output(args.output, report_to_markdown(report))
+    return 0
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    report = collect_report(Path(args.root))
+    blockers = setup_blockers(report, args.allow_unsupported)
+    if blockers:
+        print(f"{SCRIPT_NAME} setup cannot continue yet:")
+        for blocker in blockers:
+            print(f"  - {blocker}")
+        print()
+        print("Run `ubuntu-hibernate doctor` after fixing those items.")
+        return 2
+
+    resume_target = report["recommended_resume"]
+    resume_content = textwrap.dedent(
+        f"""\
+        # Managed by ubuntu-hibernate.
+        # Rebuild initramfs after changing this file.
+        RESUME={resume_target}
+        """
+    )
+    print(f"{SCRIPT_NAME} setup plan")
+    print(f"  - Write {SLEEP_CONF}")
+    print(f"  - Write {RESUME_CONF} with {resume_target}")
+    if args.skip_initramfs:
+        print("  - Skip update-initramfs because --skip-initramfs was supplied")
+    else:
+        kernel_arg = "all" if args.all_kernels else os.uname().release
+        print(f"  - Run update-initramfs -u -k {kernel_arg}")
+    print(f"  - Backup touched files under {BACKUP_ROOT}")
+    print()
+
+    require_root("setup", dry_run=args.dry_run)
+    if args.dry_run:
+        print(f"Would write {SLEEP_CONF}:")
+        print(SLEEP_CONF_CONTENT.rstrip())
+        print()
+        print(f"Would write {RESUME_CONF}:")
+        print(resume_content.rstrip())
+        if not args.skip_initramfs:
+            kernel_arg = "all" if args.all_kernels else os.uname().release
+            run_or_print(["update-initramfs", "-u", "-k", kernel_arg], dry_run=True)
+        return 0
+
+    confirm_or_exit("Apply this hibernate setup?", args.yes)
+    backup_dir = backup_files([SLEEP_CONF, RESUME_CONF])
+    write_file_atomic(SLEEP_CONF, SLEEP_CONF_CONTENT)
+    write_file_atomic(RESUME_CONF, resume_content)
+    print(f"Backed up previous files to {backup_dir}")
+    if not args.skip_initramfs:
+        kernel_arg = "all" if args.all_kernels else os.uname().release
+        run_or_print(["update-initramfs", "-u", "-k", kernel_arg], dry_run=False, timeout=None)
+    print()
+    print("Setup finished. Reboot before the first real hibernate test, then run `ubuntu-hibernate test`.")
+    return 0
+
+
+def list_backups() -> list[Path]:
+    if not BACKUP_ROOT.exists():
+        return []
+    return sorted((path for path in BACKUP_ROOT.iterdir() if path.is_dir()), reverse=True)
+
+
+def cmd_undo(args: argparse.Namespace) -> int:
+    backups = list_backups()
+    if args.list or not args.backup_id:
+        if not backups:
+            print(f"No backups found under {BACKUP_ROOT}.")
+            return 0
+        print(f"Backups under {BACKUP_ROOT}:")
+        for backup in backups:
+            print(f"  {backup.name}")
+        if not args.backup_id:
+            print()
+            print("Restore one with: sudo ubuntu-hibernate undo BACKUP_ID")
+        return 0
+
+    backup_dir = BACKUP_ROOT / args.backup_id
+    manifest_path = backup_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"Backup manifest not found: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    print(f"{SCRIPT_NAME} undo plan")
+    for entry in manifest.get("files", []):
+        action = "restore" if entry.get("existed") else "remove"
+        print(f"  - {action} {entry['path']}")
+    if not args.skip_initramfs:
+        print("  - Run update-initramfs -u -k all")
+
+    require_root("undo", dry_run=args.dry_run)
+    if args.dry_run:
+        for entry in manifest.get("files", []):
+            print(f"+ restore metadata for {entry['path']}")
+        if not args.skip_initramfs:
+            run_or_print(["update-initramfs", "-u", "-k", "all"], dry_run=True)
+        return 0
+
+    confirm_or_exit("Restore this backup?", args.yes)
+    for entry in manifest.get("files", []):
+        path = Path(entry["path"])
+        if entry.get("existed"):
+            source = backup_dir / entry["backup"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, path)
+        elif path.exists():
+            path.unlink()
+    if not args.skip_initramfs:
+        run_or_print(["update-initramfs", "-u", "-k", "all"], dry_run=False, timeout=None)
+    print("Undo finished.")
+    return 0
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    print(f"{SCRIPT_NAME} test checklist")
+    print()
+    print("Before you run a real test:")
+    print("  1. Save open work.")
+    print("  2. Keep a charger connected for laptops.")
+    print("  3. Make sure you know your disk unlock passphrase if the system is encrypted.")
+    print("  4. Reboot once after setup before the first hibernate test.")
+    print()
+    print("Manual test command:")
+    print("  sudo systemctl hibernate")
+    print()
+    print("After resume, useful log checks:")
+    print("  journalctl -b -1 -k -g 'PM:|hibernate|resume|swsusp'")
+    print("  journalctl -b -0 -k -g 'PM: Image|resume|swsusp'")
+    if not args.run:
+        print()
+        print("This command does not hibernate by default. Add --run when you are ready.")
+        return 0
+
+    require_root("test --run", dry_run=False)
+    confirm_or_exit("Hibernate this machine now?", args.yes)
+    run_or_print(["systemctl", "hibernate"], dry_run=False, timeout=None)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=SCRIPT_NAME,
+        description="Guided hibernate diagnostics and setup for Ubuntu 26.04.",
+    )
+    parser.add_argument("--root", default=os.environ.get("UBUNTU_HIBERNATE_ROOT", "/"), help=argparse.SUPPRESS)
+    subparsers = parser.add_subparsers(dest="command")
+
+    doctor = subparsers.add_parser("doctor", help="Inspect the current machine and explain hibernate readiness.")
+    doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    doctor.set_defaults(func=cmd_doctor)
+
+    report = subparsers.add_parser("report", help="Write a shareable diagnostic report.")
+    report.add_argument("--json", action="store_true", help="Write JSON instead of Markdown.")
+    report.add_argument("-o", "--output", type=Path, help="Write the report to this path instead of stdout.")
+    report.set_defaults(func=cmd_report)
+
+    setup = subparsers.add_parser("setup", help="Apply conservative hibernate setup for a verified swap device.")
+    setup.add_argument("--dry-run", action="store_true", help="Show planned changes without writing anything.")
+    setup.add_argument("-y", "--yes", action="store_true", help="Apply without interactive confirmation.")
+    setup.add_argument("--allow-unsupported", action="store_true", help="Allow setup outside Ubuntu 26.04 after diagnostics pass.")
+    setup.add_argument("--current-kernel-only", dest="all_kernels", action="store_false", help="Update only the running kernel initramfs.")
+    setup.add_argument("--skip-initramfs", action="store_true", help="Write config but do not run update-initramfs.")
+    setup.set_defaults(func=cmd_setup, all_kernels=True)
+
+    test = subparsers.add_parser("test", help="Print a safe real-hibernate test checklist.")
+    test.add_argument("--run", action="store_true", help="Run systemctl hibernate after confirmation.")
+    test.add_argument("-y", "--yes", action="store_true", help="With --run, skip interactive confirmation.")
+    test.set_defaults(func=cmd_test)
+
+    undo = subparsers.add_parser("undo", help="List or restore setup backups.")
+    undo.add_argument("backup_id", nargs="?", help="Backup directory name under /var/backups/ubuntu-hibernate.")
+    undo.add_argument("--list", action="store_true", help="List available backups.")
+    undo.add_argument("--dry-run", action="store_true", help="Show restore actions without changing files.")
+    undo.add_argument("-y", "--yes", action="store_true", help="Restore without interactive confirmation.")
+    undo.add_argument("--skip-initramfs", action="store_true", help="Restore files but do not run update-initramfs.")
+    undo.set_defaults(func=cmd_undo)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args = parser.parse_args(["doctor", *(argv or [])])
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("\nInterrupted. No further action was taken.", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -23,6 +23,7 @@ class SmokeTest(unittest.TestCase):
     def test_scripts_compile(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             py_compile.compile(str(REPO_ROOT / "gmail-cleanup"), cfile=f"{tmpdir}/gmail_cleanup.pyc", doraise=True)
+            py_compile.compile(str(REPO_ROOT / "ubuntu-hibernate"), cfile=f"{tmpdir}/ubuntu_hibernate.pyc", doraise=True)
             py_compile.compile(str(REPO_ROOT / "wh"), cfile=f"{tmpdir}/wh.pyc", doraise=True)
             py_compile.compile(str(REPO_ROOT / "whisper"), cfile=f"{tmpdir}/whisper.pyc", doraise=True)
 
@@ -70,6 +71,20 @@ class SmokeTest(unittest.TestCase):
         result = self.run_script("wh", "help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Usage: wh", result.stdout)
+
+    def test_ubuntu_hibernate_help_and_json_doctor(self) -> None:
+        result = self.run_script("ubuntu-hibernate", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("doctor", result.stdout)
+        self.assertIn("setup", result.stdout)
+        self.assertIn("undo", result.stdout)
+
+        doctor = self.run_script("ubuntu-hibernate", "doctor", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        payload = json.loads(doctor.stdout)
+        self.assertEqual(payload["tool"], "ubuntu-hibernate")
+        self.assertIn("checks", payload)
+        self.assertIn("overall_status", payload)
 
     def test_whisper_help(self) -> None:
         result = self.run_script("whisper", "--help")
