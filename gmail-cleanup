@@ -43,11 +43,13 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.12 in CI, fallback ke
 
 
 READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# Request the full tool scope set for every Gmail OAuth flow so cached tokens
+# do not vary between report, dry-run, and apply commands.
 APPLY_SCOPES = (
+    READONLY_SCOPE,
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.insert",
 )
-DRY_RUN_SCOPES = (READONLY_SCOPE,)
 DEFAULT_BACKUP_DIR_ENV = "GMAIL_CLEANUP_BACKUP_DIR"
 DEFAULT_CONFIG_ENV = "GMAIL_CLEANUP_CONFIG"
 DEFAULT_CREDENTIALS_ENV = "GMAIL_CLEANUP_OAUTH_CLIENT_SECRET"
@@ -2081,29 +2083,6 @@ def build_gmail_client(
     service = service_factory()
     quota_pacer = GmailQuotaPacer(quota_units_per_second) if quota_units_per_second is not None else None
     return GmailApiClient(service, user_id, service_factory=service_factory, quota_pacer=quota_pacer)
-
-
-def token_cache_has_scopes(token_cache_path: Path, scopes: tuple[str, ...]) -> bool:
-    try:
-        token_data = json.loads(token_cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    raw_scopes = token_data.get("scopes", token_data.get("scope"))
-    if isinstance(raw_scopes, str):
-        granted = set(raw_scopes.split())
-    elif isinstance(raw_scopes, list):
-        granted = {str(scope) for scope in raw_scopes}
-    else:
-        return False
-    return set(scopes).issubset(granted)
-
-
-def extract_media_auth_scopes(token_cache_path: Path, *, apply_mode: bool) -> tuple[str, ...]:
-    if apply_mode:
-        return APPLY_SCOPES
-    if token_cache_has_scopes(token_cache_path, APPLY_SCOPES):
-        return APPLY_SCOPES
-    return DRY_RUN_SCOPES
 
 
 def decode_gmail_raw(raw: str) -> bytes:
@@ -6788,11 +6767,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.use_index and args.export_only:
                 client = IndexOnlyGmailClient(GmailIndex(resolve_index_db_path(args.index_db, config, config_path)))
             else:
-                scopes = extract_media_auth_scopes(token_cache_path, apply_mode=args.apply)
                 client = build_gmail_client(
                     credentials_path,
                     token_cache_path,
-                    scopes,
+                    APPLY_SCOPES,
                     gmail_user or "me",
                     assume_yes=args.yes,
                     quota_units_per_second=quota_units_per_second,
