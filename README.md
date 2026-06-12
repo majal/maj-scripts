@@ -18,6 +18,7 @@ If you're just here to use a script, start here. This README is the friendly map
 
 - [Overview](#overview)
 - [Scripts](#scripts)
+  - [`fflang`](#fflang)
   - [`gmail-cleanup`](#gmail-cleanup)
   - [`printing-mode`](#printing-mode)
   - [`ubuntu-hibernate`](#ubuntu-hibernate)
@@ -31,6 +32,101 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
+
+### [`fflang`](./fflang)
+
+`fflang` is a multi-language audio and subtitle video muxer for jw.org videos.
+
+Quick links inside this script section:
+
+- [What it does](#fflang-what-it-does)
+- [Supported platforms](#fflang-supported-platforms)
+- [Dependencies](#fflang-dependencies)
+- [Install / first run](#fflang-install--first-run-summary)
+- [Common usage examples](#fflang-common-usage-examples)
+- [Important behavior / defaults](#fflang-important-behavior--defaults)
+
+<a id="fflang-what-it-does"></a>
+
+#### What It Does
+
+- Combines a primary video (e.g. sign-language), an English subtitle track, and multiple spoken-language audio tracks into a single multi-stream video file.
+- Reads input files automatically based on language codes and resolution markers in the filename.
+- Allows keeping single-language merged files as a byproduct.
+- Adds metadata tags for each language stream so that media players can display them correctly.
+
+<a id="fflang-supported-platforms"></a>
+
+#### Supported Platforms
+
+- macOS
+- Linux
+- Windows
+
+<a id="fflang-dependencies"></a>
+
+#### Dependencies
+
+- [Python](#python)
+- `ffmpeg` must be installed and available on your PATH.
+
+<a id="fflang-install--first-run-summary"></a>
+
+#### Install / First Run Summary
+
+Make the script executable if your checkout did not preserve executable bits:
+
+```bash
+chmod +x fflang
+```
+
+Try a dry run first to see what commands it would execute:
+
+```bash
+./fflang input_video_FSL_001_r720P.mp4 --dry-run
+```
+
+<a id="fflang-common-usage-examples"></a>
+
+#### Common Usage Examples
+
+Merge all default languages (`E,TG,CV,HV,SA`) into the video:
+
+```bash
+./fflang input_video_FSL_001_r720P.mp4
+```
+
+Merge specific languages (`E,S,F`) and explicitly set the video/subs language:
+
+```bash
+./fflang video_ASL_001_r720P.mp4 --video-lang ASL --subs-lang E --audio-langs E,S,F
+```
+
+Create a merged video and keep the single-audio individual video files:
+
+```bash
+./fflang input_video_FSL_001_r720P.mp4 --create-singles
+```
+
+<a id="fflang-important-behavior--defaults"></a>
+
+#### Important Behavior / Defaults
+
+- Default video language: `FSL`
+- Default subtitle language: `E`
+- Default audio languages: `E,TG,CV,HV,SA`
+- Automatically tags audio streams with ISO 639 codes and full names (e.g. `eng` / `English`, `tgl` / `Tagalog`).
+- Sets the first merged audio track (English) as the default track.
+- If a target language audio track is not found, the script gracefully skips it.
+
+<a id="fflang-notes--caveats"></a>
+
+#### Notes / Caveats
+
+- You must have the source video and subtitle files in the same directory, alongside the audio track files you want to merge.
+- The script uses string replacement on the file names to detect the different language versions of the video. Make sure the files are named consistently.
+
+[↑ TOC](#table-of-contents)
 
 ### [`gmail-cleanup`](./gmail-cleanup)
 
