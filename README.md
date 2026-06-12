@@ -19,6 +19,7 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Overview](#overview)
 - [Scripts](#scripts)
   - [`gmail-cleanup`](#gmail-cleanup)
+  - [`jwsl`](#jwsl)
   - [`jwvideo-mux`](#jwvideo-mux)
   - [`printing-mode`](#printing-mode)
   - [`ubuntu-hibernate`](#ubuntu-hibernate)
@@ -32,6 +33,108 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
+
+### [`jwsl`](./jwsl)
+
+`jwsl` is a unified tool for downloading, extracting, overlaying, and interpolating Sign Language Bible videos.
+
+Quick links inside this script section:
+
+- [What it does](#jwsl-what-it-does)
+- [Supported platforms](#jwsl-supported-platforms)
+- [Dependencies](#jwsl-dependencies)
+- [Install / first run](#jwsl-install--first-run-summary)
+- [Common usage examples](#jwsl-common-usage-examples)
+- [Important behavior / defaults](#jwsl-important-behavior--defaults)
+- [Notes / caveats](#jwsl-notes--caveats)
+
+<a id="jwsl-what-it-does"></a>
+
+#### What It Does
+
+- Fetches JW.org API metadata to track and download Sign Language Bible videos (NWT) on demand.
+- Extracts specific verses using embedded chapter timestamps.
+- Optionally applies translated text overlays for book names and chapter/verse numbers.
+- Interpolates the extracted clip to 60fps for smoother sign language playback using `ffmpeg` (minterpolate or framerate) or `rife-ncnn-vulkan` (GPU-accelerated AI).
+- Maintains a local cache of downloaded full-chapter videos to save bandwidth.
+
+<a id="jwsl-supported-platforms"></a>
+
+#### Supported Platforms
+
+- macOS
+- Linux
+- Windows
+
+<a id="jwsl-dependencies"></a>
+
+#### Dependencies
+
+- [Python](#python)
+- `ffmpeg` (requires `freetype` and `fontconfig` support for text overlays)
+- `rife-ncnn-vulkan` (optional, for ultra-fast GPU interpolation)
+
+<a id="jwsl-install--first-run-summary"></a>
+
+#### Install / First Run Summary
+
+Make the script executable:
+
+```bash
+chmod +x jwsl
+```
+
+Run the built-in dependency setup to install FFmpeg (macOS/Linux):
+
+```bash
+./jwsl setup
+```
+
+Configure your defaults if desired:
+
+```bash
+./jwsl config set cache_policy max_gb=10
+./jwsl config set interpolation_engine rife
+```
+
+<a id="jwsl-common-usage-examples"></a>
+
+#### Common Usage Examples
+
+Extract specific verses (e.g., Revelation 13:1, 2 in FSL) and interpolate to 60fps:
+
+```bash
+./jwsl extract FSL "Rev 13:1, 2" --interpolate
+```
+
+Bulk sync metadata to track available updates on the API:
+
+```bash
+./jwsl sync FSL
+```
+
+Clear the local video cache:
+
+```bash
+./jwsl cache clean
+```
+
+<a id="jwsl-important-behavior--defaults"></a>
+
+#### Important Behavior / Defaults
+
+- Global configuration and state are saved in `~/.config/maj-scripts/jwsl/`.
+- Downloaded video chapters are temporarily stashed in `~/.cache/jwsl/`.
+- The tool uses lazy loading: it only downloads chapters when a specific verse extraction is requested, avoiding massive bulk downloads.
+- When applying overlays, the tool expects standard English abbreviations or full names (e.g., "Rev" or "Revelation") by default.
+
+<a id="jwsl-notes--caveats"></a>
+
+#### Notes / Caveats
+
+- `minterpolate` through `ffmpeg` is CPU-bound and very slow. Using `rife-ncnn-vulkan` is highly recommended for users with a dedicated GPU.
+
+[↑ TOC](#table-of-contents)
 
 ### [`jwvideo-mux`](./jwvideo-mux)
 
