@@ -18,8 +18,8 @@ If you're just here to use a script, start here. This README is the friendly map
 
 - [Overview](#overview)
 - [Scripts](#scripts)
-  - [`fflang`](#fflang)
   - [`gmail-cleanup`](#gmail-cleanup)
+  - [`jwvideo-mux`](#jwvideo-mux)
   - [`printing-mode`](#printing-mode)
   - [`ubuntu-hibernate`](#ubuntu-hibernate)
   - [`wh`](#wh)
@@ -33,29 +33,34 @@ If you're just here to use a script, start here. This README is the friendly map
 
 ## Scripts
 
-### [`fflang`](./fflang)
+### [`jwvideo-mux`](./jwvideo-mux)
 
-`fflang` is a multi-language audio and subtitle video muxer for jw.org videos.
+`jwvideo-mux` is an automated media downloader and muxer for jw.org videos.
 
 Quick links inside this script section:
 
-- [What it does](#fflang-what-it-does)
-- [Supported platforms](#fflang-supported-platforms)
-- [Dependencies](#fflang-dependencies)
-- [Install / first run](#fflang-install--first-run-summary)
-- [Common usage examples](#fflang-common-usage-examples)
-- [Important behavior / defaults](#fflang-important-behavior--defaults)
+- [What it does](#jwvideo-mux-what-it-does)
+- [Supported platforms](#jwvideo-mux-supported-platforms)
+- [Dependencies](#jwvideo-mux-dependencies)
+- [Install / first run](#jwvideo-mux-install--first-run-summary)
+- [Common usage examples](#jwvideo-mux-common-usage-examples)
+- [Important behavior / defaults](#jwvideo-mux-important-behavior--defaults)
+- [Notes / caveats](#jwvideo-mux-notes--caveats)
 
-<a id="fflang-what-it-does"></a>
+<a id="jwvideo-mux-what-it-does"></a>
 
 #### What It Does
 
-- Combines a primary video (e.g. sign-language), an English subtitle track, and multiple spoken-language audio tracks into a single multi-stream video file.
-- Reads input files automatically based on language codes and resolution markers in the filename.
-- Allows keeping single-language merged files as a byproduct.
-- Adds metadata tags for each language stream so that media players can display them correctly.
+- Extracts a `docid` from a jw.org video URL or accepts it directly.
+- Traces the jw.org API to automatically download the necessary MP4 videos, MP3 audio, and VTT subtitle files for multiple requested languages.
+- Intelligently merges sign language videos (which use multiple video tracks) and spoken language audio (which use multiple audio tracks) into a single master video file.
+- Defaults to MKV as the export container, with an option to export to MP4.
+- Embeds VTT subtitles directly into the video container.
+- Offers to automatically install `ffmpeg` if not found.
+- Has an optional cleanup flag to trash temporary source files after successful muxing.
+- Can create single-stream audio/video files instead of merged ones, replacing the base track, which helps with platforms that play all audio streams simultaneously.
 
-<a id="fflang-supported-platforms"></a>
+<a id="jwvideo-mux-supported-platforms"></a>
 
 #### Supported Platforms
 
@@ -63,68 +68,61 @@ Quick links inside this script section:
 - Linux
 - Windows
 
-<a id="fflang-dependencies"></a>
+<a id="jwvideo-mux-dependencies"></a>
 
 #### Dependencies
 
 - [Python](#python)
-- `ffmpeg` must be installed and available on your PATH.
+- `ffmpeg` must be installed and available on your PATH. The script offers to install it automatically if it is missing.
 
-<a id="fflang-install--first-run-summary"></a>
+<a id="jwvideo-mux-install--first-run-summary"></a>
 
 #### Install / First Run Summary
 
 Make the script executable if your checkout did not preserve executable bits:
 
 ```bash
-chmod +x fflang
+chmod +x jwvideo-mux
 ```
 
-Try a dry run first to see what commands it would execute:
-
-```bash
-./fflang input_video_FSL_001_r720P.mp4 --dry-run
-```
-
-<a id="fflang-common-usage-examples"></a>
+<a id="jwvideo-mux-common-usage-examples"></a>
 
 #### Common Usage Examples
 
-Merge all default languages (`E,TG,CV,HV,SA`) into the video:
+Download and merge a video by URL using the default languages (`E,TG,CV,HV,SA`):
 
 ```bash
-./fflang input_video_FSL_001_r720P.mp4
+./jwvideo-mux "https://www.jw.org/finder?wtlocale=E&docid=502015752"
 ```
 
-Merge specific languages (`E,S,F`) and explicitly set the video/subs language:
+Download and merge specific languages (`E,S,F`) with French as the base, output to MP4, and clean up source files:
 
 ```bash
-./fflang video_ASL_001_r720P.mp4 --video-lang ASL --subs-lang E --audio-langs E,S,F
+./jwvideo-mux 502015752 --base-lang F --langs E,S,F --container mp4 --cleanup
 ```
 
-Create a merged video and keep the single-audio individual video files:
+Produce separate, single-stream videos replacing the audio instead of merging them all into one:
 
 ```bash
-./fflang input_video_FSL_001_r720P.mp4 --create-singles
+./jwvideo-mux 502015752 --single-streams
 ```
 
-<a id="fflang-important-behavior--defaults"></a>
+<a id="jwvideo-mux-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
-- Default video language: `FSL`
-- Default subtitle language: `E`
-- Default audio languages: `E,TG,CV,HV,SA`
-- Automatically tags audio streams with ISO 639 codes and full names (e.g. `eng` / `English`, `tgl` / `Tagalog`).
-- Sets the first merged audio track (English) as the default track.
-- If a target language audio track is not found, the script gracefully skips it.
+- Default base language: `E` (English). Base language determines the primary video track.
+- Default secondary languages: `E,TG,CV,HV,SA`
+- Default export container: MKV. MKV handles multiple video and subtitle tracks more gracefully than MP4, but MP4 is fully supported.
+- Spoken languages prefer downloading the much smaller MP3 files. Sign languages download the MP4 file to preserve the video track.
+- Automatically tags audio and video streams with ISO 639-2 codes and display names.
 
-<a id="fflang-notes--caveats"></a>
+<a id="jwvideo-mux-notes--caveats"></a>
 
 #### Notes / Caveats
 
-- You must have the source video and subtitle files in the same directory, alongside the audio track files you want to merge.
-- The script uses string replacement on the file names to detect the different language versions of the video. Make sure the files are named consistently.
+- JW Library currently plays all audio tracks simultaneously when given a multi-audio MP4 file. To avoid this when using JW Library, use the `--single-streams` flag.
+- Trashing functionality using `--cleanup` simply unlinks (deletes) the downloaded files.
 
 [↑ TOC](#table-of-contents)
 

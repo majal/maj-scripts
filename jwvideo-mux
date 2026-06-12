@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""
+jwvideo-mux: A cross-platform tool to automate downloading and muxing jw.org videos.
+Downloads video, audio, and VTT subtitles for multiple languages and merges them
+into a single MKV/MP4 container or separate single-stream files.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.request
+import urllib.error
+from pathlib import Path
+
+# Common ISO 639-2 codes mapping for ffmpeg metadata
+KNOWN_LANGUAGES = {
+    "E": ("eng", "English"),
+    "TG": ("tgl", "Tagalog"),
+    "CV": ("ceb", "Cebuano"),
+    "HV": ("hil", "Hiligaynon"),
+    "SA": ("war", "Waray-Waray"),
+    "FSL": ("fsl", "Filipino Sign Language"),
+    "ASL": ("ase", "American Sign Language"),
+    "S": ("spa", "Spanish"),
+    "F": ("fra", "French"),
+    "P": ("por", "Portuguese"),
+    "X": ("deu", "German"),
+    "I": ("ita", "Italian"),
+    "J": ("jpn", "Japanese"),
+    "K": ("kor", "Korean"),
+    "CH": ("zho", "Chinese"),
+}
+
+def get_lang_meta(code: str) -> tuple[str, str]:
+    code_upper = code.upper()
+    if code_upper in KNOWN_LANGUAGES:
+        return KNOWN_LANGUAGES[code_upper]
+    return (code.lower()[:3], code_upper)
+
+def color_print(msg: str, color_code: str = ""):
+    if not color_code:
+        print(msg)
+    else:
+        print(f"\033[{color_code}m{msg}\033[0m")
+
+def check_dependencies():
+    if not shutil.which("ffmpeg"):
+        color_print("ffmpeg is not installed or not in PATH.", "31")
+        ans = input("Would you like to try installing ffmpeg now? [Y/n] ")
+        if ans.lower() not in ("n", "no"):
+            if sys.platform == "darwin":
+                os.system("brew install ffmpeg")
+            elif sys.platform == "linux":
+                os.system("sudo apt-get update && sudo apt-get install -y ffmpeg || sudo dnf install -y ffmpeg || sudo pacman -S --noconfirm ffmpeg")
+            elif sys.platform == "win32":
+                os.system("winget install -e --id Gyan.FFmpeg")
+            
+            if not shutil.which("ffmpeg"):
+                color_print("Failed to install ffmpeg automatically. Please install it manually.", "31")
+                sys.exit(1)
+        else:
+            sys.exit(1)
+
+def fetch_docid(input_str: str) -> str:
+    # If it's just numbers, treat as docid
+    if re.match(r'^\d+$', input_str):
+        return input_str
+        
+    # Check if docid is in the URL parameters
+    match = re.search(r'docid=(\d+)', input_str)
+    if match:
+        return match.group(1)
+        
+    # Otherwise, try fetching the HTML and looking for docid
+    try:
+        color_print("Fetching URL to extract docid...", "34")
+        req = urllib.request.Request(input_str, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+            match = re.search(r'docid=(\d+)', html)
+            if match:
+                return match.group(1)
+    except Exception as e:
+        color_print(f"Failed to fetch or parse URL: {e}", "31")
+    
+    color_print("Could not extract a valid docid from the input.", "31")
+    sys.exit(1)
+
+def get_media_links(docid: str, lang: str, res: str) -> dict:
+    url = f"https://b.jw-cdn.org/apis/pub-media/GETPUBMEDIALINKS?output=json&docid={docid}&fileformat=MP4,VTT,MP3&alllangs=0&langwritten={lang}"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode('utf-8'))
+    except Exception as e:
+        color_print(f"Failed to fetch metadata for language {lang}: {e}", "31")
+        return {}
+        
+    files = data.get('files', {}).get(lang, {})
+    if not files:
+        return {}
+        
+    result = {}
+    
+    # Check MP3 first (for spoken languages)
+    mp3_list = files.get('MP3', [])
+    if mp3_list and mp3_list[0].get('file', {}).get('url'):
+        result['mp3'] = mp3_list[0]['file']['url']
+        
+    # Check MP4 (for videos / sign languages)
+    mp4_list = files.get('MP4', [])
+    for item in mp4_list:
+        if item.get('label') == res or res.lower() in str(item.get('label')).lower():
+            result['mp4'] = item['file']['url']
+            # Subtitles are often tied to the MP4 object
+            sub_url = item.get('subtitles', {}).get('url')
+            if sub_url:
+                result['vtt'] = sub_url
+            break
+            
+    # Fallback to any mp4 if exact resolution not found
+    if 'mp4' not in result and mp4_list:
+        result['mp4'] = mp4_list[0]['file']['url']
+        sub_url = mp4_list[0].get('subtitles', {}).get('url')
+        if sub_url:
+            result['vtt'] = sub_url
+            
+    return result
+
+def download_file(url: str, dest: Path):
+    if dest.exists():
+        color_print(f"  Already exists: {dest.name}", "32")
+        return
+    color_print(f"  Downloading: {dest.name}...", "36")
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(dest, 'wb') as out_file:
+            shutil.copyfileobj(response, out_file)
+    except Exception as e:
+        color_print(f"  Failed to download {url}: {e}", "31")
+        if dest.exists():
+            dest.unlink()
+
+def get_filename_from_url(url: str) -> str:
+    return url.split('/')[-1].split('?')[0]
+
+def main():
+    parser = argparse.ArgumentParser(description="jwvideo-mux: Merge videos, audio, and subtitles from jw.org")
+    parser.add_argument("input", help="URL or docid of the video")
+    parser.add_argument("--base-lang", default="E", help="Primary language code (default: E)")
+    parser.add_argument("--langs", default="E,TG,CV,HV,SA", help="Comma-separated language codes to merge")
+    parser.add_argument("--res", default="720p", help="Target resolution (default: 720p)")
+    parser.add_argument("--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
+    parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
+    parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
+    parser.add_argument("--output-dir", default=".", help="Directory to save output files")
+    
+    args = parser.parse_args()
+    check_dependencies()
+    
+    docid = fetch_docid(args.input)
+    color_print(f"Extracted docid: {docid}", "32")
+    
+    langs = [l.strip().upper() for l in args.langs.split(",") if l.strip()]
+    if args.base_lang.upper() not in langs:
+        langs.insert(0, args.base_lang.upper())
+        
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    downloads = {}
+    base_lang = args.base_lang.upper()
+    
+    color_print("\n>> Fetching media links...", "34")
+    for lang in langs:
+        links = get_media_links(docid, lang, args.res)
+        if not links:
+            color_print(f"  [{lang}] No media found.", "33")
+            continue
+            
+        downloads[lang] = {}
+        
+        # Base language requires video (MP4)
+        if lang == base_lang:
+            if 'mp4' in links:
+                downloads[lang]['video'] = links['mp4']
+            else:
+                color_print(f"  [{lang}] Error: Base language must have an MP4 video.", "31")
+                sys.exit(1)
+        else:
+            # Secondary language: prefer MP3 for spoken, fallback to MP4 for sign languages
+            if 'mp3' in links:
+                downloads[lang]['audio'] = links['mp3']
+            elif 'mp4' in links:
+                downloads[lang]['video'] = links['mp4']
+                
+        # Subtitles
+        if 'vtt' in links:
+            downloads[lang]['sub'] = links['vtt']
+            
+        color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
+
+    if base_lang not in downloads:
+        color_print("Base language not found. Exiting.", "31")
+        sys.exit(1)
+
+    color_print("\n>> Downloading files...", "34")
+    local_files = {}
+    for lang, media in downloads.items():
+        local_files[lang] = {}
+        for mtype, url in media.items():
+            fname = get_filename_from_url(url)
+            dest = out_dir / fname
+            download_file(url, dest)
+            local_files[lang][mtype] = dest
+
+    color_print("\n>> Muxing...", "34")
+    
+    # 1. Mux into a single multi-stream MKV/MP4
+    ff_inputs = []
+    ff_maps = []
+    ff_meta = []
+    
+    input_idx = 0
+    
+    # Base video
+    base_vid = local_files[base_lang]['video']
+    ff_inputs.extend(["-i", str(base_vid)])
+    ff_maps.extend(["-map", f"{input_idx}:v", "-map", f"{input_idx}:a?"])
+    
+    # Tag base audio if it exists
+    iso, title = get_lang_meta(base_lang)
+    ff_meta.extend([
+        f"-metadata:s:a:0", f"language={iso}",
+        f"-metadata:s:a:0", f"title={title}",
+        f"-disposition:a:0", "default"
+    ])
+    
+    input_idx += 1
+    
+    audio_stream_idx = 1
+    video_stream_idx = 1
+    subtitle_stream_idx = 0
+    
+    langs_loaded = [base_lang]
+    
+    for lang in langs:
+        if lang == base_lang or lang not in local_files:
+            continue
+            
+        added_media = False
+        media = local_files[lang]
+        iso, title = get_lang_meta(lang)
+        
+        # Audio from MP3
+        if 'audio' in media:
+            ff_inputs.extend(["-i", str(media['audio'])])
+            ff_maps.extend(["-map", f"{input_idx}:a"])
+            ff_meta.extend([
+                f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
+                f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
+            ])
+            audio_stream_idx += 1
+            input_idx += 1
+            added_media = True
+            
+        # Video (and possibly audio) from MP4
+        elif 'video' in media:
+            ff_inputs.extend(["-i", str(media['video'])])
+            ff_maps.extend(["-map", f"{input_idx}:v", "-map", f"{input_idx}:a?"])
+            ff_meta.extend([
+                f"-metadata:s:v:{video_stream_idx}", f"language={iso}",
+                f"-metadata:s:v:{video_stream_idx}", f"title={title}",
+                f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
+                f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
+            ])
+            video_stream_idx += 1
+            audio_stream_idx += 1
+            input_idx += 1
+            added_media = True
+
+        if added_media:
+            langs_loaded.append(lang)
+
+    # Subtitles (VTT)
+    # We do subtitles after A/V to keep stream indexing simpler
+    for lang in [base_lang] + [l for l in langs if l != base_lang]:
+        if lang in local_files and 'sub' in local_files[lang]:
+            iso, title = get_lang_meta(lang)
+            ff_inputs.extend(["-i", str(local_files[lang]['sub'])])
+            ff_maps.extend(["-map", f"{input_idx}:s"])
+            ff_meta.extend([
+                f"-metadata:s:s:{subtitle_stream_idx}", f"language={iso}",
+                f"-metadata:s:s:{subtitle_stream_idx}", f"title={title}"
+            ])
+            # Embed formatting depending on container
+            if args.container == "mp4":
+                ff_meta.extend(["-c:s", "mov_text"])
+            else:
+                ff_meta.extend(["-c:s", "srt"])
+                
+            input_idx += 1
+            subtitle_stream_idx += 1
+
+    out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem}.{args.container}"
+    out_path = out_dir / out_name
+    
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + ff_inputs + ff_maps + ff_meta + ["-c:v", "copy", "-c:a", "copy", str(out_path)]
+    
+    color_print(f"Creating merged {args.container.upper()}: {out_name}", "36")
+    res = subprocess.run(cmd)
+    if res.returncode == 0:
+        color_print("✓ Merged video created successfully.", "32")
+    else:
+        color_print("✗ Merged video creation failed.", "31")
+
+    # 2. Mux single streams
+    if args.single_streams:
+        color_print("\n>> Creating single-stream videos...", "34")
+        for lang in langs_loaded:
+            if lang == base_lang:
+                continue
+                
+            out_single = out_dir / f"single_{lang}_{base_vid.stem}.mp4"
+            cmd_single = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(base_vid)]
+            maps = ["-map", "0:v"]
+            
+            media = local_files.get(lang, {})
+            # If spoken, replace audio with MP3
+            if 'audio' in media:
+                cmd_single.extend(["-i", str(media['audio'])])
+                maps.extend(["-map", "1:a"])
+            # If sign language, replace video and audio with MP4
+            elif 'video' in media:
+                cmd_single.extend(["-i", str(media['video'])])
+                maps = ["-map", "1:v", "-map", "1:a?"]
+            else:
+                continue
+                
+            # Embed subtitle if present for this language, else use base subtitle
+            sub_file = media.get('sub', local_files[base_lang].get('sub'))
+            if sub_file:
+                cmd_single.extend(["-i", str(sub_file)])
+                # sub is the 3rd input (index 2)
+                maps.extend(["-map", "2:s", "-c:s", "mov_text"])
+                
+            cmd_single += maps + ["-c:v", "copy", "-c:a", "copy", str(out_single)]
+            subprocess.run(cmd_single)
+            color_print(f"  ✓ Single-stream created: {out_single.name}", "32")
+
+    # Cleanup
+    if args.cleanup:
+        color_print("\n>> Cleaning up source files...", "33")
+        for lang, media in local_files.items():
+            for mtype, path in media.items():
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except Exception as e:
+                        color_print(f"  Failed to delete {path.name}: {e}", "31")
+        color_print("  Cleanup complete.", "32")
+
+if __name__ == "__main__":
+    main()
