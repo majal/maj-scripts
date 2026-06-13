@@ -358,7 +358,7 @@ def main():
             if args.container == "mp4":
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "mov_text"])
             else:
-                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "copy"])
+                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "ass"])
                 
             subtitle_stream_idx += 1
             if lang not in langs_loaded: langs_loaded.append(lang)
