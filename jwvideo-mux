@@ -154,6 +154,7 @@ def main():
     parser.add_argument("--base-lang", default="E", help="Primary language code (default: E)")
     parser.add_argument("--langs", default="E,TG,CV,HV,SA", help="Comma-separated language codes to merge")
     parser.add_argument("--res", default="720p", help="Target resolution (default: 720p)")
+    parser.add_argument("--force-videos", action="store_true", help="Force downloading video (MP4) for all languages instead of preferring MP3")
     parser.add_argument("--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
     parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
     parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
@@ -162,61 +163,110 @@ def main():
     args = parser.parse_args()
     check_dependencies()
     
-    docid = fetch_docid(args.input)
-    color_print(f"Extracted docid: {docid}", "32")
-    
     langs = [l.strip().upper() for l in args.langs.split(",") if l.strip()]
     if args.base_lang.upper() not in langs:
         langs.insert(0, args.base_lang.upper())
         
+    base_lang = args.base_lang.upper()
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    downloads = {}
-    base_lang = args.base_lang.upper()
-    
-    color_print("\n>> Fetching media links...", "34")
-    for lang in langs:
-        links = get_media_links(docid, lang, args.res)
-        if not links:
-            color_print(f"  [{lang}] No media found.", "33")
-            continue
-            
-        downloads[lang] = {}
-        
-        # Base language requires video (MP4)
-        if lang == base_lang:
-            if 'mp4' in links:
-                downloads[lang]['video'] = links['mp4']
-            else:
-                color_print(f"  [{lang}] Error: Base language must have an MP4 video.", "31")
-                sys.exit(1)
-        else:
-            # Secondary language: prefer MP3 for spoken, fallback to MP4 for sign languages
-            if 'mp3' in links:
-                downloads[lang]['audio'] = links['mp3']
-            elif 'mp4' in links:
-                downloads[lang]['video'] = links['mp4']
-                
-        # Subtitles
-        if 'vtt' in links:
-            downloads[lang]['sub'] = links['vtt']
-            
-        color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
-
-    if base_lang not in downloads:
-        color_print("Base language not found. Exiting.", "31")
-        sys.exit(1)
-
-    color_print("\n>> Downloading files...", "34")
     local_files = {}
-    for lang, media in downloads.items():
-        local_files[lang] = {}
-        for mtype, url in media.items():
-            fname = get_filename_from_url(url)
-            dest = out_dir / fname
-            download_file(url, dest)
-            local_files[lang][mtype] = dest
+
+    if Path(args.input).is_file():
+        color_print("\n>> Local file mode detected. Skipping API downloads...", "34")
+        base_vid_path = Path(args.input).resolve()
+        out_dir = base_vid_path.parent
+        local_files[base_lang] = {'video': base_vid_path}
+        
+        # Attempt to find VTT for base video (same name but .vtt)
+        base_vtt = base_vid_path.with_suffix('.vtt')
+        if base_vtt.exists():
+            local_files[base_lang]['sub'] = base_vtt
+            
+        for lang in langs:
+            if lang == base_lang:
+                continue
+            
+            # Replace base_lang with target lang in the filename (case-sensitive or insensitive)
+            # We'll use regex to do a case-insensitive replacement of _BASELANG_ or -BASELANG- etc
+            # or just simply replace the exact base_lang string.
+            # Example: "video_FSL_720p.mp4" -> "video_E_720p.mp4"
+            target_name_mp4 = base_vid_path.name.replace(f"_{base_lang}_", f"_{lang}_")
+            if target_name_mp4 == base_vid_path.name:
+                # Try without underscores
+                target_name_mp4 = base_vid_path.name.replace(base_lang, lang)
+                
+            local_files[lang] = {}
+            target_path_mp4 = out_dir / target_name_mp4
+            target_path_mp3 = target_path_mp4.with_suffix('.mp3')
+            target_path_vtt = target_path_mp4.with_suffix('.vtt')
+            
+            if target_path_mp4.exists():
+                local_files[lang]['video'] = target_path_mp4
+            if target_path_mp3.exists() and not args.force_videos:
+                # If MP3 exists and we aren't forcing video, prefer audio
+                local_files[lang]['audio'] = target_path_mp3
+                # Remove video if it fell back to audio
+                if 'video' in local_files[lang]:
+                    del local_files[lang]['video']
+            
+            if target_path_vtt.exists():
+                local_files[lang]['sub'] = target_path_vtt
+                
+            if local_files[lang]:
+                color_print(f"  [{lang}] Found local: {', '.join(local_files[lang].keys())}", "32")
+            else:
+                color_print(f"  [{lang}] No matching local files found.", "33")
+                
+    else:
+        # API Mode
+        docid = fetch_docid(args.input)
+        color_print(f"Extracted docid: {docid}", "32")
+        
+        downloads = {}
+        
+        color_print("\n>> Fetching media links...", "34")
+        for lang in langs:
+            links = get_media_links(docid, lang, args.res)
+            if not links:
+                color_print(f"  [{lang}] No media found.", "33")
+                continue
+                
+            downloads[lang] = {}
+            
+            # Base language requires video (MP4)
+            if lang == base_lang:
+                if 'mp4' in links:
+                    downloads[lang]['video'] = links['mp4']
+                else:
+                    color_print(f"  [{lang}] Error: Base language must have an MP4 video.", "31")
+                    sys.exit(1)
+            else:
+                # Secondary language: prefer MP3 for spoken, fallback to MP4 for sign languages
+                if 'mp3' in links and not args.force_videos:
+                    downloads[lang]['audio'] = links['mp3']
+                elif 'mp4' in links:
+                    downloads[lang]['video'] = links['mp4']
+                    
+            # Subtitles
+            if 'vtt' in links:
+                downloads[lang]['sub'] = links['vtt']
+                
+            color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
+
+        if base_lang not in downloads:
+            color_print("Base language not found. Exiting.", "31")
+            sys.exit(1)
+
+        color_print("\n>> Downloading files...", "34")
+        for lang, media in downloads.items():
+            local_files[lang] = {}
+            for mtype, url in media.items():
+                fname = get_filename_from_url(url)
+                dest = out_dir / fname
+                download_file(url, dest)
+                local_files[lang][mtype] = dest
 
     color_print("\n>> Muxing...", "34")
     

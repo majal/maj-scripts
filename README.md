@@ -154,9 +154,9 @@ Quick links inside this script section:
 
 #### What It Does
 
-- Extracts a `docid` from a jw.org video URL or accepts it directly.
+- Extracts a `docid` from a jw.org video URL, accepts it directly, or accepts an existing local video file.
 - Traces the jw.org API to automatically download the necessary MP4 videos, MP3 audio, and VTT subtitle files for multiple requested languages.
-- Intelligently merges sign language videos (which use multiple video tracks) and spoken language audio (which use multiple audio tracks) into a single master video file.
+- Intelligently merges sign language videos (which use multiple video tracks) and spoken language audio (which use multiple audio tracks) into a single master video file. Can keep multiple non-sign language video tracks via `--force-videos`.
 - Defaults to MKV as the export container, with an option to export to MP4.
 - Embeds VTT subtitles directly into the video container.
 - Offers to automatically install `ffmpeg` if not found.
@@ -208,6 +208,18 @@ Produce separate, single-stream videos replacing the audio instead of merging th
 
 ```bash
 ./jwvideo-mux 502015752 --single-streams
+```
+
+Use a pre-downloaded local file (automatically finds matching files in the same directory by replacing the language code, bypassing the API):
+
+```bash
+./jwvideo-mux video_FSL_720p.mp4 --base-lang FSL --langs E,S
+```
+
+Merge a spoken language video track as an alternative video instead of just replacing audio:
+
+```bash
+./jwvideo-mux 502015752 --base-lang ASL --langs E --force-videos
 ```
 
 <a id="jwvideo-mux-important-behavior--defaults"></a>
