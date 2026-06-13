@@ -349,9 +349,9 @@ def main():
             ])
             # Embed formatting depending on container
             if args.container == "mp4":
-                ff_meta.extend(["-c:s", "mov_text"])
+                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "mov_text"])
             else:
-                ff_meta.extend(["-c:s", "srt"])
+                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "copy"])
                 
             input_idx += 1
             subtitle_stream_idx += 1
