@@ -394,11 +394,22 @@ def main():
             
     if base_vid:
         parts = base_vid.stem.split('_')
+        
+        # Build the new language group string (video+audio)
+        v_loaded = [l for l in vid_langs if l in langs_loaded]
+        a_loaded = [l for l in aud_langs if l in langs_loaded]
+        v_str = '-'.join(v_loaded)
+        a_str = '-'.join(a_loaded)
+        if v_str and a_str:
+            lang_group = f"{v_str}+{a_str}"
+        else:
+            lang_group = v_str or a_str or '-'.join(langs_loaded)
+            
         if len(parts) >= 3:
-            parts[1] = '-'.join(langs_loaded)
+            parts[1] = lang_group
             out_name = f"{'_'.join(parts)}.{args.container}"
         else:
-            out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem}.{args.container}"
+            out_name = f"merged_{lang_group}_{base_vid.stem}.{args.container}"
     else:
         out_name = f"merged_{'-'.join(langs_loaded)}_output.{args.container}"
     out_path = out_dir / out_name
