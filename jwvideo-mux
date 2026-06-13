@@ -392,7 +392,15 @@ def main():
                 break
             if base_vid: break
             
-    out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem if base_vid else 'output'}.{args.container}"
+    if base_vid:
+        parts = base_vid.stem.split('_')
+        if len(parts) >= 3:
+            parts[1] = '-'.join(langs_loaded)
+            out_name = f"{'_'.join(parts)}.{args.container}"
+        else:
+            out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem}.{args.container}"
+    else:
+        out_name = f"merged_{'-'.join(langs_loaded)}_output.{args.container}"
     out_path = out_dir / out_name
     
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + ff_inputs + ff_maps + ff_meta + ["-c:v", "copy", "-c:a", "copy", str(out_path)]
