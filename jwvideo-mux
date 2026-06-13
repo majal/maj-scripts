@@ -161,9 +161,14 @@ def main():
     parser.add_argument("-s", "--subs", default="", help="Comma-separated language codes for subtitles. If omitted, uses all video/audio languages.")
     parser.add_argument("-r", "--res", default="720p", help="Target resolution (default: 720p)")
     parser.add_argument("-c", "--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
-    parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
-    parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
-    parser.add_argument("--output-dir", default=".", help="Directory to save output files")
+    parser.add_argument("-S", "--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
+    parser.add_argument("-C", "--cleanup", action="store_true", help="Trash downloaded source files after muxing")
+    parser.add_argument("-o", "--output-dir", default=".", help="Directory to save output files")
+    parser.add_argument("-f", "--force", action="store_true", help="Force overwrite if output file exists without asking")
+    parser.add_argument("--no-default-subs", action="store_true", help="Do not set any subtitle track as default")
+    parser.add_argument("--default-video", help="Language code to set as default video track")
+    parser.add_argument("--default-audio", help="Language code to set as default audio track")
+    parser.add_argument("--default-sub", help="Language code to set as default subtitle track")
     
     args = parser.parse_args()
     check_dependencies()
@@ -328,8 +333,8 @@ def main():
             f"-metadata:s:v:{video_stream_idx}", f"language={iso}",
             f"-metadata:s:v:{video_stream_idx}", f"title={title}"
         ])
-        if video_stream_idx == 0:
-            ff_meta.extend([f"-disposition:v:0", "default"])
+        if (args.default_video and args.default_video.upper() == lang) or (not args.default_video and video_stream_idx == 0):
+            ff_meta.extend([f"-disposition:v:{video_stream_idx}", "default"])
         video_stream_idx += 1
         if lang not in langs_loaded: langs_loaded.append(lang)
         
@@ -351,8 +356,8 @@ def main():
             f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
             f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
         ])
-        if audio_stream_idx == 0:
-            ff_meta.extend([f"-disposition:a:0", "default"])
+        if (args.default_audio and args.default_audio.upper() == lang) or (not args.default_audio and audio_stream_idx == 0):
+            ff_meta.extend([f"-disposition:a:{audio_stream_idx}", "default"])
         audio_stream_idx += 1
         if lang not in langs_loaded: langs_loaded.append(lang)
         
@@ -372,8 +377,9 @@ def main():
             else:
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "srt"])
                 
-            if subtitle_stream_idx == 0:
-                ff_meta.extend([f"-disposition:s:0", "default"])
+            if not args.no_default_subs:
+                if (args.default_sub and args.default_sub.upper() == lang) or (not args.default_sub and subtitle_stream_idx == 0):
+                    ff_meta.extend([f"-disposition:s:{subtitle_stream_idx}", "default"])
                 
             subtitle_stream_idx += 1
             if lang not in langs_loaded: langs_loaded.append(lang)
@@ -417,6 +423,12 @@ def main():
         out_name = f"merged_{'-'.join(langs_loaded)}_output.{args.container}"
     out_path = out_dir / out_name
     
+    if out_path.exists() and not args.force:
+        ans = input(f"File {out_name} already exists. Overwrite? [y/N] ")
+        if ans.lower() not in ['y', 'yes']:
+            color_print("Aborting muxing.", "31")
+            sys.exit(0)
+            
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + ff_inputs + ff_maps + ff_meta + ["-c:v", "copy", "-c:a", "copy", str(out_path)]
     
     color_print(f"Creating merged {args.container.upper()}: {out_name}", "36")
@@ -438,6 +450,13 @@ def main():
                     continue
                     
                 out_single = out_dir / f"single_{lang}_{base_vid.stem}.mp4"
+                
+                if out_single.exists() and not args.force:
+                    ans = input(f"File {out_single.name} already exists. Overwrite? [y/N] ")
+                    if ans.lower() not in ['y', 'yes']:
+                        color_print(f"Skipping {out_single.name}", "33")
+                        continue
+                        
                 cmd_single = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(base_vid)]
                 maps = ["-map", "0:v"]
                 
