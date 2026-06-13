@@ -372,6 +372,9 @@ def main():
             else:
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "srt"])
                 
+            if subtitle_stream_idx == 0:
+                ff_meta.extend([f"-disposition:s:0", "default"])
+                
             subtitle_stream_idx += 1
             if lang not in langs_loaded: langs_loaded.append(lang)
 
