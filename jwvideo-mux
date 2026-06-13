@@ -129,6 +129,11 @@ def get_media_links(docid: str, lang: str, res: str) -> dict:
         if sub_url:
             result['vtt'] = sub_url
             
+    if mp4_list:
+        lowest_mp4 = min(mp4_list, key=lambda x: x.get('frameHeight', 9999))
+        if lowest_mp4.get('file', {}).get('url'):
+            result['mp4_low'] = lowest_mp4['file']['url']
+            
     return result
 
 def download_file(url: str, dest: Path):
@@ -262,6 +267,8 @@ def main():
             if lang in aud_langs and lang not in vid_langs:
                 if 'mp3' in links:
                     downloads[lang]['audio'] = links['mp3']
+                elif 'mp4_low' in links:
+                    downloads[lang]['audio'] = links['mp4_low']
                 elif 'mp4' in links:
                     downloads[lang]['audio'] = links['mp4']
                     
