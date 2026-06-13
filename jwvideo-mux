@@ -268,15 +268,20 @@ def main():
                 if 'mp3' in links:
                     downloads[lang]['audio'] = links['mp3']
                 elif 'mp4_low' in links:
-                    downloads[lang]['audio'] = links['mp4_low']
+                    downloads[lang]['audio (via MP4 fallback)'] = links['mp4_low']
                 elif 'mp4' in links:
-                    downloads[lang]['audio'] = links['mp4']
+                    downloads[lang]['audio (via MP4 fallback)'] = links['mp4']
                     
             # Subtitles
             if lang in sub_langs and 'vtt' in links:
                 downloads[lang]['sub'] = links['vtt']
                 
-            color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
+            # Rename fallback keys for internal consistency after logging
+            log_keys = list(downloads[lang].keys())
+            if 'audio (via MP4 fallback)' in downloads[lang]:
+                downloads[lang]['audio'] = downloads[lang].pop('audio (via MP4 fallback)')
+                
+            color_print(f"  [{lang}] Found {', '.join(log_keys)}", "32")
 
         color_print("\n>> Downloading files...", "34")
         for lang, media in downloads.items():
@@ -318,7 +323,7 @@ def main():
         idx = get_or_add_input(local_files[lang]['video'])
         iso, title = get_lang_meta(lang)
         
-        ff_maps.extend(["-map", f"{idx}:v"])
+        ff_maps.extend(["-map", f"{idx}:v:0"])
         ff_meta.extend([
             f"-metadata:s:v:{video_stream_idx}", f"language={iso}",
             f"-metadata:s:v:{video_stream_idx}", f"title={title}"
@@ -341,7 +346,7 @@ def main():
         idx = get_or_add_input(path)
         iso, title = get_lang_meta(lang)
         
-        ff_maps.extend(["-map", f"{idx}:a?"])
+        ff_maps.extend(["-map", f"{idx}:a:0?"])
         ff_meta.extend([
             f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
             f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
@@ -365,7 +370,7 @@ def main():
             if args.container == "mp4":
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "mov_text"])
             else:
-                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "ass"])
+                ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "srt"])
                 
             subtitle_stream_idx += 1
             if lang not in langs_loaded: langs_loaded.append(lang)
