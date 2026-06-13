@@ -216,10 +216,10 @@ Use a pre-downloaded local file (automatically finds matching files in the same 
 ./jwvideo-mux video_FSL_720p.mp4 --base-lang FSL --langs E,S
 ```
 
-Merge a spoken language video track as an alternative video instead of just replacing audio:
+Merge a spoken language video track as an alternative video instead of just replacing audio (e.g. adding the English Hearing video track):
 
 ```bash
-./jwvideo-mux 502015752 --base-lang ASL --langs E --force-videos
+./jwvideo-mux 502015752 --base-lang ASL --langs E,S --force-videos E
 ```
 
 <a id="jwvideo-mux-important-behavior--defaults"></a>

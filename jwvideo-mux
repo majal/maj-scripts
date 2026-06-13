@@ -154,7 +154,7 @@ def main():
     parser.add_argument("--base-lang", default="E", help="Primary language code (default: E)")
     parser.add_argument("--langs", default="E,TG,CV,HV,SA", help="Comma-separated language codes to merge")
     parser.add_argument("--res", default="720p", help="Target resolution (default: 720p)")
-    parser.add_argument("--force-videos", action="store_true", help="Force downloading video (MP4) for all languages instead of preferring MP3")
+    parser.add_argument("--force-videos", nargs="?", const="ALL", default="", help="Force downloading video (MP4) for specific languages (comma-separated), or ALL if no value provided")
     parser.add_argument("--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
     parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
     parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
@@ -168,6 +168,8 @@ def main():
         langs.insert(0, args.base_lang.upper())
         
     base_lang = args.base_lang.upper()
+    force_vid_langs = [l.strip().upper() for l in args.force_videos.split(',')] if args.force_videos and args.force_videos != "ALL" else []
+    
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     
@@ -202,9 +204,11 @@ def main():
             target_path_mp3 = target_path_mp4.with_suffix('.mp3')
             target_path_vtt = target_path_mp4.with_suffix('.vtt')
             
+            force_this_vid = (args.force_videos == "ALL") or (lang in force_vid_langs)
+            
             if target_path_mp4.exists():
                 local_files[lang]['video'] = target_path_mp4
-            if target_path_mp3.exists() and not args.force_videos:
+            if target_path_mp3.exists() and not force_this_vid:
                 # If MP3 exists and we aren't forcing video, prefer audio
                 local_files[lang]['audio'] = target_path_mp3
                 # Remove video if it fell back to audio
@@ -243,8 +247,9 @@ def main():
                     color_print(f"  [{lang}] Error: Base language must have an MP4 video.", "31")
                     sys.exit(1)
             else:
+                force_this_vid = (args.force_videos == "ALL") or (lang in force_vid_langs)
                 # Secondary language: prefer MP3 for spoken, fallback to MP4 for sign languages
-                if 'mp3' in links and not args.force_videos:
+                if 'mp3' in links and not force_this_vid:
                     downloads[lang]['audio'] = links['mp3']
                 elif 'mp4' in links:
                     downloads[lang]['video'] = links['mp4']
