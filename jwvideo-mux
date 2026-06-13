@@ -151,10 +151,9 @@ def get_filename_from_url(url: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="jwvideo-mux: Merge videos, audio, and subtitles from jw.org")
     parser.add_argument("input", help="URL or docid of the video")
-    parser.add_argument("--base-lang", default="E", help="Primary language code (default: E)")
-    parser.add_argument("--langs", default="E,TG,CV,HV,SA", help="Comma-separated language codes to merge")
+    parser.add_argument("--video", default="E", help="Comma-separated language codes for video tracks (default: E)")
+    parser.add_argument("--audio", default="E,TG,CV,HV,SA", help="Comma-separated language codes for audio tracks")
     parser.add_argument("--res", default="720p", help="Target resolution (default: 720p)")
-    parser.add_argument("--force-videos", nargs="?", const="ALL", default="", help="Force downloading video (MP4) for specific languages (comma-separated), or ALL if no value provided")
     parser.add_argument("--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
     parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
     parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
@@ -231,7 +230,7 @@ def main():
         downloads = {}
         
         color_print("\n>> Fetching media links...", "34")
-        for lang in langs:
+        for lang in all_langs:
             links = get_media_links(docid, lang, args.res)
             if not links:
                 color_print(f"  [{lang}] No media found.", "33")
@@ -239,30 +238,24 @@ def main():
                 
             downloads[lang] = {}
             
-            # Base language requires video (MP4)
-            if lang == base_lang:
+            if lang in vid_langs:
                 if 'mp4' in links:
                     downloads[lang]['video'] = links['mp4']
                 else:
-                    color_print(f"  [{lang}] Error: Base language must have an MP4 video.", "31")
+                    color_print(f"  [{lang}] Error: Video requested but no MP4 found.", "31")
                     sys.exit(1)
-            else:
-                force_this_vid = (args.force_videos == "ALL") or (lang in force_vid_langs)
-                # Secondary language: prefer MP3 for spoken, fallback to MP4 for sign languages
-                if 'mp3' in links and not force_this_vid:
+            
+            if lang in aud_langs and lang not in vid_langs:
+                if 'mp3' in links:
                     downloads[lang]['audio'] = links['mp3']
                 elif 'mp4' in links:
-                    downloads[lang]['video'] = links['mp4']
+                    downloads[lang]['audio'] = links['mp4']
                     
             # Subtitles
             if 'vtt' in links:
                 downloads[lang]['sub'] = links['vtt']
                 
             color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
-
-        if base_lang not in downloads:
-            color_print("Base language not found. Exiting.", "31")
-            sys.exit(1)
 
         color_print("\n>> Downloading files...", "34")
         for lang, media in downloads.items():
@@ -281,86 +274,86 @@ def main():
     ff_meta = []
     
     input_idx = 0
+    input_paths = []
     
-    # Base video
-    base_vid = local_files[base_lang]['video']
-    ff_inputs.extend(["-i", str(base_vid)])
-    ff_maps.extend(["-map", f"{input_idx}:v", "-map", f"{input_idx}:a?"])
+    def get_or_add_input(path):
+        nonlocal input_idx
+        path_str = str(path)
+        if path_str in input_paths:
+            return input_paths.index(path_str)
+        ff_inputs.extend(["-i", path_str])
+        input_paths.append(path_str)
+        idx = input_idx
+        input_idx += 1
+        return idx
+        
+    video_stream_idx = 0
+    langs_loaded = []
     
-    # Tag base audio if it exists
-    iso, title = get_lang_meta(base_lang)
-    ff_meta.extend([
-        f"-metadata:s:a:0", f"language={iso}",
-        f"-metadata:s:a:0", f"title={title}",
-        f"-disposition:a:0", "default"
-    ])
-    
-    input_idx += 1
-    
-    audio_stream_idx = 1
-    video_stream_idx = 1
-    subtitle_stream_idx = 0
-    
-    langs_loaded = [base_lang]
-    
-    for lang in langs:
-        if lang == base_lang or lang not in local_files:
+    for lang in vid_langs:
+        if lang not in local_files or 'video' not in local_files[lang]:
             continue
             
-        added_media = False
-        media = local_files[lang]
+        idx = get_or_add_input(local_files[lang]['video'])
         iso, title = get_lang_meta(lang)
         
-        # Audio from MP3
-        if 'audio' in media:
-            ff_inputs.extend(["-i", str(media['audio'])])
-            ff_maps.extend(["-map", f"{input_idx}:a"])
-            ff_meta.extend([
-                f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
-                f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
-            ])
-            audio_stream_idx += 1
-            input_idx += 1
-            added_media = True
+        ff_maps.extend(["-map", f"{idx}:v"])
+        ff_meta.extend([
+            f"-metadata:s:v:{video_stream_idx}", f"language={iso}",
+            f"-metadata:s:v:{video_stream_idx}", f"title={title}"
+        ])
+        if video_stream_idx == 0:
+            ff_meta.extend([f"-disposition:v:0", "default"])
+        video_stream_idx += 1
+        if lang not in langs_loaded: langs_loaded.append(lang)
+        
+    audio_stream_idx = 0
+    for lang in aud_langs:
+        if lang not in local_files:
+            continue
             
-        # Video (and possibly audio) from MP4
-        elif 'video' in media:
-            ff_inputs.extend(["-i", str(media['video'])])
-            ff_maps.extend(["-map", f"{input_idx}:v", "-map", f"{input_idx}:a?"])
-            ff_meta.extend([
-                f"-metadata:s:v:{video_stream_idx}", f"language={iso}",
-                f"-metadata:s:v:{video_stream_idx}", f"title={title}",
-                f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
-                f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
-            ])
-            video_stream_idx += 1
-            audio_stream_idx += 1
-            input_idx += 1
-            added_media = True
-
-        if added_media:
-            langs_loaded.append(lang)
-
-    # Subtitles (VTT)
-    # We do subtitles after A/V to keep stream indexing simpler
-    for lang in [base_lang] + [l for l in langs if l != base_lang]:
+        media = local_files[lang]
+        path = media.get('audio', media.get('video'))
+        if not path:
+            continue
+            
+        idx = get_or_add_input(path)
+        iso, title = get_lang_meta(lang)
+        
+        ff_maps.extend(["-map", f"{idx}:a?"])
+        ff_meta.extend([
+            f"-metadata:s:a:{audio_stream_idx}", f"language={iso}",
+            f"-metadata:s:a:{audio_stream_idx}", f"title={title}"
+        ])
+        if audio_stream_idx == 0:
+            ff_meta.extend([f"-disposition:a:0", "default"])
+        audio_stream_idx += 1
+        if lang not in langs_loaded: langs_loaded.append(lang)
+        
+    subtitle_stream_idx = 0
+    for lang in all_langs:
         if lang in local_files and 'sub' in local_files[lang]:
+            idx = get_or_add_input(local_files[lang]['sub'])
             iso, title = get_lang_meta(lang)
-            ff_inputs.extend(["-i", str(local_files[lang]['sub'])])
-            ff_maps.extend(["-map", f"{input_idx}:s"])
+            
+            ff_maps.extend(["-map", f"{idx}:s"])
             ff_meta.extend([
                 f"-metadata:s:s:{subtitle_stream_idx}", f"language={iso}",
                 f"-metadata:s:s:{subtitle_stream_idx}", f"title={title}"
             ])
-            # Embed formatting depending on container
             if args.container == "mp4":
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "mov_text"])
             else:
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "copy"])
                 
-            input_idx += 1
             subtitle_stream_idx += 1
 
+    if not langs_loaded:
+        color_print("No media to mux. Exiting.", "31")
+        sys.exit(1)
+
+    # Use first video for naming
+    base_vid = local_files[vid_langs[0]]['video'] if vid_langs and 'video' in local_files.get(vid_langs[0], {}) else list(local_files.values())[0].get('audio')
     out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem}.{args.container}"
     out_path = out_dir / out_name
     
@@ -374,38 +367,40 @@ def main():
         color_print("✗ Merged video creation failed.", "31")
 
     # 2. Mux single streams
-    if args.single_streams:
-        color_print("\n>> Creating single-stream videos...", "34")
-        for lang in langs_loaded:
-            if lang == base_lang:
-                continue
+    if args.single_streams and vid_langs:
+        base_vid_lang = vid_langs[0]
+        base_vid = local_files.get(base_vid_lang, {}).get('video')
+        
+        if base_vid:
+            color_print("\n>> Creating single-stream videos...", "34")
+            for lang in aud_langs:
+                if lang == base_vid_lang and len(aud_langs) == 1:
+                    continue
+                    
+                out_single = out_dir / f"single_{lang}_{base_vid.stem}.mp4"
+                cmd_single = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(base_vid)]
+                maps = ["-map", "0:v"]
                 
-            out_single = out_dir / f"single_{lang}_{base_vid.stem}.mp4"
-            cmd_single = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(base_vid)]
-            maps = ["-map", "0:v"]
-            
-            media = local_files.get(lang, {})
-            # If spoken, replace audio with MP3
-            if 'audio' in media:
-                cmd_single.extend(["-i", str(media['audio'])])
-                maps.extend(["-map", "1:a"])
-            # If sign language, replace video and audio with MP4
-            elif 'video' in media:
-                cmd_single.extend(["-i", str(media['video'])])
-                maps = ["-map", "1:v", "-map", "1:a?"]
-            else:
-                continue
+                media = local_files.get(lang, {})
+                audio_path = media.get('audio', media.get('video'))
                 
-            # Embed subtitle if present for this language, else use base subtitle
-            sub_file = media.get('sub', local_files[base_lang].get('sub'))
-            if sub_file:
-                cmd_single.extend(["-i", str(sub_file)])
-                # sub is the 3rd input (index 2)
-                maps.extend(["-map", "2:s", "-c:s", "mov_text"])
+                if audio_path:
+                    if str(audio_path) != str(base_vid):
+                        cmd_single.extend(["-i", str(audio_path)])
+                        maps.extend(["-map", "1:a?"])
+                    else:
+                        maps.extend(["-map", "0:a?"])
                 
-            cmd_single += maps + ["-c:v", "copy", "-c:a", "copy", str(out_single)]
-            subprocess.run(cmd_single)
-            color_print(f"  ✓ Single-stream created: {out_single.name}", "32")
+                # Embed subtitle if present for this language, else use base subtitle
+                sub_file = media.get('sub', local_files.get(base_vid_lang, {}).get('sub'))
+                if sub_file:
+                    sub_idx = 2 if (audio_path and str(audio_path) != str(base_vid)) else 1
+                    cmd_single.extend(["-i", str(sub_file)])
+                    maps.extend(["-map", f"{sub_idx}:s", "-c:s", "mov_text"])
+                    
+                cmd_single += maps + ["-c:v", "copy", "-c:a", "copy", str(out_single)]
+                subprocess.run(cmd_single)
+                color_print(f"  ✓ Single-stream created: {out_single.name}", "32")
 
     # Cleanup
     if args.cleanup:

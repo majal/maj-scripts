@@ -156,12 +156,14 @@ Quick links inside this script section:
 
 - Extracts a `docid` from a jw.org video URL, accepts it directly, or accepts an existing local video file.
 - Traces the jw.org API to automatically download the necessary MP4 videos, MP3 audio, and VTT subtitle files for multiple requested languages.
-- Intelligently merges sign language videos (which use multiple video tracks) and spoken language audio (which use multiple audio tracks) into a single master video file. Can keep multiple non-sign language video tracks via `--force-videos`.
+- Intelligently merges multiple audio tracks (and their subtitles) into a single MKV file.
 - Defaults to MKV as the export container, with an option to export to MP4.
 - Embeds VTT subtitles directly into the video container.
 - Offers to automatically install `ffmpeg` if not found.
 - Has an optional cleanup flag to trash temporary source files after successful muxing.
 - Can create single-stream audio/video files instead of merged ones, replacing the base track, which helps with platforms that play all audio streams simultaneously.
+- If you include a language in both `--video` and `--audio` (e.g., `--video E --audio E,TG`), the script is smart enough to download the MP4 exactly once and map its video and audio streams seamlessly.
+- **Sign Language:** If a language does not have an MP3 (common for sign languages), the script will automatically fall back to downloading its MP4 to use as the track source.
 
 <a id="jwvideo-mux-supported-platforms"></a>
 
@@ -192,16 +194,22 @@ chmod +x jwvideo-mux
 
 #### Common Usage Examples
 
-Download and merge a video by URL using the default languages (`E,TG,CV,HV,SA`):
+Download and merge a video by URL using the default languages:
 
 ```bash
 ./jwvideo-mux "https://www.jw.org/finder?wtlocale=E&docid=502015752"
 ```
 
-Download and merge specific languages (`E,S,F`) with French as the base, output to MP4, and clean up source files:
+Basic usage: English video with English, Tagalog, and Cebuano audio:
 
 ```bash
-./jwvideo-mux 502015752 --base-lang F --langs E,S,F --container mp4 --cleanup
+./jwvideo-mux 502015752 --video E --audio E,TG,CV
+```
+
+Download and merge specific languages (e.g., French base video with English, Spanish, and French audio), output to MP4, and clean up source files:
+
+```bash
+./jwvideo-mux 502015752 --video F --audio E,S,F --container mp4 --cleanup
 ```
 
 Produce separate, single-stream videos replacing the audio instead of merging them all into one:
@@ -210,24 +218,19 @@ Produce separate, single-stream videos replacing the audio instead of merging th
 ./jwvideo-mux 502015752 --single-streams
 ```
 
-Use a pre-downloaded local file (automatically finds matching files in the same directory by replacing the language code, bypassing the API):
+Use a pre-downloaded local file:
 
 ```bash
-./jwvideo-mux video_FSL_720p.mp4 --base-lang FSL --langs E,S
-```
-
-Merge a spoken language video track as an alternative video instead of just replacing audio (e.g. adding the English Hearing video track):
-
-```bash
-./jwvideo-mux 502015752 --base-lang ASL --langs E,S --force-videos E
+./jwvideo-mux video_FSL_720p.mp4 --video FSL --audio E,S
 ```
 
 <a id="jwvideo-mux-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
-- Default base language: `E` (English). Base language determines the primary video track.
-- Default secondary languages: `E,TG,CV,HV,SA`
+- `--video`: Comma-separated languages for video tracks (default: `E`)
+- `--audio`: Comma-separated languages for audio tracks (default: `E,TG,CV,HV,SA`)
+- `--res`: Target video resolution (default: `720p`)
 - Default export container: MKV. MKV handles multiple video and subtitle tracks more gracefully than MP4, but MP4 is fully supported.
 - Spoken languages prefer downloading the much smaller MP3 files. Sign languages download the MP4 file to preserve the video track.
 - Automatically tags audio and video streams with ISO 639-2 codes and display names.
