@@ -200,38 +200,38 @@ Download and merge a video by URL using the default languages:
 ./jwvideo-mux "https://www.jw.org/finder?wtlocale=E&docid=502015752"
 ```
 
-Basic usage: English video with English, Tagalog, and Cebuano audio:
-
 ```bash
-./jwvideo-mux 502015752 --video E --audio E,TG,CV
+# Basic usage: English video with English, Tagalog, and Cebuano audio
+./jwvideo-mux 502015752 -v E -a E,TG,CV
 ```
 
 Download and merge specific languages (e.g., French base video with English, Spanish, and French audio), output to MP4, and clean up source files:
 
 ```bash
-./jwvideo-mux 502015752 --video F --audio E,S,F --container mp4 --cleanup
+./jwvideo-mux 502015752 -v F -a E,S,F --container mp4 --cleanup
 ```
 
 Produce separate, single-stream videos replacing the audio instead of merging them all into one:
 
 ```bash
-./jwvideo-mux 502015752 --single-streams
+./jwvideo-mux 502015752 -v E -a E,TG,CV,HV,SA --single-streams
 ```
 
 Use a pre-downloaded local file:
 
 ```bash
-./jwvideo-mux video_FSL_720p.mp4 --video FSL --audio E,S
+./jwvideo-mux video_FSL_720p.mp4 -v FSL -a E,S
 ```
 
 <a id="jwvideo-mux-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
-- `--video`: Comma-separated languages for video tracks (default: `E`)
-- `--audio`: Comma-separated languages for audio tracks (default: `E,TG,CV,HV,SA`)
-- `--res`: Target video resolution (default: `720p`)
-- Default export container: MKV. MKV handles multiple video and subtitle tracks more gracefully than MP4, but MP4 is fully supported.
+- `-v, --video`: Comma-separated languages for video tracks (default: `E`)
+- `-a, --audio`: Comma-separated languages for audio tracks (default: `E,TG,CV,HV,SA`)
+- `-s, --subs`: Comma-separated languages for subtitles. If omitted, automatically fetches subtitles for all requested video and audio languages.
+- `-r, --res`: Target video resolution (default: `720p`)
+- `-c, --container`: Export container format, `mkv` or `mp4` (default: `mkv`). *Note: MKV is recommended for robust multi-track and native WebVTT subtitle support.*
 - Spoken languages prefer downloading the much smaller MP3 files. Sign languages download the MP4 file to preserve the video track.
 - Automatically tags audio and video streams with ISO 639-2 codes and display names.
 

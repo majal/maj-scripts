@@ -150,11 +150,12 @@ def get_filename_from_url(url: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="jwvideo-mux: Merge videos, audio, and subtitles from jw.org")
-    parser.add_argument("input", help="URL or docid of the video")
-    parser.add_argument("--video", default="E", help="Comma-separated language codes for video tracks (default: E)")
-    parser.add_argument("--audio", default="E,TG,CV,HV,SA", help="Comma-separated language codes for audio tracks")
-    parser.add_argument("--res", default="720p", help="Target resolution (default: 720p)")
-    parser.add_argument("--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
+    parser.add_argument("input", help="URL, docid, or local file pattern to process")
+    parser.add_argument("-v", "--video", default="E", help="Comma-separated language codes for video tracks (default: E)")
+    parser.add_argument("-a", "--audio", default="E,TG,CV,HV,SA", help="Comma-separated language codes for audio tracks")
+    parser.add_argument("-s", "--subs", default="", help="Comma-separated language codes for subtitles. If omitted, uses all video/audio languages.")
+    parser.add_argument("-r", "--res", default="720p", help="Target resolution (default: 720p)")
+    parser.add_argument("-c", "--container", default="mkv", choices=["mkv", "mp4"], help="Export container format (default: mkv)")
     parser.add_argument("--single-streams", action="store_true", help="Also produce multiple separate videos with modified audio streams")
     parser.add_argument("--cleanup", action="store_true", help="Trash downloaded source files after muxing")
     parser.add_argument("--output-dir", default=".", help="Directory to save output files")
@@ -162,12 +163,16 @@ def main():
     args = parser.parse_args()
     check_dependencies()
     
-    langs = [l.strip().upper() for l in args.langs.split(",") if l.strip()]
-    if args.base_lang.upper() not in langs:
-        langs.insert(0, args.base_lang.upper())
+    vid_langs = [l.strip().upper() for l in args.video.split(',')] if args.video else []
+    aud_langs = [l.strip().upper() for l in args.audio.split(',')] if args.audio else []
+    sub_langs_explicit = [l.strip().upper() for l in args.subs.split(',')] if args.subs else []
+    
+    if not vid_langs and not aud_langs:
+        color_print("Error: You must specify at least one video or audio language.", "31")
+        sys.exit(1)
         
-    base_lang = args.base_lang.upper()
-    force_vid_langs = [l.strip().upper() for l in args.force_videos.split(',')] if args.force_videos and args.force_videos != "ALL" else []
+    all_media_langs = list(dict.fromkeys(vid_langs + aud_langs))
+    all_langs = list(dict.fromkeys(vid_langs + aud_langs + sub_langs))
     
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -214,7 +219,7 @@ def main():
                 if 'video' in local_files[lang]:
                     del local_files[lang]['video']
             
-            if target_path_vtt.exists():
+            if lang in sub_langs and target_path_vtt.exists():
                 local_files[lang]['sub'] = target_path_vtt
                 
             if local_files[lang]:
@@ -252,7 +257,7 @@ def main():
                     downloads[lang]['audio'] = links['mp4']
                     
             # Subtitles
-            if 'vtt' in links:
+            if lang in sub_langs and 'vtt' in links:
                 downloads[lang]['sub'] = links['vtt']
                 
             color_print(f"  [{lang}] Found {', '.join(downloads[lang].keys())}", "32")
