@@ -70,8 +70,8 @@ def fetch_docid(input_str: str) -> str:
     if re.match(r'^\d+$', input_str):
         return input_str
         
-    # Check if docid is in the URL parameters
-    match = re.search(r'docid=(\d+)', input_str)
+    # Check if docid is in the URL parameters or hash fragment
+    match = re.search(r'docid[=-](\d+)', input_str)
     if match:
         return match.group(1)
         
@@ -81,7 +81,7 @@ def fetch_docid(input_str: str) -> str:
         req = urllib.request.Request(input_str, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             html = response.read().decode('utf-8', errors='ignore')
-            match = re.search(r'docid=(\d+)', html)
+            match = re.search(r'docid[=-](\d+)', html)
             if match:
                 return match.group(1)
     except Exception as e:
