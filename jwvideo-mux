@@ -163,15 +163,24 @@ def main():
     args = parser.parse_args()
     check_dependencies()
     
-    vid_langs = [l.strip().upper() for l in args.video.split(',')] if args.video else []
-    aud_langs = [l.strip().upper() for l in args.audio.split(',')] if args.audio else []
+    vid_langs = [l.strip().upper() for l in args.video.split(',')] if args.video and args.video.upper() != "NONE" else []
+    aud_langs = [l.strip().upper() for l in args.audio.split(',')] if args.audio and args.audio.upper() != "NONE" else []
     sub_langs_explicit = [l.strip().upper() for l in args.subs.split(',')] if args.subs else []
     
-    if not vid_langs and not aud_langs:
-        color_print("Error: You must specify at least one video or audio language.", "31")
+    # If explicit subs is NONE, then sub_langs is empty.
+    if args.subs and args.subs.upper() == "NONE":
+        sub_langs_explicit = []
+        sub_langs = []
+    elif not args.subs:
+        # Default to all media langs if not specified
+        sub_langs = list(dict.fromkeys(vid_langs + aud_langs))
+    else:
+        sub_langs = sub_langs_explicit
+        
+    if not vid_langs and not aud_langs and not sub_langs:
+        color_print("Error: You must specify at least one video, audio, or subtitle language.", "31")
         sys.exit(1)
         
-    all_media_langs = list(dict.fromkeys(vid_langs + aud_langs))
     all_langs = list(dict.fromkeys(vid_langs + aud_langs + sub_langs))
     
     out_dir = Path(args.output_dir).resolve()
@@ -352,14 +361,26 @@ def main():
                 ff_meta.extend([f"-c:s:{subtitle_stream_idx}", "copy"])
                 
             subtitle_stream_idx += 1
+            if lang not in langs_loaded: langs_loaded.append(lang)
 
     if not langs_loaded:
         color_print("No media to mux. Exiting.", "31")
         sys.exit(1)
 
-    # Use first video for naming
-    base_vid = local_files[vid_langs[0]]['video'] if vid_langs and 'video' in local_files.get(vid_langs[0], {}) else list(local_files.values())[0].get('audio')
-    out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem}.{args.container}"
+    # Find a base file path for naming
+    base_vid = None
+    if vid_langs and 'video' in local_files.get(vid_langs[0], {}):
+        base_vid = local_files[vid_langs[0]]['video']
+    elif aud_langs and 'audio' in local_files.get(aud_langs[0], {}):
+        base_vid = local_files[aud_langs[0]]['audio']
+    else:
+        for lang_files in local_files.values():
+            for path in lang_files.values():
+                base_vid = path
+                break
+            if base_vid: break
+            
+    out_name = f"merged_{'-'.join(langs_loaded)}_{base_vid.stem if base_vid else 'output'}.{args.container}"
     out_path = out_dir / out_name
     
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + ff_inputs + ff_maps + ff_meta + ["-c:v", "copy", "-c:a", "copy", str(out_path)]
