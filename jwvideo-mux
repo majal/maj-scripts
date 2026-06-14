@@ -65,17 +65,33 @@ def check_dependencies():
         else:
             sys.exit(1)
 
-def fetch_docid(input_str: str) -> str:
-    # If it's just numbers, treat as docid
+def fetch_media_params(input_str: str) -> dict:
     if re.match(r'^\d+$', input_str):
-        return input_str
+        return {"docid": input_str}
         
-    # Check if docid is in the URL parameters or hash fragment
+    match = re.search(r'(?:lank=|/|^)(docid-(\d+)|pub-[a-zA-Z0-9_-]+)', input_str)
+    if match:
+        lank = match.group(1)
+        if lank.startswith('docid-'):
+            return {"docid": match.group(2)}
+        else:
+            parts = lank[4:].split('_')
+            res = {"pub": parts[0]}
+            if len(parts) > 2 and parts[1].isdigit():
+                if len(parts) > 3 or len(parts[1]) >= 6: 
+                    res["issue"] = parts[1]
+                    if parts[2].isdigit():
+                        res["track"] = parts[2]
+                else:
+                    res["track"] = parts[1]
+            elif len(parts) > 1 and parts[1].isdigit():
+                res["track"] = parts[1]
+            return res
+            
     match = re.search(r'docid[=-](\d+)', input_str)
     if match:
-        return match.group(1)
+        return {"docid": match.group(1)}
         
-    # Otherwise, try fetching the HTML and looking for docid
     try:
         color_print("Fetching URL to extract docid...", "34")
         req = urllib.request.Request(input_str, headers={'User-Agent': 'Mozilla/5.0'})
@@ -83,15 +99,20 @@ def fetch_docid(input_str: str) -> str:
             html = response.read().decode('utf-8', errors='ignore')
             match = re.search(r'docid[=-](\d+)', html)
             if match:
-                return match.group(1)
+                return {"docid": match.group(1)}
     except Exception as e:
         color_print(f"Failed to fetch or parse URL: {e}", "31")
     
-    color_print("Could not extract a valid docid from the input.", "31")
+    color_print("Could not extract valid media parameters from the input.", "31")
     sys.exit(1)
 
-def get_media_links(docid: str, lang: str, res: str) -> dict:
-    url = f"https://b.jw-cdn.org/apis/pub-media/GETPUBMEDIALINKS?output=json&docid={docid}&fileformat=MP4,VTT,MP3&alllangs=0&langwritten={lang}"
+def get_media_links(params: dict, lang: str, res: str) -> dict:
+    query_parts = []
+    for k, v in params.items():
+        query_parts.append(f"{k}={v}")
+    query = "&".join(query_parts)
+    
+    url = f"https://b.jw-cdn.org/apis/pub-media/GETPUBMEDIALINKS?output=json&fileformat=MP4,VTT,MP3&alllangs=0&langwritten={lang}&{query}"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
@@ -202,6 +223,9 @@ def main():
         color_print("\n>> Local file mode detected. Skipping API downloads...", "34")
         base_vid_path = Path(args.input).resolve()
         out_dir = base_vid_path.parent
+        
+        base_lang = vid_langs[0] if vid_langs else (aud_langs[0] if aud_langs else "E")
+        
         local_files[base_lang] = {'video': base_vid_path}
         
         # Attempt to find VTT for base video (same name but .vtt)
@@ -209,13 +233,11 @@ def main():
         if base_vtt.exists():
             local_files[base_lang]['sub'] = base_vtt
             
-        for lang in langs:
+        for lang in all_langs:
             if lang == base_lang:
                 continue
             
             # Replace base_lang with target lang in the filename (case-sensitive or insensitive)
-            # We'll use regex to do a case-insensitive replacement of _BASELANG_ or -BASELANG- etc
-            # or just simply replace the exact base_lang string.
             # Example: "video_FSL_720p.mp4" -> "video_E_720p.mp4"
             target_name_mp4 = base_vid_path.name.replace(f"_{base_lang}_", f"_{lang}_")
             if target_name_mp4 == base_vid_path.name:
@@ -227,14 +249,11 @@ def main():
             target_path_mp3 = target_path_mp4.with_suffix('.mp3')
             target_path_vtt = target_path_mp4.with_suffix('.vtt')
             
-            force_this_vid = (args.force_videos == "ALL") or (lang in force_vid_langs)
-            
             if target_path_mp4.exists():
                 local_files[lang]['video'] = target_path_mp4
-            if target_path_mp3.exists() and not force_this_vid:
-                # If MP3 exists and we aren't forcing video, prefer audio
+            if target_path_mp3.exists() and lang not in vid_langs:
+                # If MP3 exists and we aren't explicitly needing video for this lang, prefer audio
                 local_files[lang]['audio'] = target_path_mp3
-                # Remove video if it fell back to audio
                 if 'video' in local_files[lang]:
                     del local_files[lang]['video']
             
@@ -248,14 +267,14 @@ def main():
                 
     else:
         # API Mode
-        docid = fetch_docid(args.input)
-        color_print(f"Extracted docid: {docid}", "32")
+        params = fetch_media_params(args.input)
+        color_print(f"Extracted media params: {params}", "32")
         
         downloads = {}
         
         color_print("\n>> Fetching media links...", "34")
         for lang in all_langs:
-            links = get_media_links(docid, lang, args.res)
+            links = get_media_links(params, lang, args.res)
             if not links:
                 color_print(f"  [{lang}] No media found.", "33")
                 continue

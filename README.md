@@ -140,6 +140,8 @@ Clear the local video cache:
 
 `jwvideo-mux` is an automated media downloader and muxer for jw.org videos.
 
+Designed to be accessible for semi-techies, this script simplifies the otherwise complex process of downloading and merging multiple language tracks into a single video file. If you want to use this script without opening a terminal, we recommend wrapping it in a [Friendly Launcher](#friendly-launchers) for a seamless drag-and-drop or double-click experience.
+
 Quick links inside this script section:
 
 - [What it does](#jwvideo-mux-what-it-does)
@@ -189,6 +191,8 @@ Make the script executable if your checkout did not preserve executable bits:
 ```bash
 chmod +x jwvideo-mux
 ```
+
+For a simpler, double-click experience without using the command line, create a wrapper script as detailed in the [Friendly Launchers](#friendly-launchers) section.
 
 <a id="jwvideo-mux-common-usage-examples"></a>
 
