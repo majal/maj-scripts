@@ -116,11 +116,14 @@ def get_pub_media_links(lang, booknum=None):
     return fetch_json(url)
 
 def get_bible_metadata(lang_code):
+    # Map common config 'E' to 'en'
+    if lang_code == "E":
+        lc = "en"
+    else:
+        lc = lang_code.lower()
+        
     # Try fetching NWT study bible metadata to resolve book names/numbers
-    url = f"https://www.jw.org/{lang_code.lower()}/library/bible/study-bible/books/json/"
-    # For simplicity, fallback to English NWT
-    if lang_code != "E":
-        url = "https://www.jw.org/en/library/bible/study-bible/books/json/"
+    url = f"https://www.jw.org/{lc}/library/bible/study-bible/books/json/"
     return fetch_json(url)
 
 def download_file(url, output_path):
@@ -278,29 +281,30 @@ def cmd_config(args, config):
 def cmd_sync(args, config):
     lang = args.lang.upper()
     print(f"Syncing metadata for {lang}...")
-    data = get_pub_media_links(lang)
-    if not data:
-        return
-        
+    
     state = get_state()
     if lang not in state:
         state[lang] = {}
         
-    # Analyze files
-    mp4s = data.get("files", {}).get(lang, {}).get("MP4", [])
     count = 0
-    for file in mp4s:
-        if file.get("label") == "720p":
-            url = file["file"]["url"]
-            checksum = file["file"]["checksum"]
-            booknum = file.get("booknum")
-            track = file.get("track")
-            key = f"{booknum}_{track}"
+    for n in range(1, 67):
+        data = get_pub_media_links(lang, n)
+        if not data:
+            continue
             
-            if state[lang].get(key, {}).get("checksum") != checksum:
-                state[lang][key] = {"url": url, "checksum": checksum, "downloaded": False}
-                count += 1
+        mp4s = data.get("files", {}).get(lang, {}).get("MP4", [])
+        for file in mp4s:
+            if file.get("label") == "720p":
+                url = file["file"]["url"]
+                checksum = file["file"]["checksum"]
+                booknum = file.get("booknum", n)
+                track = file.get("track")
+                key = f"{booknum}_{track}"
                 
+                if state[lang].get(key, {}).get("checksum") != checksum:
+                    state[lang][key] = {"url": url, "checksum": checksum, "downloaded": False}
+                    count += 1
+                    
     save_state(state)
     print(f"Found {count} new/updated files for {lang}.")
 
@@ -324,7 +328,8 @@ def cmd_extract(args, config):
         print(f"Could not parse reference: {ref}. Use format 'Book Chapter:Verse(s)' (e.g., 'Rev 13:1, 2')")
         return
         
-    print(f"Extracting {book_name} {chapter}:{verses} in {lang}...")
+    verses_str = f"{verses[0]}" if len(verses)==1 else f"{verses[0]}-{verses[-1]}"
+    print(f"Extracting {book_name} {chapter}:{verses_str} in {lang}...")
     
     # 1. Resolve book number
     book_num = resolve_book_number(book_name, config.get("api_language", "E"))
