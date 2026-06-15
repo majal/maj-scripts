@@ -35,10 +35,67 @@ KNOWN_LANGUAGES = {
     "CH": ("zho", "Chinese"),
 }
 
+def update_and_load_langs() -> dict:
+    langs_dict = dict(KNOWN_LANGUAGES)
+    script_dir = Path(__file__).parent
+    json_path = script_dir / "jwlangs.json"
+    
+    if json_path.exists():
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                cached = json.load(f)
+                langs_dict.update(cached)
+        except Exception:
+            pass
+            
+    return langs_dict
+
+_LOADED_LANGUAGES = None
+
 def get_lang_meta(code: str) -> tuple[str, str]:
+    global _LOADED_LANGUAGES
+    if _LOADED_LANGUAGES is None:
+        _LOADED_LANGUAGES = update_and_load_langs()
+        
     code_upper = code.upper()
-    if code_upper in KNOWN_LANGUAGES:
-        return KNOWN_LANGUAGES[code_upper]
+    if code_upper in _LOADED_LANGUAGES:
+        return tuple(_LOADED_LANGUAGES[code_upper])
+        
+    # If not found, try to fetch from API on the fly
+    try:
+        color_print(f"Language '{code_upper}' not found in cache. Fetching from jw.org...", "33")
+        url = 'https://b.jw-cdn.org/apis/mediator/v1/languages/E/all'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            
+        script_dir = Path(__file__).parent
+        json_path = script_dir / "jwlangs.json"
+        
+        new_langs = {}
+        for lang in data.get('languages', []):
+            lc = lang.get('code')
+            locale = lang.get('locale', '')
+            name = lang.get('name', '')
+            if not locale:
+                locale = lc.lower()[:3]
+            new_langs[lc] = [locale, name]
+            
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(new_langs, f, indent=4)
+        except Exception as e:
+            color_print(f"Warning: Could not save jwlangs.json: {e}", "33")
+            
+        _LOADED_LANGUAGES.update(new_langs)
+        
+        if code_upper in _LOADED_LANGUAGES:
+            return tuple(_LOADED_LANGUAGES[code_upper])
+            
+    except Exception as e:
+        color_print(f"Failed to fetch languages: {e}", "31")
+
+    # Fallback
     return (code.lower()[:3], code_upper)
 
 def color_print(msg: str, color_code: str = ""):
