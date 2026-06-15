@@ -38,13 +38,21 @@ KNOWN_LANGUAGES = {
 def update_and_load_langs() -> dict:
     langs_dict = dict(KNOWN_LANGUAGES)
     script_dir = Path(__file__).parent
-    json_path = script_dir / "jwlangs.json"
+    repo_json_path = script_dir / "jwlangs.json"
+    cache_dir = Path.home() / ".cache" / "jwvideo-mux"
+    cache_json_path = cache_dir / "jwlangs.json"
     
-    if json_path.exists():
+    if repo_json_path.exists():
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                cached = json.load(f)
-                langs_dict.update(cached)
+            with open(repo_json_path, 'r', encoding='utf-8') as f:
+                langs_dict.update(json.load(f))
+        except Exception:
+            pass
+            
+    if cache_json_path.exists():
+        try:
+            with open(cache_json_path, 'r', encoding='utf-8') as f:
+                langs_dict.update(json.load(f))
         except Exception:
             pass
             
@@ -69,8 +77,9 @@ def get_lang_meta(code: str) -> tuple[str, str]:
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             
-        script_dir = Path(__file__).parent
-        json_path = script_dir / "jwlangs.json"
+        cache_dir = Path.home() / ".cache" / "jwvideo-mux"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_json_path = cache_dir / "jwlangs.json"
         
         new_langs = {}
         for lang in data.get('languages', []):
@@ -82,10 +91,10 @@ def get_lang_meta(code: str) -> tuple[str, str]:
             new_langs[lc] = [locale, name]
             
         try:
-            with open(json_path, 'w', encoding='utf-8') as f:
+            with open(cache_json_path, 'w', encoding='utf-8') as f:
                 json.dump(new_langs, f, indent=4)
         except Exception as e:
-            color_print(f"Warning: Could not save jwlangs.json: {e}", "33")
+            color_print(f"Warning: Could not save {cache_json_path}: {e}", "33")
             
         _LOADED_LANGUAGES.update(new_langs)
         
