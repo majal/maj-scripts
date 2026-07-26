@@ -338,15 +338,21 @@ def analyze_video_variants(video_paths: dict[str, Path]) -> dict:
                     and all(profile[key] == ref_profile[key] for key in ("width", "height", "pix_fmt"))
                     and abs(fps_as_float(profile["fps"]) - fps_as_float(ref_profile["fps"])) <= 0.1
                 )
-                record = {"compatible": compatible, "duration_delta": duration_delta, "intervals": []}
-                if compatible and hashes[lang] != hashes[reference]:
+                record = {"compatible": compatible, "duration_delta": duration_delta, "intervals": [], "classification": "incompatible"}
+                if compatible and hashes[lang] == hashes[reference]:
+                    record["classification"] = "exactly_same"
+                elif compatible:
                     stats = Path(tmp) / f"{reference}-{lang}.ssim.log"
                     subprocess.run([
                         "ffmpeg", "-v", "error", "-i", str(video_paths[reference]), "-i", str(video_paths[lang]),
                         "-filter_complex", f"[0:v:0][1:v:0]ssim=stats_file={stats}", "-f", "null", "-",
                     ], check=True)
                     threshold, intervals = candidate_intervals(parse_ssim_scores(stats), ref_fps)
-                    record.update({"threshold": threshold, "intervals": intervals})
+                    record.update({
+                        "threshold": threshold,
+                        "intervals": intervals,
+                        "classification": "localized_candidates" if intervals else "visually_same",
+                    })
                 comparisons[lang] = record
     return {
         "reference_language": reference, "profiles": profiles, "hashes": hashes,
@@ -371,6 +377,7 @@ def main():
     parser.add_argument("--default-sub", help="Language code to set as default subtitle track")
     parser.add_argument("--analyze-video-variants", action="store_true", help="Report exact video reuse and reviewed localized-difference candidates; does not mux or delete media")
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
+    parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where verified comparisons are visually_same or exactly_same")
     
     args = parser.parse_args()
     check_dependencies()
@@ -405,7 +412,8 @@ def main():
         # Keep a deliberately supplied symlink location intact. This makes
         # local-language staging possible without copying large source videos.
         base_vid_path = Path(args.input).absolute()
-        out_dir = base_vid_path.parent
+        if args.output_dir == ".":
+            out_dir = base_vid_path.parent
         
         base_lang = vid_langs[0] if vid_langs else (aud_langs[0] if aud_langs else "E")
         
@@ -434,6 +442,14 @@ def main():
             
             if target_path_mp4.exists():
                 local_files[lang]['video'] = target_path_mp4
+            elif base_vid_path.parent.name.upper() == base_lang:
+                # Typical SCE layout: one sibling directory per language, with
+                # descriptive filename tails that differ by translation.
+                prefix = base_vid_path.name.split(f"_{base_lang}_", 1)[0]
+                sibling = base_vid_path.parent.parent / lang
+                candidates = sorted(sibling.glob(f"{prefix}_{lang}_*.mp4")) if sibling.is_dir() else []
+                if len(candidates) == 1:
+                    local_files[lang]['video'] = candidates[0]
             if target_path_mp3.exists() and lang not in vid_langs:
                 # If MP3 exists and we aren't explicitly needing video for this lang, prefer audio
                 local_files[lang]['audio'] = target_path_mp3
@@ -505,7 +521,7 @@ def main():
         if lang in local_files and "video" in local_files[lang]
     }
     variant_analysis = None
-    if (args.analyze_video_variants or args.dedupe_identical_video) and len(video_paths) > 1:
+    if (args.analyze_video_variants or args.dedupe_identical_video or args.dedupe_visually_same) and len(video_paths) > 1:
         color_print("\n>> Analyzing video variants...", "34")
         try:
             variant_analysis = analyze_video_variants(video_paths)
@@ -524,6 +540,15 @@ def main():
             if duplicate_langs:
                 color_print(f"  Reusing shared video; omitted duplicate video tracks: {', '.join(sorted(duplicate_langs))}", "32")
                 vid_langs = [lang for lang in vid_langs if lang not in duplicate_langs]
+        if args.dedupe_visually_same:
+            reference = variant_analysis["reference_language"]
+            reusable = {
+                lang for lang, record in variant_analysis["comparisons"].items()
+                if record["classification"] in {"exactly_same", "visually_same"}
+            }
+            if reusable:
+                color_print(f"  Reusing {reference} video after visual verification; omitted: {', '.join(sorted(reusable))}", "32")
+                vid_langs = [lang for lang in vid_langs if lang == reference or lang not in reusable]
 
     color_print("\n>> Muxing...", "34")
     
