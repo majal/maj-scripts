@@ -10,8 +10,10 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
+import tempfile
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -240,6 +242,117 @@ def download_file(url: str, dest: Path):
 def get_filename_from_url(url: str) -> str:
     return url.split('/')[-1].split('?')[0]
 
+
+def command_output(cmd: list[str]) -> str:
+    return subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE)
+
+
+def probe_video(path: Path) -> dict:
+    """Return video properties required for safe variant comparison."""
+    raw = command_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,width,height,pix_fmt,avg_frame_rate,duration:format=duration",
+        "-of", "json", str(path),
+    ])
+    payload = json.loads(raw)
+    streams = payload.get("streams", [])
+    if not streams:
+        raise ValueError(f"No video stream found in {path}")
+    stream = streams[0]
+    duration = stream.get("duration") or payload.get("format", {}).get("duration")
+    return {
+        "codec": stream.get("codec_name"), "width": stream.get("width"),
+        "height": stream.get("height"), "pix_fmt": stream.get("pix_fmt"),
+        "fps": stream.get("avg_frame_rate"),
+        "duration": float(duration) if duration not in (None, "N/A") else None,
+    }
+
+
+def elementary_video_hash(path: Path) -> str:
+    """Hash copied video packets; this is the exact-reuse test."""
+    output = command_output([
+        "ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
+        "-c", "copy", "-f", "hash", "-hash", "sha256", "-",
+    ])
+    if not output.startswith("SHA256="):
+        raise ValueError(f"Could not hash video stream in {path}")
+    return output.strip().split("=", 1)[1]
+
+
+def parse_ssim_scores(stats_path: Path) -> list[float]:
+    scores = []
+    for line in stats_path.read_text(encoding="utf-8").splitlines():
+        match = re.search(r"All:([0-9.]+)", line)
+        if match:
+            scores.append(float(match.group(1)))
+    return scores
+
+
+def fps_as_float(value: str | None) -> float:
+    if not value or value in ("0/0", "N/A"):
+        return 0.0
+    numerator, denominator = value.split("/", 1)
+    return float(numerator) / float(denominator)
+
+
+def candidate_intervals(scores: list[float], fps: float, *, min_seconds: float = 0.4) -> tuple[float, list[tuple[float, float]]]:
+    """Return a robust per-pair threshold and sustained low-similarity ranges."""
+    if not scores or fps <= 0:
+        return 0.0, []
+    median = statistics.median(scores)
+    mad = statistics.median(abs(value - median) for value in scores)
+    threshold = min(0.95, median - max(0.02, 8 * mad))
+    min_frames = max(1, round(fps * min_seconds))
+    runs, start = [], None
+    for index, value in enumerate(scores):
+        if value < threshold and start is None:
+            start = index
+        elif value >= threshold and start is not None:
+            if index - start >= min_frames:
+                runs.append((start / fps, index / fps))
+            start = None
+    if start is not None and len(scores) - start >= min_frames:
+        runs.append((start / fps, len(scores) / fps))
+    return threshold, runs
+
+
+def analyze_video_variants(video_paths: dict[str, Path]) -> dict:
+    """Analyze exact and localized reuse without altering media."""
+    profiles = {lang: probe_video(path) for lang, path in video_paths.items()}
+    hashes = {lang: elementary_video_hash(path) for lang, path in video_paths.items()}
+    grouped: dict[str, list[str]] = {}
+    for lang, digest in hashes.items():
+        grouped.setdefault(digest, []).append(lang)
+    languages = list(video_paths)
+    reference = languages[0] if languages else None
+    comparisons = {}
+    if reference:
+        ref_profile = profiles[reference]
+        ref_fps = fps_as_float(ref_profile["fps"])
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-ssim-") as tmp:
+            for lang in languages[1:]:
+                profile = profiles[lang]
+                duration_delta = abs((profile["duration"] or 0) - (ref_profile["duration"] or 0))
+                compatible = (
+                    duration_delta <= 0.25
+                    and all(profile[key] == ref_profile[key] for key in ("width", "height", "pix_fmt"))
+                    and abs(fps_as_float(profile["fps"]) - fps_as_float(ref_profile["fps"])) <= 0.1
+                )
+                record = {"compatible": compatible, "duration_delta": duration_delta, "intervals": []}
+                if compatible and hashes[lang] != hashes[reference]:
+                    stats = Path(tmp) / f"{reference}-{lang}.ssim.log"
+                    subprocess.run([
+                        "ffmpeg", "-v", "error", "-i", str(video_paths[reference]), "-i", str(video_paths[lang]),
+                        "-filter_complex", f"[0:v:0][1:v:0]ssim=stats_file={stats}", "-f", "null", "-",
+                    ], check=True)
+                    threshold, intervals = candidate_intervals(parse_ssim_scores(stats), ref_fps)
+                    record.update({"threshold": threshold, "intervals": intervals})
+                comparisons[lang] = record
+    return {
+        "reference_language": reference, "profiles": profiles, "hashes": hashes,
+        "exact_groups": list(grouped.values()), "comparisons": comparisons,
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="jwvideo-mux: Merge videos, audio, and subtitles from jw.org")
     parser.add_argument("input", help="URL, docid, or local file pattern to process")
@@ -256,6 +369,8 @@ def main():
     parser.add_argument("--default-video", help="Language code to set as default video track")
     parser.add_argument("--default-audio", help="Language code to set as default audio track")
     parser.add_argument("--default-sub", help="Language code to set as default subtitle track")
+    parser.add_argument("--analyze-video-variants", action="store_true", help="Report exact video reuse and reviewed localized-difference candidates; does not mux or delete media")
+    parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     
     args = parser.parse_args()
     check_dependencies()
@@ -381,6 +496,32 @@ def main():
                 dest = out_dir / fname
                 download_file(url, dest)
                 local_files[lang][mtype] = dest
+
+    video_paths = {
+        lang: local_files[lang]["video"]
+        for lang in vid_langs
+        if lang in local_files and "video" in local_files[lang]
+    }
+    variant_analysis = None
+    if (args.analyze_video_variants or args.dedupe_identical_video) and len(video_paths) > 1:
+        color_print("\n>> Analyzing video variants...", "34")
+        try:
+            variant_analysis = analyze_video_variants(video_paths)
+        except (subprocess.CalledProcessError, ValueError, OSError) as exc:
+            color_print(f"Variant analysis failed: {exc}", "31")
+            sys.exit(1)
+        if args.analyze_video_variants:
+            print(json.dumps(variant_analysis, indent=2, sort_keys=True))
+            return
+        if args.dedupe_identical_video:
+            duplicate_langs = {
+                lang
+                for group in variant_analysis["exact_groups"]
+                for lang in group[1:]
+            }
+            if duplicate_langs:
+                color_print(f"  Reusing shared video; omitted duplicate video tracks: {', '.join(sorted(duplicate_langs))}", "32")
+                vid_langs = [lang for lang in vid_langs if lang not in duplicate_langs]
 
     color_print("\n>> Muxing...", "34")
     

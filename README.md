@@ -238,6 +238,13 @@ Use a pre-downloaded local file:
 - `-c, --container`: Export container format, `mkv` or `mp4` (default: `mkv`). *Note: MKV is recommended for robust multi-track and native WebVTT subtitle support.*
 - Spoken languages prefer downloading the much smaller MP3 files. Sign languages download the MP4 file to preserve the video track.
 - Automatically tags audio and video streams with ISO 639-2 codes and display names.
+- `--analyze-video-variants` compares selected video-language files without
+  muxing or deleting media. It reports byte-identical video groups and only
+  sustained, per-pair visual-difference *candidates*; candidates must be
+  reviewed before using them for a space-saving split library.
+- `--dedupe-identical-video` keeps one video stream from each byte-identical
+  group while retaining every requested audio and subtitle track. It is opt-in
+  and uses an elementary-stream SHA-256 test, not a visual similarity guess.
 
 <a id="jwvideo-mux-notes--caveats"></a>
 

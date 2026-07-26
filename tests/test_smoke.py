@@ -26,6 +26,13 @@ class SmokeTest(unittest.TestCase):
             py_compile.compile(str(REPO_ROOT / "ubuntu-hibernate"), cfile=f"{tmpdir}/ubuntu_hibernate.pyc", doraise=True)
             py_compile.compile(str(REPO_ROOT / "wh"), cfile=f"{tmpdir}/wh.pyc", doraise=True)
             py_compile.compile(str(REPO_ROOT / "whisper"), cfile=f"{tmpdir}/whisper.pyc", doraise=True)
+            py_compile.compile(str(REPO_ROOT / "jwvideo-mux"), cfile=f"{tmpdir}/jwvideo_mux.pyc", doraise=True)
+
+    def test_jwvideo_mux_help(self) -> None:
+        result = self.run_script("jwvideo-mux", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--analyze-video-variants", result.stdout)
+        self.assertIn("--dedupe-identical-video", result.stdout)
 
     def test_gmail_cleanup_help(self) -> None:
         top_level = self.run_script("gmail-cleanup", "--help")
