@@ -18,15 +18,16 @@ isolated test fixture.
 - The Tagalog and Hiligaynon H.264 elementary-video payloads had the same
   SHA-256 hash. A normal MKV with one copied video stream and two copied audio
   streams played successfully in mpv. This is the simplest consolidation case.
-- English and Tagalog had different encoded video payloads, but decoded-frame
-  hashes were identical for the first 180.180 seconds. Visual differences
-  began at that keyframe; the remaining 18.435 seconds was treated as a
-  localized replacement.
-- An mpv EDL comprising a shared video-only segment followed by the
-  Tagalog-specific video-only segment, plus separate full-length Tagalog and
-  Hiligaynon MKA audio streams, opened and decoded both before and after the
-  transition. An English SRT external stream was also selected successfully
-  with `--slang=tgl,eng` fallback.
+- English and Tagalog had different encoded video payloads after 180.180
+  seconds, but operator review found no meaningful visual-language difference.
+  This was an encoding-only false positive, not evidence for a localized-video
+  replacement. The clip therefore qualifies only for the exact-reuse analysis
+  path where applicable.
+- An mpv EDL with a shared video-only segment and a separately stored tail
+  opened and decoded both before and after the transition. This proves EDL
+  mechanics only; it does **not** prove that the selected fixture has a
+  language-specific visual tail. An English SRT external stream was selected
+  successfully with `--slang=tgl,eng` fallback.
 
 The experiment used copied packets only for the source segments. The 180.180
 second split was already a keyframe, so it did not require a boundary
@@ -84,9 +85,12 @@ must record the mpv version and be smoke-tested when mpv is upgraded.
    explicitly handles them.
 2. First hash copied elementary video streams. Equal hashes mean exact reuse;
    do not decode or re-encode merely to prove it again.
-3. For unequal streams, compare normalized decoded frames. Use exact
-   `framemd5` equality to authorize a shared range. SSIM/PSNR may help find
-   candidates but must never alone authorize an irreversible deletion.
+3. For unequal streams, compare normalized decoded frames. Exact `framemd5`
+   equality is strong evidence for a shared range. SSIM/PSNR and perceptual
+   fingerprints may nominate candidates, but every proposed localized range
+   must include reviewable side-by-side frames/difference previews and require
+   explicit operator approval before export or cleanup. Different encodes of
+   the same image are not localized content.
 4. Coalesce matching frames into sufficiently long ranges, then move cuts to
    safe keyframes. Record both the analytical and actual cut times in the
    manifest.
