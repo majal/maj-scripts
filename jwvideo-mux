@@ -402,7 +402,9 @@ def main():
 
     if Path(args.input).is_file():
         color_print("\n>> Local file mode detected. Skipping API downloads...", "34")
-        base_vid_path = Path(args.input).resolve()
+        # Keep a deliberately supplied symlink location intact. This makes
+        # local-language staging possible without copying large source videos.
+        base_vid_path = Path(args.input).absolute()
         out_dir = base_vid_path.parent
         
         base_lang = vid_langs[0] if vid_langs else (aud_langs[0] if aud_langs else "E")
