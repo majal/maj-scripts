@@ -28,6 +28,13 @@ isolated test fixture.
   mechanics only; it does **not** prove that the selected fixture has a
   language-specific visual tail. An English SRT external stream was selected
   successfully with `--slang=tgl,eng` fallback.
+- A second, visually reviewed four-language fixture supplied the required
+  positive case: its translated title card differed from 2.035 through 6.874
+  seconds. On its English/Tagalog pair, ordinary matching scenes sampled at
+  SSIM 0.982-0.985, while the title card sampled at 0.835. This establishes
+  that a substantial, persistent change can be separated from ordinary
+  encode-level variation, but it is calibration evidence rather than a
+  universal numeric cutoff.
 
 The experiment used copied packets only for the source segments. The 180.180
 second split was already a keyframe, so it did not require a boundary
@@ -86,11 +93,15 @@ must record the mpv version and be smoke-tested when mpv is upgraded.
 2. First hash copied elementary video streams. Equal hashes mean exact reuse;
    do not decode or re-encode merely to prove it again.
 3. For unequal streams, compare normalized decoded frames. Exact `framemd5`
-   equality is strong evidence for a shared range. SSIM/PSNR and perceptual
-   fingerprints may nominate candidates, but every proposed localized range
-   must include reviewable side-by-side frames/difference previews and require
-   explicit operator approval before export or cleanup. Different encodes of
-   the same image are not localized content.
+   equality is strong evidence for a shared range. For visually equivalent but
+   differently encoded material, calculate a robust per-pair baseline from
+   sampled ordinary scenes, then flag only a sustained score drop well below
+   that baseline. Require at least: a contiguous duration (not an isolated
+   frame), spatially coherent blurred-difference regions, and reviewable
+   side-by-side/difference previews. SSIM/PSNR and perceptual fingerprints may
+   nominate candidates, but every proposed localized range requires explicit
+   operator approval before export or cleanup. Different encodes of the same
+   image are not localized content.
 4. Coalesce matching frames into sufficiently long ranges, then move cuts to
    safe keyframes. Record both the analytical and actual cut times in the
    manifest.
