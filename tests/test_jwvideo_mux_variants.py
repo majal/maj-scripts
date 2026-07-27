@@ -44,6 +44,21 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         _, intervals = self.module.candidate_intervals(scores, 30.0, min_seconds=0.4)
         self.assertEqual(intervals, [(1.0, 1.5)])
 
+    def test_candidate_intervals_min_threshold_prevents_pathological_collapse(self) -> None:
+        # Real SCE footage produced this exact shape: three roughly equal-sized clusters spread across
+        # the clip (noise throughout rather than one clean window) drive median - 8*mad deeply negative,
+        # at which point nothing could ever be flagged and a genuinely dissimilar pair reports a confident
+        # "visually_same". A floor fixes it without needing a cap (cap only bounds threshold from above).
+        scores = [0.70] * 170 + [0.85] * 170 + [1.0] * 163
+        threshold_uncapped, intervals_uncapped = self.module.candidate_intervals(scores, 30.0, min_seconds=1.0)
+        self.assertLess(threshold_uncapped, 0.0)  # confirms the collapse actually happens without a floor
+        self.assertEqual(intervals_uncapped, [])  # and that collapse means nothing is ever flagged
+        threshold_floored, intervals_floored = self.module.candidate_intervals(
+            scores, 30.0, min_seconds=1.0, min_threshold=0.75,
+        )
+        self.assertEqual(threshold_floored, 0.75)
+        self.assertEqual(intervals_floored, [(0.0, 5.666666666666667)])
+
     def test_candidate_intervals_psnr_style_no_cap(self) -> None:
         # PSNR is unbounded above (dB), unlike SSIM's 0-1 range, so it's used with cap=None.
         scores = [42.0] * 60 + [18.0] * 60 + [42.0] * 60
@@ -133,6 +148,10 @@ class _FfmpegFixtureCase(unittest.TestCase):
             extra_vf="drawbox=x=40:y=40:w=200:h=120:color=red@1.0:t=fill:enable='between(t,2.3,4.6)'",
         )
         cls.incompatible = cls._encode(cls.root / "incompatible.mkv", crf=20, size="160x120")
+        cls.globally_dissimilar = cls._encode(
+            cls.root / "globally_dissimilar.mkv", crf=20,
+            extra_vf="drawbox=x=0:y=0:w=320:h=240:color=gray@0.35:t=fill",  # whole-clip, not windowed
+        )
 
         cls.audio = cls.root / "audio.mka"
         subprocess.run([
@@ -196,6 +215,16 @@ class AnalyzeVideoVariantsIntegrationTest(_FfmpegFixtureCase):
         self.assertGreater(end, 4.3)
         self.assertTrue(record["ssim_intervals"])
         self.assertTrue(record["psnr_intervals"])
+
+    def test_globally_dissimilar_pair_is_review_recommended_not_visually_same(self) -> None:
+        # A whole-clip (not windowed) semi-transparent overlay: every frame is moderately less similar,
+        # so there's no sustained *deviation* from the pair's own median for candidate_intervals to catch
+        # -- it IS the median. Without the median-similarity guard this silently passed as "visually_same".
+        result = self.module.analyze_video_variants({"E": self.ref, "TG": self.globally_dissimilar})
+        record = result["comparisons"]["TG"]
+        self.assertLess(record["ssim_median"], 0.92)
+        self.assertTrue(record["globally_uncertain"])
+        self.assertEqual(record["classification"], "review_recommended")
 
     def test_incompatible_resolution_is_flagged_without_crashing(self) -> None:
         result = self.module.analyze_video_variants({"E": self.ref, "SA": self.incompatible})
