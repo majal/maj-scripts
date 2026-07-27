@@ -310,6 +310,7 @@ def fps_as_float(value: str | None) -> float:
 def candidate_intervals(
     scores: list[float], fps: float, *,
     min_seconds: float = 1.5, mad_multiplier: float = 8.0, floor_margin: float = 0.02, cap: float | None = 0.95,
+    min_threshold: float | None = None,
 ) -> tuple[float, list[tuple[float, float]]]:
     """Return a robust per-pair threshold and sustained low-similarity ranges.
 
@@ -318,6 +319,13 @@ def candidate_intervals(
     dips a frame or two below any statistical threshold without being a real content difference. The
     confirmed true-positive case in the pilot (a translated title card) held a sustained drop for ~4.8s;
     sub-second dips are noise until proven otherwise.
+
+    min_threshold guards against the opposite failure, found by running against real SCE footage: when a
+    pair's scores are naturally noisy throughout (large MAD -- e.g. real per-language visual differences
+    spread across the whole clip rather than one clean window), `median - mad_multiplier*mad` can collapse
+    to a near-zero or even negative threshold, at which point nothing could ever be flagged as different
+    and a genuinely dissimilar pair reports a confident "visually_same". Clamping the threshold to a sane
+    floor keeps the detector from going blind in exactly the cases where it matters most.
     """
     if not scores or fps <= 0:
         return 0.0, []
@@ -326,6 +334,8 @@ def candidate_intervals(
     threshold = median - max(floor_margin, mad_multiplier * mad)
     if cap is not None:
         threshold = min(cap, threshold)
+    if min_threshold is not None:
+        threshold = max(min_threshold, threshold)
     min_frames = max(1, round(fps * min_seconds))
     runs, start = [], None
     for index, value in enumerate(scores):
@@ -390,17 +400,26 @@ def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float =
                         "-filter_complex", _ssim_psnr_filtergraph(ref_fps, ssim_stats, psnr_stats),
                         "-f", "null", "-",
                     ], check=True)
+                    ssim_scores = parse_ssim_scores(ssim_stats)
+                    psnr_scores = parse_psnr_scores(psnr_stats)
                     ssim_threshold, ssim_intervals = candidate_intervals(
-                        parse_ssim_scores(ssim_stats), ref_fps, min_seconds=min_seconds,
+                        ssim_scores, ref_fps, min_seconds=min_seconds, min_threshold=0.75,
                     )
                     psnr_threshold, psnr_intervals = candidate_intervals(
-                        parse_psnr_scores(psnr_stats), ref_fps, min_seconds=min_seconds,
-                        mad_multiplier=6.0, floor_margin=3.0, cap=None,
+                        psnr_scores, ref_fps, min_seconds=min_seconds,
+                        mad_multiplier=6.0, floor_margin=3.0, cap=None, min_threshold=20.0,
                     )
                     corroborated = merge_intervals(_intersect_intervals(ssim_intervals, psnr_intervals))
+                    ssim_median = statistics.median(ssim_scores) if ssim_scores else 0.0
+                    psnr_median = statistics.median(psnr_scores) if psnr_scores else 0.0
+                    # A clean localized window is one story; a pair that's merely mediocre throughout (no
+                    # sustained dip, but never confidently high either) is another, and "visually_same"
+                    # shouldn't cover it -- e.g. permanently different on-screen text/captions the interval
+                    # search can't see because it's the pair's own baseline, not a deviation from it.
+                    globally_uncertain = ssim_median < 0.92
                     if corroborated:
                         classification = "localized_candidates"
-                    elif ssim_intervals or psnr_intervals:
+                    elif ssim_intervals or psnr_intervals or globally_uncertain:
                         classification = "review_recommended"
                     else:
                         classification = "visually_same"
@@ -409,8 +428,11 @@ def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float =
                         "intervals": corroborated,
                         "ssim_threshold": ssim_threshold,
                         "ssim_intervals": ssim_intervals,
+                        "ssim_median": ssim_median,
                         "psnr_threshold": psnr_threshold,
                         "psnr_intervals": psnr_intervals,
+                        "psnr_median": psnr_median,
+                        "globally_uncertain": globally_uncertain,
                         "classification": classification,
                     })
                 comparisons[lang] = record
