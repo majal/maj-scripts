@@ -241,10 +241,45 @@ Use a pre-downloaded local file:
 - `--analyze-video-variants` compares selected video-language files without
   muxing or deleting media. It reports byte-identical video groups and only
   sustained, per-pair visual-difference *candidates*; candidates must be
-  reviewed before using them for a space-saving split library.
+  reviewed before using them for a space-saving split library. Each
+  non-identical pair is classified as `exactly_same` (byte-identical),
+  `visually_same` (SSIM and PSNR both agree there's no sustained difference —
+  this is the classification for the common case of the same footage just
+  encoded differently), `localized_candidates` (SSIM *and* PSNR both agree on
+  the same sustained-drop range — a real, corroborated candidate), or
+  `review_recommended` (the two metrics disagree; treated as "don't guess,
+  ask a human"). Requiring two independent metrics to agree before calling
+  something `localized_candidates` is a deliberate trade of a little recall
+  for a lot less confidently-wrong output — a single metric (plain SSIM) was
+  previously enough to misclassify same-content-different-encode video as
+  different.
+- `--variant-min-seconds` (default `1.5`) sets how long a similarity drop must
+  hold before it counts as a candidate. Sub-second dips are almost always
+  ordinary encoding jitter (a fast pan, a busy texture), not real localized
+  content, so the default deliberately sits well above single-frame noise.
 - `--dedupe-identical-video` keeps one video stream from each byte-identical
   group while retaining every requested audio and subtitle track. It is opt-in
   and uses an elementary-stream SHA-256 test, not a visual similarity guess.
+- `--dedupe-visually-same` reuses the reference video for languages verified
+  `exactly_same`/`visually_same` instead of muxing in their own video track.
+  Because this relies on a heuristic rather than a byte-exact test, it prints
+  the evidence and asks for confirmation before applying (skip the prompt
+  with `--force`).
+- `--adaptive-mpv-library` exports a space-saving mpv-oriented library instead
+  of muxing: one shared common video-only file per stretch where every
+  language matches the reference, one small video-only file per language
+  wherever it was corroborated as actually different, full per-language audio
+  and subtitles, a per-language mpv EDL presentation, and a `manifest.json`
+  tying it together (source hashes, tool versions, cut points, and any mpv
+  validation results). It never touches or deletes source files and always
+  asks for confirmation before writing (skip with `--force`). Play a language
+  with e.g. `mpv presentation-tg.edl --audio-file=audio-tg.mka
+  --sub-file=subtitles-tg.srt`. Segment boundaries are independently snapped
+  to real keyframes per source file (never mid-GOP), so a splice can drift by
+  a small amount between two files at the same nominal cut point; the
+  manifest records both the analytical and actual cut times and warns if any
+  splice's drift is large enough to warrant a manual look before relying on
+  it.
 
 <a id="jwvideo-mux-notes--caveats"></a>
 
