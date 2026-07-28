@@ -575,6 +575,27 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
         self.assertNotIn("SA", manifest["languages"])
         self.assertTrue(any("Skipped incompatible video languages" in w for w in manifest["warnings"]))
 
+    def test_build_adaptive_library_warns_on_manual_override_resolution_mismatch(self) -> None:
+        # A --manual-overrides entry can force a technically-incompatible (different resolution) pair
+        # into localized_candidates -- e.g. a pillarboxed remaster confirmed as real content by a human.
+        # mpv can play through the resulting resolution jump (verified against real footage), but the
+        # library should say so rather than silently produce a presentation that visibly resizes mid-play.
+        video_paths = {"E": self.ref, "SA": self.incompatible}
+        variant_analysis = self.module.analyze_video_variants(video_paths)
+        self.module.apply_manual_overrides(
+            variant_analysis, {"languages": ["SA"], "differences": [{"start_s": 1.0, "end_s": 3.0, "label": "test"}]},
+        )
+        self.assertEqual(variant_analysis["comparisons"]["SA"]["classification"], "localized_candidates")
+        local_files = {
+            "E": {"video": self.ref, "audio": self.audio, "sub": self.subtitle},
+            "SA": {"video": self.incompatible, "audio": self.audio},
+        }
+        manifest = self.module.build_adaptive_library(
+            reference="E", video_paths=video_paths, variant_analysis=variant_analysis,
+            local_files=local_files, library_dir=self.root / "adaptive-library-3", min_seconds=1.5,
+        )
+        self.assertTrue(any("different resolution than the reference" in w for w in manifest["warnings"]))
+
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
 class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):

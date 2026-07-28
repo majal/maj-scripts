@@ -279,7 +279,17 @@ Use a pre-downloaded local file:
   a small amount between two files at the same nominal cut point; the
   manifest records both the analytical and actual cut times and warns if any
   splice's drift is large enough to warrant a manual look before relying on
-  it.
+  it. mpv validation spot-checks the start, the end, and a moment around
+  every splice boundary rather than decoding the whole presentation front to
+  back — headless mpv decode runs at roughly 2-3x realtime here, so a full
+  decode of an hour-long talk could take 20-30 minutes just to validate;
+  spot-checking catches the failure mode that actually matters (a bad
+  splice) in a few seconds per checkpoint regardless of runtime. If a
+  `--manual-overrides` entry confirms a real difference on a pair that's
+  otherwise a different resolution (e.g. a pillarboxed remaster), the
+  library still builds — mpv plays through a mid-presentation resolution
+  change without erroring — but the manifest warns that the video window
+  will visibly resize at that splice.
 - `--scan-small-regions` (with `--region-count`, default `8`) additionally
   splits the frame into horizontal bands and compares each one, because a
   small graphic — a name plate, a lower-third caption — can be too small to
