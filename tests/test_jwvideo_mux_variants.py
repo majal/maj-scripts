@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -20,6 +21,18 @@ class VideoVariantPureLogicTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.module = load_script_module("jwvideo-mux")
+
+    def test_color_print_replaces_unsupported_console_characters(self) -> None:
+        buffer = io.BytesIO()
+        console = io.TextIOWrapper(buffer, encoding="cp1252")
+        original_stdout = self.module.sys.stdout
+        try:
+            self.module.sys.stdout = console
+            self.module.color_print("✓ complete", "32")
+            console.flush()
+        finally:
+            self.module.sys.stdout = original_stdout
+        self.assertIn("? complete", buffer.getvalue().decode("cp1252"))
 
     def test_candidate_intervals_requires_sustained_drop(self) -> None:
         # 60-frame dip = 2.0s at 30fps, comfortably clears the 1.5s default.

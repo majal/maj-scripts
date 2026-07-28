@@ -111,10 +111,9 @@ def get_lang_meta(code: str) -> tuple[str, str]:
     return (code.lower()[:3], code_upper)
 
 def color_print(msg: str, color_code: str = ""):
-    if not color_code:
-        print(msg)
-    else:
-        print(f"\033[{color_code}m{msg}\033[0m")
+    rendered = msg if not color_code else f"\033[{color_code}m{msg}\033[0m"
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(rendered.encode(encoding, errors="replace").decode(encoding))
 
 def check_dependencies():
     if not shutil.which("ffmpeg"):
@@ -308,6 +307,32 @@ def fps_as_float(value: str | None) -> float:
     return float(numerator) / float(denominator)
 
 
+def trailing_freeze_start(path: Path, *, noise_db: float = -30.0, min_freeze_s: float = 2.0, timeout: float = 300) -> float | None:
+    """Return the timestamp where a held/frozen final frame begins, if the video ends on one and never
+    unfreezes again before EOF -- the signature of a trailing static end-card/copyright screen held for
+    a variable length per language. ffmpeg's freezedetect only reports a freeze_end once motion resumes,
+    so a freeze_start with no matching freeze_end means it ran through to the end of the stream. Returns
+    None if there's no such trailing freeze (the video is presumably "live" content all the way through).
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "info", "-i", str(path), "-vf", f"freezedetect=n={noise_db}dB:d={min_freeze_s}",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    pending_start = None
+    for line in result.stderr.splitlines():
+        match = re.search(r"freeze_start:\s*([0-9.]+)", line)
+        if match:
+            pending_start = float(match.group(1))
+            continue
+        if "freeze_end" in line:
+            pending_start = None
+    return pending_start
+
+
 def candidate_intervals(
     scores: list[float], fps: float, *,
     min_seconds: float = 1.5, mad_multiplier: float = 8.0, floor_margin: float = 0.02, cap: float | None = 0.95,
@@ -389,16 +414,46 @@ def analyze_video_variants(
             if scan_small_regions and ref_profile["width"] and ref_profile["height"]
             else None
         )
+        ref_freeze_start = "unset"  # lazily probed at most once, only if a duration mismatch needs it
         with tempfile.TemporaryDirectory(prefix="jwvideo-mux-ssim-") as tmp:
             for lang in languages[1:]:
                 profile = profiles[lang]
                 duration_delta = abs((profile["duration"] or 0) - (ref_profile["duration"] or 0))
-                compatible = (
-                    duration_delta <= 0.25
-                    and all(profile[key] == ref_profile[key] for key in ("width", "height", "pix_fmt"))
+                dims_match = (
+                    all(profile[key] == ref_profile[key] for key in ("width", "height", "pix_fmt"))
                     and abs(fps_as_float(profile["fps"]) - fps_as_float(ref_profile["fps"])) <= 0.1
                 )
+                compatible = duration_delta <= 0.25 and dims_match
+                effective_duration = None
+                trailing_freeze_note = None
+                if not compatible and dims_match and profile["duration"] and ref_profile["duration"]:
+                    # Duration alone disqualifies this pair, but that's often just a trailing static
+                    # end-card/copyright screen held for a different length per language rather than a
+                    # real difference. If both languages freeze on a final frame and never unfreeze
+                    # before EOF (freezedetect never reports a freeze_end for it), and those freeze
+                    # points roughly agree, the real content is identical in length -- only the held
+                    # tail varies. Compare up to the shared freeze point and leave the tail alone (it
+                    # naturally falls back to the reference in adaptive-library planning, since no
+                    # language has recorded evidence of a real difference there).
+                    if ref_freeze_start == "unset":
+                        ref_freeze_start = trailing_freeze_start(video_paths[reference])
+                    lang_freeze_start = trailing_freeze_start(video_paths[lang])
+                    if ref_freeze_start is not None and lang_freeze_start is not None:
+                        freeze_delta = abs(ref_freeze_start - lang_freeze_start)
+                        if freeze_delta <= 0.25:
+                            compatible = True
+                            effective_duration = min(ref_freeze_start, lang_freeze_start)
+                            trailing_freeze_note = (
+                                f"duration differs by {duration_delta:.2f}s but both languages hold a frozen "
+                                f"final frame from ~{effective_duration:.2f}s onward (freeze points within "
+                                f"{freeze_delta:.2f}s of each other) -- treated as compatible; comparison is "
+                                f"limited to the shared non-frozen range and the frozen tail is left to fall "
+                                f"back to the reference."
+                            )
                 record = {"compatible": compatible, "duration_delta": duration_delta, "intervals": [], "classification": "incompatible"}
+                if trailing_freeze_note:
+                    record["trailing_freeze_note"] = trailing_freeze_note
+                    record["effective_duration"] = effective_duration
                 if compatible and hashes[lang] == hashes[reference]:
                     record["classification"] = "exactly_same"
                 elif compatible:
@@ -410,7 +465,7 @@ def analyze_video_variants(
                     region_psnr_paths = {
                         spec.index: Path(tmp) / f"{reference}-{lang}.region{spec.index}.psnr.log" for spec in region_specs
                     } if region_specs else {}
-                    subprocess.run([
+                    cmd = [
                         "ffmpeg", "-v", "error", "-i", str(video_paths[reference]), "-i", str(video_paths[lang]),
                         "-filter_complex", _comparison_filtergraph(
                             ref_fps, Path(ssim_stats.name), Path(psnr_stats.name),
@@ -418,8 +473,11 @@ def analyze_video_variants(
                             region_ssim_paths={index: Path(path.name) for index, path in region_ssim_paths.items()},
                             region_psnr_paths={index: Path(path.name) for index, path in region_psnr_paths.items()},
                         ),
-                        "-f", "null", "-",
-                    ], check=True, cwd=tmp)
+                    ]
+                    if effective_duration is not None:
+                        cmd += ["-t", f"{effective_duration:.6f}"]
+                    cmd += ["-f", "null", "-"]
+                    subprocess.run(cmd, check=True, cwd=tmp)
                     ssim_scores = parse_ssim_scores(ssim_stats)
                     psnr_scores = parse_psnr_scores(psnr_stats)
                     ssim_threshold, ssim_intervals = candidate_intervals(
