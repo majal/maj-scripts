@@ -882,27 +882,52 @@ def collect_tool_versions() -> dict:
     return versions
 
 
-def validate_edl_with_mpv(edl_path: Path, audio_path: Path | None, sub_path: Path | None, *, timeout: float = 120) -> dict:
-    """Headless-decode the whole presentation with mpv (covers the first frame, every splice boundary,
-    and the final frame by construction) and report success/failure. Skips gracefully if mpv is missing.
+def validate_edl_with_mpv(
+    edl_path: Path, segment_durations: list[float], audio_path: Path | None, sub_path: Path | None, *,
+    spot_check_seconds: float = 1.5, timeout: float = 60,
+) -> dict:
+    """Headless-decode short spot-checks -- the start, the end, and a moment around every splice
+    boundary -- rather than the whole presentation front to back. Skips gracefully if mpv is missing.
 
-    This only proves every segment decodes cleanly start to finish -- it does not measure sub-frame A/V
-    seam drift from independently-snapped segment boundaries (see build_adaptive_library's docstring).
-    A human should still eyeball transitions before relying on the library for cleanup decisions.
+    A full-decode pass (this function's original approach) is thorough but does not scale: real SCE
+    talks run 3-80 minutes, and headless mpv decode in this environment runs at roughly 2-3x realtime,
+    not the many-times-realtime speed `--untimed` might suggest -- an hour-long presentation could take
+    20-30 minutes just to validate. That's how this surfaced: validating a real 8-minute video timed out
+    at the old fixed 120s budget even though nothing was actually broken. Spot-checking every boundary
+    covers exactly the failure mode that matters here (a bad splice/keyframe cut) in a few seconds per
+    checkpoint regardless of total runtime, at the cost of not proving the untouched middle of each
+    segment decodes cleanly -- a corrupt frame mid-segment (unrelated to splicing) would slip through.
     """
     if not shutil.which("mpv"):
         return {"skipped": "mpv not found in PATH"}
-    cmd = ["mpv", "--no-config", "--vo=null", "--ao=null", "--really-quiet", "--untimed"]
-    if audio_path:
-        cmd.append(f"--audio-file={audio_path}")
-    if sub_path:
-        cmd.append(f"--sub-file={sub_path}")
-    cmd.append(str(edl_path))
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "mpv validation timed out"}
-    return {"ok": result.returncode == 0, "returncode": result.returncode, "stderr": result.stderr.strip()[-2000:]}
+    if not segment_durations:
+        return {"ok": True, "checkpoints": []}
+    cumulative = 0.0
+    checkpoints = [0.0]
+    for duration in segment_durations[:-1]:
+        cumulative += duration
+        checkpoints.append(cumulative)
+    total = cumulative + segment_durations[-1]
+    checkpoints.append(max(0.0, total - spot_check_seconds))
+    checkpoints = sorted(set(round(t, 3) for t in checkpoints if t < total))
+
+    results = []
+    for start in checkpoints:
+        cmd = ["mpv", "--no-config", "--vo=null", "--ao=null", "--really-quiet",
+               f"--start={start:.3f}", f"--length={spot_check_seconds:.3f}"]
+        if audio_path:
+            cmd.append(f"--audio-file={audio_path}")
+        if sub_path:
+            cmd.append(f"--sub-file={sub_path}")
+        cmd.append(str(edl_path))
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            results.append({"checkpoint": start, "ok": result.returncode == 0, "returncode": result.returncode})
+            if result.returncode != 0:
+                results[-1]["stderr"] = result.stderr.strip()[-1000:]
+        except subprocess.TimeoutExpired:
+            results.append({"checkpoint": start, "ok": False, "error": "timed out"})
+    return {"ok": all(c["ok"] for c in results), "checkpoints": results}
 
 
 def build_adaptive_library(
@@ -939,6 +964,10 @@ def build_adaptive_library(
         lang for lang, record in variant_analysis["comparisons"].items()
         if record["classification"] == "incompatible" and lang in video_paths
     )
+    mismatched_resolution = sorted(
+        lang for lang in intervals_by_lang
+        if (profiles[lang]["width"], profiles[lang]["height"]) != (ref_profile["width"], ref_profile["height"])
+    )
 
     segments = plan_adaptive_segments(intervals_by_lang, total_duration)
 
@@ -958,6 +987,14 @@ def build_adaptive_library(
             "SSIM and PSNR disagreed for these languages, so they were treated as fully common (no "
             f"localized segments cut) rather than guessed either way -- review manually if you expect a "
             f"real difference: {', '.join(review_recommended)}"
+        )
+    if mismatched_resolution:
+        manifest["warnings"].append(
+            "These languages have localized segments at a different resolution than the reference "
+            "(typically a --manual-overrides entry confirming real content on a technically-incompatible "
+            "pair, e.g. a pillarboxed remaster) -- mpv plays straight through a mid-presentation "
+            "resolution change without erroring, but the video window will visibly resize at each "
+            f"such splice: {', '.join(mismatched_resolution)}"
         )
 
     max_drift = 0.0
@@ -991,13 +1028,16 @@ def build_adaptive_library(
             f"before trusting the presentations -- see build_adaptive_library's docstring."
         )
     manifest["max_boundary_drift_seconds"] = max_drift
+    duration_by_file = {seg["file"]: seg["extracted_end"] - seg["extracted_start"] for seg in manifest["segments"]}
 
+    segment_durations_by_lang = {}
     for lang in [l for l in video_paths if l not in incompatible]:
         lang_segment_files = [
             library_dir / (f"{lang.lower()}-{segment['index']:03d}.mkv" if lang in segment["divergent_languages"]
                             else f"common-{segment['index']:03d}.mkv")
             for segment in segments
         ]
+        segment_durations_by_lang[lang] = [duration_by_file[p.name] for p in lang_segment_files]
         edl_name = f"presentation-{lang.lower()}.edl"
         write_mpv_edl(lang_segment_files, library_dir / edl_name, library_dir)
 
@@ -1036,7 +1076,7 @@ def build_adaptive_library(
 
     manifest["validation"] = {
         lang: validate_edl_with_mpv(
-            library_dir / info["edl"],
+            library_dir / info["edl"], segment_durations_by_lang[lang],
             library_dir / info["audio"] if info["audio"] else None,
             library_dir / info["subtitle"] if info["subtitle"] else None,
         )
