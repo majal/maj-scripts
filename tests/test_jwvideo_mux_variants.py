@@ -362,5 +362,50 @@ class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
             self.assertIn("Left", result.stdout)
 
 
+@unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
+class VariantFlagsNeverFallThroughToMuxTest(unittest.TestCase):
+    """Reproduces a second real incident: an ambiguous sibling-prefix match (two same-day talks whose
+    filenames collide once the language token is stripped, e.g. "tscv_E_18..." and "tscv_E_19...") makes
+    every other-language video unresolvable, dropping video_paths to 1. With --analyze-video-variants
+    requested, the old code fell straight through the analysis gate into an ordinary mux and wrote a real
+    output file nobody asked for -- confirmed live against actual SCE Media files, twice."""
+
+    JWVIDEOMUX = str(Path(__file__).resolve().parents[1] / "jwvideo-mux")
+
+    def test_ambiguous_sibling_prefix_stops_before_muxing(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-noplan-") as tmp:
+            root = Path(tmp)
+            e_dir, tg_dir = root / "E", root / "TG"
+            e_dir.mkdir()
+            tg_dir.mkdir()
+
+            def make_clip(path: Path) -> None:
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+                    str(path),
+                ], check=True)
+
+            anchor = e_dir / "talk_E_18_r720P.mp4"
+            make_clip(anchor)
+            # Both share the "talk" prefix once "_E_"/"_TG_" is stripped -- the sibling glob for TG
+            # matches both, so len(candidates) != 1 and TG is left unresolved (not an error, just "not
+            # found"). video_paths ends up with only E in it.
+            make_clip(tg_dir / "talk_TG_18_r720P.mp4")
+            make_clip(tg_dir / "talk_TG_19_r720P.mp4")
+
+            result = subprocess.run(
+                [self.JWVIDEOMUX, str(anchor), "-v", "E,TG", "-a", "NONE", "-s", "NONE",
+                 "--analyze-video-variants"],
+                cwd=root, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("nothing to analyze", result.stdout)
+            self.assertNotIn("Merged video created", result.stdout)
+            self.assertEqual(list(e_dir.glob("*.mkv")), [], "no output file should have been written")
+            self.assertEqual(list(root.glob("*.mkv")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

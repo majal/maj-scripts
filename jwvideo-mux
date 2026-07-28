@@ -922,7 +922,19 @@ def main():
     }
     variant_analysis = None
     variant_flags = (args.analyze_video_variants, args.dedupe_identical_video, args.dedupe_visually_same, args.adaptive_mpv_library)
-    if any(variant_flags) and len(video_paths) > 1:
+    if any(variant_flags) and len(video_paths) <= 1:
+        # A variant-analysis flag means the caller wants analysis, not a mux -- falling through to the
+        # ordinary mux path below (which happens whenever nothing resolved this branch) would silently
+        # write a real output file nobody asked for. Confirmed live: an ambiguous sibling-prefix match
+        # (e.g. two same-day talks sharing a filename prefix once the language token is stripped) drops
+        # video_paths to 1, and the old code just muxed whatever it had instead of saying so.
+        color_print(
+            f"\n>> Only {len(video_paths)} comparable video language(s) resolved "
+            f"({', '.join(video_paths) or 'none'}); nothing to analyze, so stopping here instead of muxing.",
+            "33",
+        )
+        return
+    if any(variant_flags):
         color_print("\n>> Analyzing video variants...", "34")
         try:
             variant_analysis = analyze_video_variants(video_paths, min_seconds=args.variant_min_seconds)
