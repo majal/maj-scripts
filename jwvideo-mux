@@ -878,11 +878,15 @@ def sanitize_filename(name: str) -> str:
     """Strip characters that are unsafe or misleading in a filename cross-platform. `:` is the common
     offender here -- it's legal on POSIX filesystems, but Windows/NTFS/FAT32 forbid it outright, and
     macOS Finder renders a literal `:` in a filename as `/` for legacy HFS reasons, which reads as an
-    actual path separator and is genuinely confusing. Removed rather than replaced (e.g. "Title: Sub"
-    -> "Title Sub"), since these characters almost always come from an embedded title's punctuation
-    where simply dropping them still reads naturally."""
+    actual path separator and is genuinely confusing.
+
+    Replaced with a space (not deleted outright) before whitespace collapses: "Title: Sub" -> "Title
+    Sub" reads the same either way, but a scripture-style reference like "Romans 3:2" would silently
+    become the wrong-looking "Romans 32" under plain deletion -- collapsing through a space instead
+    keeps the two sides distinct without ever leaving the unsafe character in the name.
+    """
     for char in '<>:"/\\|?*':
-        name = name.replace(char, "")
+        name = name.replace(char, " ")
     name = re.sub(r"\s+", " ", name).strip()
     return name
 

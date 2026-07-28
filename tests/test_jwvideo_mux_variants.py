@@ -298,7 +298,14 @@ class VideoVariantPureLogicTest(unittest.TestCase):
             self.module.sanitize_filename("Soten Yoeun: My Search for the True God"),
             "Soten Yoeun My Search for the True God",
         )
-        self.assertEqual(self.module.sanitize_filename('a<b>c:d"e/f\\g|h?i*j'), "abcdefghij")
+        self.assertNotIn("<", self.module.sanitize_filename('a<b>c:d"e/f\\g|h?i*j'))
+        for char in '<>:"/\\|?*':
+            self.assertNotIn(char, self.module.sanitize_filename(f"x{char}y"))
+
+    def test_sanitize_filename_avoids_merging_a_scripture_style_reference(self) -> None:
+        # A colon with no surrounding space (e.g. a chapter:verse citation) must not collapse into a
+        # single misleading number -- "Romans 3:2" becoming "Romans 32" reads as a different verse.
+        self.assertEqual(self.module.sanitize_filename("Romans 3:2"), "Romans 3 2")
 
     def test_sanitize_filename_collapses_resulting_whitespace(self) -> None:
         self.assertEqual(self.module.sanitize_filename("a :  b"), "a b")
