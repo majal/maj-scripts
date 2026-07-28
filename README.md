@@ -280,6 +280,22 @@ Use a pre-downloaded local file:
   manifest records both the analytical and actual cut times and warns if any
   splice's drift is large enough to warrant a manual look before relying on
   it.
+- `--scan-small-regions` (with `--region-count`, default `8`) additionally
+  splits the frame into horizontal bands and compares each one, because a
+  small graphic — a name plate, a lower-third caption — can be too small to
+  move the whole-frame SSIM/PSNR average even though it's clearly visible.
+  This is slower (one extra crop+compare pass per band, still just one
+  decode) and it is *never* allowed to promote a comparison straight to
+  `localized_candidates` on its own: real-footage calibration showed
+  region-level SSIM and PSNR each independently miss real small differences
+  on some clips and false-trigger on busy/detailed ones on others, so neither
+  is trustworthy enough alone to auto-confirm. Instead it either bumps a
+  `visually_same` verdict to `review_recommended` with the candidate's frame
+  band, time window, and cross-language corroboration count attached, or — if
+  the pair is already `localized_candidates` — records any extra window it
+  finds outside the already-confirmed ones as `additional_region_windows`
+  (useful context for planning an adaptive-library split, without touching
+  the already-confident result).
 
 <a id="jwvideo-mux-notes--caveats"></a>
 

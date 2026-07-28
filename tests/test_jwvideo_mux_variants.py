@@ -117,6 +117,87 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         self.assertEqual(len(segments), 1)
         self.assertEqual(segments[0]["divergent_languages"], [])
 
+    def test_region_crop_specs_even_split(self) -> None:
+        specs = self.module._region_crop_specs(1280, 720, 8)
+        self.assertEqual(len(specs), 8)
+        self.assertEqual([s.height for s in specs], [90] * 8)
+        self.assertEqual([s.y for s in specs], [i * 90 for i in range(8)])
+        self.assertTrue(all(s.width == 1280 and s.x == 0 for s in specs))
+
+    def test_region_crop_specs_uneven_split_last_band_absorbs_remainder(self) -> None:
+        specs = self.module._region_crop_specs(320, 241, 8)
+        self.assertEqual(sum(s.height for s in specs), 241)
+        self.assertEqual(specs[-1].y + specs[-1].height, 241)
+
+    def test_region_crop_specs_never_exceeds_pixel_height(self) -> None:
+        specs = self.module._region_crop_specs(320, 4, 8)
+        self.assertEqual(len(specs), 4)
+
+    def test_region_candidate_intervals_merges_overlapping_strips(self) -> None:
+        # Two adjacent strips both dip during the same window -- e.g. a graphic spanning a strip
+        # boundary -- should coalesce into one candidate spanning both strips, not two separate ones.
+        ssim_by_strip = {
+            5: [0.99] * 30 + [0.80] * 45 + [0.99] * 30,
+            6: [0.99] * 30 + [0.80] * 45 + [0.99] * 30,
+            0: [0.99] * 105,
+        }
+        psnr_by_strip = {5: [], 6: [], 0: []}
+        candidates = self.module.region_candidate_intervals(ssim_by_strip, psnr_by_strip, 30.0, min_seconds=1.0)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["strips"], [5, 6])
+        self.assertFalse(candidates[0]["psnr_corroborated"])
+
+    def test_region_candidate_intervals_psnr_corroboration_flag(self) -> None:
+        ssim_by_strip = {3: [0.99] * 30 + [0.80] * 45 + [0.99] * 30}
+        psnr_by_strip = {3: [40.0] * 30 + [20.0] * 45 + [40.0] * 30}
+        candidates = self.module.region_candidate_intervals(ssim_by_strip, psnr_by_strip, 30.0, min_seconds=1.0)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0]["psnr_corroborated"])
+
+    def test_apply_region_evidence_bumps_visually_same_to_review(self) -> None:
+        comparisons = {
+            "TG": {
+                "classification": "visually_same", "intervals": [],
+                "region_candidates": [{"start": 2.0, "end": 5.0, "strips": [6], "psnr_corroborated": True}],
+            },
+        }
+        self.module._apply_region_evidence(comparisons)
+        self.assertEqual(comparisons["TG"]["classification"], "review_recommended")
+
+    def test_apply_region_evidence_leaves_no_candidates_untouched(self) -> None:
+        comparisons = {"TG": {"classification": "visually_same", "intervals": [], "region_candidates": []}}
+        self.module._apply_region_evidence(comparisons)
+        self.assertEqual(comparisons["TG"]["classification"], "visually_same")
+
+    def test_apply_region_evidence_counts_cross_language_corroboration(self) -> None:
+        shared = {"start": 2.0, "end": 5.0, "strips": [6], "psnr_corroborated": False}
+        comparisons = {
+            "TG": {"classification": "visually_same", "intervals": [], "region_candidates": [dict(shared)]},
+            "HV": {"classification": "visually_same", "intervals": [], "region_candidates": [dict(shared)]},
+            "SA": {"classification": "visually_same", "intervals": [], "region_candidates": []},
+        }
+        self.module._apply_region_evidence(comparisons)
+        self.assertEqual(comparisons["TG"]["region_candidates"][0]["corroborating_languages"], 1)
+        self.assertEqual(comparisons["HV"]["region_candidates"][0]["corroborating_languages"], 1)
+
+    def test_apply_region_evidence_adds_supplementary_windows_to_localized(self) -> None:
+        # Already localized_candidates (whole-frame confidently found a difference elsewhere) --
+        # a region candidate outside those windows is useful extra evidence, not a reclassification.
+        comparisons = {
+            "TG": {
+                "classification": "localized_candidates", "intervals": [(50.0, 60.0)],
+                "region_candidates": [
+                    {"start": 2.0, "end": 5.0, "strips": [6], "psnr_corroborated": False},
+                    {"start": 55.0, "end": 58.0, "strips": [2], "psnr_corroborated": False},  # inside existing window
+                ],
+            },
+        }
+        self.module._apply_region_evidence(comparisons)
+        self.assertEqual(comparisons["TG"]["classification"], "localized_candidates")
+        extra = comparisons["TG"]["additional_region_windows"]
+        self.assertEqual(len(extra), 1)
+        self.assertEqual(extra[0]["start"], 2.0)
+
 
 class _FfmpegFixtureCase(unittest.TestCase):
     """Shared synthetic-clip fixtures built once per test-class run via ffmpeg lavfi sources.
@@ -232,6 +313,22 @@ class AnalyzeVideoVariantsIntegrationTest(_FfmpegFixtureCase):
         self.assertFalse(record["compatible"])
         self.assertEqual(record["classification"], "incompatible")
         self.assertEqual(record["intervals"], [])
+
+    def test_scan_small_regions_is_opt_in(self) -> None:
+        result = self.module.analyze_video_variants({"E": self.ref, "HV": self.localized})
+        self.assertNotIn("region_candidates", result["comparisons"]["HV"])
+
+    def test_scan_small_regions_produces_well_formed_region_candidates(self) -> None:
+        result = self.module.analyze_video_variants(
+            {"E": self.ref, "HV": self.localized}, scan_small_regions=True, region_count=8,
+        )
+        record = result["comparisons"]["HV"]
+        self.assertIn("region_candidates", record)
+        for candidate in record["region_candidates"]:
+            self.assertLess(candidate["start"], candidate["end"])
+            self.assertTrue(candidate["strips"])
+            self.assertTrue(all(0 <= s < 8 for s in candidate["strips"]))
+            self.assertIn("psnr_corroborated", candidate)
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
