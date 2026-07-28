@@ -1178,9 +1178,19 @@ def main():
             elif base_vid_path.parent.name.upper() == base_lang:
                 # Typical SCE layout: one sibling directory per language, with
                 # descriptive filename tails that differ by translation.
-                prefix = base_vid_path.name.split(f"_{base_lang}_", 1)[0]
+                # A number immediately after the language code (tscv_E_18_..., tscv_E_19_...)
+                # disambiguates between multiple same-day videos sharing a base prefix -- it must
+                # stay part of the glob, or e.g. "..._18_..." and "..._19_..." both match and the
+                # len(candidates) == 1 guard below correctly refuses to pick either (safe, but it
+                # means neither video can be resolved at all without this).
+                numbered = re.match(rf"^(.*?)_{re.escape(base_lang)}_(\d+)_", base_vid_path.name)
+                if numbered:
+                    glob_pattern = f"{numbered.group(1)}_{lang}_{numbered.group(2)}_*.mp4"
+                else:
+                    prefix = base_vid_path.name.split(f"_{base_lang}_", 1)[0]
+                    glob_pattern = f"{prefix}_{lang}_*.mp4"
                 sibling = base_vid_path.parent.parent / lang
-                candidates = sorted(sibling.glob(f"{prefix}_{lang}_*.mp4")) if sibling.is_dir() else []
+                candidates = sorted(sibling.glob(glob_pattern)) if sibling.is_dir() else []
                 if len(candidates) == 1:
                     local_files[lang]['video'] = candidates[0]
             if target_path_mp3.exists() and lang not in vid_langs:
