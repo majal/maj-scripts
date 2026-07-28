@@ -311,5 +311,56 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
         self.assertTrue(any("Skipped incompatible video languages" in w for w in manifest["warnings"]))
 
 
+@unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
+class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
+    """Reproduces a real incident: --cleanup deleted source video for languages that were resolved by
+    local-file-mode discovery (e.g. swept in via -s covering more languages than -v/-a) but never
+    actually embedded in any output. Cleanup must only ever remove files it actually used."""
+
+    JWVIDEOMUX = str(Path(__file__).resolve().parents[1] / "jwvideo-mux")
+
+    def test_cleanup_spares_a_resolved_but_unused_language(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-cleanup-") as tmp:
+            root = Path(tmp)
+            tg_dir, e_dir = root / "TG", root / "E"
+            tg_dir.mkdir()
+            e_dir.mkdir()
+
+            def make_clip(path: Path) -> None:
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(path),
+                ], check=True)
+
+            anchor = tg_dir / "prefix_TG_test.mp4"
+            make_clip(anchor)
+            make_clip(e_dir / "prefix_E_test.mp4")  # resolved via sibling search, but E is never requested
+            # Local-file mode's subtitle lookup is directory-blind (looks next to the anchor file), so
+            # this is where the code actually looks for E's subtitle -- not in the E/ sibling directory.
+            (tg_dir / "prefix_E_test.vtt").write_text(
+                "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n", encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [self.JWVIDEOMUX, str(anchor), "-v", "TG", "-a", "TG", "-s", "TG,E", "--cleanup", "--force"],
+                cwd=root, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            self.assertFalse(anchor.exists(), "TG's own video was embedded and should be cleaned up")
+            self.assertFalse(
+                (tg_dir / "prefix_E_test.vtt").exists(), "E's subtitle was embedded and should be cleaned up",
+            )
+            self.assertTrue(
+                (e_dir / "prefix_E_test.mp4").exists(),
+                "E's video was resolved by discovery but never requested via -v/-a, and was never "
+                "embedded in any output -- cleanup must not have touched it",
+            )
+            self.assertIn("Left", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
