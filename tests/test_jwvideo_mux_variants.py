@@ -686,9 +686,12 @@ class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
             anchor = tg_dir / "prefix_TG_test.mp4"
             make_clip(anchor)
             make_clip(e_dir / "prefix_E_test.mp4")  # resolved via sibling search, but E is never requested
-            # Local-file mode's subtitle lookup is directory-blind (looks next to the anchor file), so
-            # this is where the code actually looks for E's subtitle -- not in the E/ sibling directory.
-            (tg_dir / "prefix_E_test.vtt").write_text(
+            # Subtitle lookup for a sibling-discovered language sits next to that language's own
+            # resolved video file (e_dir here), not next to the anchor -- a real bug found and fixed
+            # 2026-07-29: it used to be directory-blind and looked in the anchor's own directory
+            # instead, which silently missed every sidecar subtitle in a real SCE-layout library
+            # (one directory per language).
+            (e_dir / "prefix_E_test.vtt").write_text(
                 "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n", encoding="utf-8",
             )
 
@@ -701,7 +704,7 @@ class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
 
             self.assertFalse(anchor.exists(), "TG's own video was embedded and should be cleaned up")
             self.assertFalse(
-                (tg_dir / "prefix_E_test.vtt").exists(), "E's subtitle was embedded and should be cleaned up",
+                (e_dir / "prefix_E_test.vtt").exists(), "E's subtitle was embedded and should be cleaned up",
             )
             self.assertTrue(
                 (e_dir / "prefix_E_test.mp4").exists(),
@@ -709,6 +712,43 @@ class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
                 "embedded in any output -- cleanup must not have touched it",
             )
             self.assertIn("Left", result.stdout)
+
+
+@unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
+class LocalFileModeSrtSubtitleTest(unittest.TestCase):
+    """Real SCE-layout sources use .srt sidecars, not .vtt (the jw.org API download format). Local-file
+    mode's subtitle lookup must fall back to .srt when no .vtt sidecar exists, for both the anchor
+    (base_lang) video and any sibling-discovered language -- otherwise every SCE library silently loses
+    its subtitle tracks despite the .srt files sitting right there next to the videos."""
+
+    JWVIDEOMUX = str(Path(__file__).resolve().parents[1] / "jwvideo-mux")
+
+    def test_srt_sidecar_is_discovered_and_cleaned_up(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-srt-") as tmp:
+            root = Path(tmp)
+            e_dir = root / "E"
+            e_dir.mkdir()
+
+            anchor = e_dir / "prefix_E_test.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", str(anchor),
+            ], check=True)
+            srt_path = anchor.with_suffix(".srt")
+            srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [sys.executable, self.JWVIDEOMUX, str(anchor), "-v", "E", "-a", "E", "-s", "E",
+                 "--cleanup", "--force"],
+                cwd=root, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(
+                srt_path.exists(), "the .srt sidecar should have been discovered, embedded, and cleaned up",
+            )
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
