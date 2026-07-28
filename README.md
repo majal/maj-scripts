@@ -296,6 +296,34 @@ Use a pre-downloaded local file:
   finds outside the already-confirmed ones as `additional_region_windows`
   (useful context for planning an adaptive-library split, without touching
   the already-confident result).
+- Duration mismatches beyond the usual tolerance aren't always a real
+  problem: a video that ends by holding a static end-card/copyright screen
+  for a different length per language will otherwise be rejected as
+  `incompatible` even though the actual content is identical. `analyze-video-variants`
+  now checks for a *trailing freeze* (via ffmpeg's `freezedetect`) on both
+  languages — a final frame held with no motion all the way to end of file —
+  and if both freeze around the same point, treats the pair as compatible,
+  comparing only up to the shared freeze point. The held tail itself is
+  never compared and simply falls back to the reference language when
+  building an adaptive library. Look for `trailing_freeze_note` and
+  `effective_duration` in a comparison's JSON to see when this kicked in.
+- `--manual-overrides <path>` lets a human-audited TOML file (the same
+  schema used for `_localization-audit/ground-truth.toml`: a list of talks,
+  each with one or more videos identified by anchor filename, the languages
+  they were checked against, and either `whole_video_same = true` or a list
+  of timed `differences`) take precedence over automatic detection for local-
+  file-mode SCE-layout input. It's matched by the exact talk-folder name and
+  anchor filename, so one file can cover an entire library and gets reused
+  across every invocation. A difference confirms a real `localized_candidates`
+  window even if the detector missed it; one marked `fallback_ok = true`
+  means "yes, this differs, but it's fine to just show the reference here"
+  and gets subtracted back out of `intervals` even if the detector (or an
+  earlier automatic pass) had already flagged it — useful for a closing
+  credits card nobody needs translated. Auto detection and manual overrides
+  are meant to work together: run the detector first, let a human resolve
+  whatever it marks `review_recommended` or `incompatible`, and record the
+  verdict in the overrides file so future runs on the same library don't
+  need to ask again.
 
 <a id="jwvideo-mux-notes--caveats"></a>
 
