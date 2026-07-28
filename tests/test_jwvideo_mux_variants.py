@@ -212,6 +212,104 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         self.assertEqual(len(extra), 1)
         self.assertEqual(extra[0]["start"], 2.0)
 
+    def test_subtract_intervals_partial_overlap_from_both_sides(self) -> None:
+        result = self.module._subtract_intervals([(0.0, 10.0)], [(3.0, 5.0), (7.0, 12.0)])
+        self.assertEqual(result, [(0.0, 3.0), (5.0, 7.0)])
+
+    def test_subtract_intervals_no_overlap_is_unchanged(self) -> None:
+        result = self.module._subtract_intervals([(0.0, 2.0)], [(5.0, 6.0)])
+        self.assertEqual(result, [(0.0, 2.0)])
+
+    def test_subtract_intervals_full_removal(self) -> None:
+        result = self.module._subtract_intervals([(2.0, 4.0)], [(0.0, 10.0)])
+        self.assertEqual(result, [])
+
+    def test_find_manual_video_entry_matches_folder_and_anchor(self) -> None:
+        overrides = {
+            "talks": [
+                {"folder": "1-0 Orientation", "videos": [{"anchor": "scei_E.mp4", "languages": ["TG"]}]},
+                {"folder": "1-1 Learn", "videos": [{"anchor": "jwbvs_E.mp4", "languages": ["HV"]}]},
+            ],
+        }
+        entry = self.module.find_manual_video_entry(overrides, "1-1 Learn", "jwbvs_E.mp4")
+        self.assertEqual(entry["languages"], ["HV"])
+
+    def test_find_manual_video_entry_no_match_returns_none(self) -> None:
+        overrides = {"talks": [{"folder": "1-0 Orientation", "videos": [{"anchor": "scei_E.mp4"}]}]}
+        self.assertIsNone(self.module.find_manual_video_entry(overrides, "1-0 Orientation", "wrong.mp4"))
+        self.assertIsNone(self.module.find_manual_video_entry(overrides, "wrong folder", "scei_E.mp4"))
+
+    def test_apply_manual_overrides_confirms_a_missed_window(self) -> None:
+        # Auto detector said visually_same; human evidence says otherwise.
+        variant_analysis = {"comparisons": {"TG": {"classification": "visually_same", "intervals": []}}}
+        manual_video = {"languages": ["TG"], "differences": [{"start_s": 3.25, "end_s": 9.22, "label": "name_plate"}]}
+        updated = self.module.apply_manual_overrides(variant_analysis, manual_video)
+        record = variant_analysis["comparisons"]["TG"]
+        self.assertEqual(updated, ["TG"])
+        self.assertEqual(record["classification"], "localized_candidates")
+        self.assertEqual(record["intervals"], [(3.25, 9.22)])
+        self.assertTrue(record["manual_confirmed"])
+
+    def test_apply_manual_overrides_fallback_ok_subtracts_from_existing_intervals(self) -> None:
+        # Auto detector already found this window and confidently flagged it -- a human fallback_ok
+        # verdict should still be able to remove it (e.g. "yes it differs, but don't bother splitting").
+        variant_analysis = {"comparisons": {"TG": {"classification": "localized_candidates", "intervals": [(494.0, 497.5)]}}}
+        manual_video = {
+            "languages": ["TG"],
+            "differences": [{"start_s": 493.96, "end_s": 497.897, "label": "end_credits", "fallback_ok": True}],
+        }
+        self.module.apply_manual_overrides(variant_analysis, manual_video)
+        record = variant_analysis["comparisons"]["TG"]
+        self.assertEqual(record["intervals"], [])
+        self.assertEqual(record["classification"], "visually_same")  # nothing real left, so it's just "same"
+
+    def test_apply_manual_overrides_mixed_confirmed_and_fallback_ok(self) -> None:
+        variant_analysis = {"comparisons": {"TG": {"classification": "visually_same", "intervals": []}}}
+        manual_video = {
+            "languages": ["TG"],
+            "differences": [
+                {"start_s": 33.5, "end_s": 45.479, "label": "story_text"},
+                {"start_s": 493.96, "end_s": 497.897, "label": "end_credits", "fallback_ok": True},
+            ],
+        }
+        self.module.apply_manual_overrides(variant_analysis, manual_video)
+        record = variant_analysis["comparisons"]["TG"]
+        # Only the non-fallback_ok window survives into `intervals`.
+        self.assertEqual(record["intervals"], [(33.5, 45.479)])
+        self.assertEqual(record["classification"], "localized_candidates")
+
+    def test_apply_manual_overrides_whole_video_same_overrides_incompatible(self) -> None:
+        variant_analysis = {"comparisons": {"TG": {"classification": "incompatible", "intervals": []}}}
+        manual_video = {"languages": ["TG"], "whole_video_same": True, "differences": []}
+        self.module.apply_manual_overrides(variant_analysis, manual_video)
+        self.assertEqual(variant_analysis["comparisons"]["TG"]["classification"], "visually_same")
+
+    def test_apply_manual_overrides_skips_language_not_in_comparisons(self) -> None:
+        variant_analysis = {"comparisons": {}}
+        manual_video = {"languages": ["TG"], "differences": []}
+        updated = self.module.apply_manual_overrides(variant_analysis, manual_video)
+        self.assertEqual(updated, [])
+
+    def test_load_manual_overrides_parses_toml_and_fallback_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            toml_path = Path(tmp) / "overrides.toml"
+            toml_path.write_text(
+                '[[talks]]\n'
+                'folder = "1-0 Orientation"\n\n'
+                '  [[talks.videos]]\n'
+                '  anchor = "scei_E.mp4"\n'
+                '  languages = ["TG"]\n\n'
+                '    [[talks.videos.differences]]\n'
+                '    start_s = 4.5\n'
+                '    end_s = 8.3\n'
+                '    label = "name_plate"\n'
+                '    fallback_ok = true\n',
+                encoding="utf-8",
+            )
+            overrides = self.module.load_manual_overrides(toml_path)
+            entry = self.module.find_manual_video_entry(overrides, "1-0 Orientation", "scei_E.mp4")
+            self.assertEqual(entry["differences"][0]["fallback_ok"], True)
+
 
 class _FfmpegFixtureCase(unittest.TestCase):
     """Shared synthetic-clip fixtures built once per test-class run via ffmpeg lavfi sources.
@@ -248,6 +346,15 @@ class _FfmpegFixtureCase(unittest.TestCase):
             extra_vf="drawbox=x=0:y=0:w=320:h=240:color=gray@0.35:t=fill",  # whole-clip, not windowed
         )
 
+        # Trailing-freeze fixtures: identical 5s of "live" content, then a held final frame for a
+        # different length each -- same shape as a per-language end-card/copyright-screen mismatch.
+        # Freeze durations must clear trailing_freeze_start's default min_freeze_s (2.0s) to be found.
+        cls.tail_short = cls._encode_with_frozen_tail(cls.root / "tail_short.mkv", live_s=5, freeze_s=2.5)
+        cls.tail_long = cls._encode_with_frozen_tail(cls.root / "tail_long.mkv", live_s=5, freeze_s=4)
+        cls.tail_no_shared_freeze = cls._encode_with_frozen_tail(
+            cls.root / "tail_no_shared_freeze.mkv", live_s=3, freeze_s=4,
+        )
+
         cls.audio = cls.root / "audio.mka"
         subprocess.run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -275,6 +382,19 @@ class _FfmpegFixtureCase(unittest.TestCase):
             cmd += ["-vf", extra_vf]
         cmd += [
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-g", str(cls.GOP), "-c:a", "aac", "-shortest", str(out_path),
+        ]
+        subprocess.run(cmd, check=True)
+        return out_path
+
+    @classmethod
+    def _encode_with_frozen_tail(cls, out_path: Path, *, live_s: int, freeze_s: int) -> Path:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size={cls.SIZE}:rate={cls.RATE}:duration={live_s}",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={live_s + freeze_s}",
+            "-vf", f"tpad=stop_mode=clone:stop_duration={freeze_s}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
             "-pix_fmt", "yuv420p", "-g", str(cls.GOP), "-c:a", "aac", "-shortest", str(out_path),
         ]
         subprocess.run(cmd, check=True)
@@ -327,6 +447,40 @@ class AnalyzeVideoVariantsIntegrationTest(_FfmpegFixtureCase):
         self.assertFalse(record["compatible"])
         self.assertEqual(record["classification"], "incompatible")
         self.assertEqual(record["intervals"], [])
+
+    def test_trailing_freeze_start_finds_the_held_frame(self) -> None:
+        # 5s live + 1s frozen tail -> freeze should start right around t=5.
+        freeze_at = self.module.trailing_freeze_start(self.tail_short, min_freeze_s=0.8)
+        self.assertIsNotNone(freeze_at)
+        self.assertAlmostEqual(freeze_at, 5.0, delta=0.3)
+
+    def test_trailing_freeze_start_none_for_live_content(self) -> None:
+        # self.ref never freezes (constant motion throughout) -- there's no trailing freeze to find.
+        self.assertIsNone(self.module.trailing_freeze_start(self.ref, min_freeze_s=0.8))
+
+    def test_duration_mismatch_becomes_compatible_via_shared_freeze_point(self) -> None:
+        # tail_short (6s total) and tail_long (8s total) differ by 2s of raw duration -- past the 0.25s
+        # tolerance -- but both freeze on the same live content at the same point (~t=5). This is
+        # exactly the real "SCE Orientation" case: a duration mismatch that's just a differently-held
+        # end card, not a real difference.
+        result = self.module.analyze_video_variants({"E": self.tail_short, "TG": self.tail_long})
+        record = result["comparisons"]["TG"]
+        self.assertGreater(record["duration_delta"], 0.25)
+        self.assertTrue(record["compatible"])
+        self.assertIn("trailing_freeze_note", record)
+        self.assertAlmostEqual(record["effective_duration"], 5.0, delta=0.3)
+        # The live content is byte-for-byte identical between the two fixtures, so once compatible,
+        # comparison should find nothing wrong.
+        self.assertIn(record["classification"], ("exactly_same", "visually_same"))
+
+    def test_duration_mismatch_without_shared_freeze_point_stays_incompatible(self) -> None:
+        # tail_long freezes at ~t=5; tail_no_shared_freeze freezes at ~t=3 with a different total
+        # duration too -- the freeze points themselves disagree, so this must NOT be forced compatible.
+        result = self.module.analyze_video_variants({"E": self.tail_long, "TG": self.tail_no_shared_freeze})
+        record = result["comparisons"]["TG"]
+        self.assertFalse(record["compatible"])
+        self.assertEqual(record["classification"], "incompatible")
+        self.assertNotIn("trailing_freeze_note", record)
 
     def test_scan_small_regions_is_opt_in(self) -> None:
         result = self.module.analyze_video_variants({"E": self.ref, "HV": self.localized})

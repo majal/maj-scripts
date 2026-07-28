@@ -664,6 +664,85 @@ def _apply_region_evidence(comparisons: dict[str, dict]) -> None:
             ]
 
 
+def load_manual_overrides(path: Path) -> dict:
+    """Load a human-audited overrides file. Uses the same schema as the SCE localization-audit ground
+    truth: a list of talks, each with a folder name and one or more videos (anchor filename, the
+    languages it was checked against, and either whole_video_same or a list of timed differences). A
+    difference marked fallback_ok means "yes, this genuinely differs, but it's fine to just show the
+    reference here" -- distinct from an unmarked difference, which must keep its own segment.
+    """
+    try:
+        import tomllib
+    except ImportError:
+        raise RuntimeError("--manual-overrides needs Python 3.11+ (for the standard library's tomllib).")
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def find_manual_video_entry(overrides: dict, talk_folder: str, anchor_name: str) -> dict | None:
+    for talk in overrides.get("talks", []):
+        if talk.get("folder") != talk_folder:
+            continue
+        for video in talk.get("videos", []):
+            if video.get("anchor") == anchor_name:
+                return video
+    return None
+
+
+def _subtract_intervals(base: list[tuple[float, float]], remove: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    result = []
+    for b_start, b_end in base:
+        cuts = sorted(r for r in remove if r[0] < b_end and r[1] > b_start)
+        cursor = b_start
+        for r_start, r_end in cuts:
+            if r_start > cursor:
+                result.append((cursor, min(r_start, b_end)))
+            cursor = max(cursor, r_end)
+        if cursor < b_end:
+            result.append((cursor, b_end))
+    return result
+
+
+def apply_manual_overrides(variant_analysis: dict, manual_video: dict) -> list[str]:
+    """Merge human-confirmed evidence into an automated analysis in place. Manual evidence always wins:
+    a difference the auto detector missed becomes a confirmed localized_candidates window; one marked
+    fallback_ok is subtracted back out of `intervals` even if the auto detector (or a previous manual
+    entry) already found it, since a human has explicitly said it's safe to substitute the reference
+    there; whole_video_same with no differences confirms visually_same outright, even overriding an
+    `incompatible` verdict (build_adaptive_library always sources "common" segments from the reference
+    file, never from the divergent language's own file, so this is safe to trust for library planning
+    even when the language's own file is technically a different resolution/etc). Returns the list of
+    languages actually updated.
+    """
+    differences = manual_video.get("differences", [])
+    whole_same = bool(manual_video.get("whole_video_same", False))
+    confirmed = [(d["start_s"], d["end_s"]) for d in differences if not d.get("fallback_ok")]
+    fallback_ok = [(d["start_s"], d["end_s"]) for d in differences if d.get("fallback_ok")]
+    comparisons = variant_analysis.get("comparisons", {})
+    updated = []
+    for lang in manual_video.get("languages", []):
+        record = comparisons.get(lang)
+        if record is None:
+            continue
+        record["manual_confirmed"] = True
+        record["manual_confirmed_windows"] = confirmed
+        record["manual_fallback_ok_windows"] = fallback_ok
+        if whole_same and not differences:
+            record["classification"] = "visually_same"
+            record["intervals"] = []
+        else:
+            intervals = merge_intervals(list(record.get("intervals", [])) + confirmed)
+            if fallback_ok:
+                intervals = _subtract_intervals(intervals, fallback_ok)
+            record["intervals"] = intervals
+            if intervals:
+                record["classification"] = "localized_candidates"
+            elif record["classification"] != "incompatible":
+                record["classification"] = "visually_same"
+        updated.append(lang)
+    return updated
+
+
 def _intersect_intervals(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> list[tuple[float, float]]:
     result = []
     for a_start, a_end in a:
@@ -988,6 +1067,7 @@ def main():
     parser.add_argument("--variant-min-seconds", type=float, default=1.5, help="Minimum sustained duration (seconds) a similarity drop must hold before it counts as a localized-difference candidate (default: 1.5)")
     parser.add_argument("--scan-small-regions", action="store_true", help="Also compare horizontal frame bands (name plates, lower-third captions) that whole-frame SSIM/PSNR dilutes; slower, and never auto-confirms by itself -- surfaces review_recommended candidates and supplementary windows on already-localized videos")
     parser.add_argument("--region-count", type=int, default=8, help="Number of horizontal bands to split the frame into for --scan-small-regions (default: 8)")
+    parser.add_argument("--manual-overrides", type=Path, help="TOML file (ground-truth.toml schema: talks -> videos -> differences, with an optional fallback_ok flag per difference) of human-confirmed evidence for local-file-mode SCE-layout input; always wins over automatic detection for the languages/windows it covers. Matched by exact talk-folder-name + anchor-filename, so reuse one file across a whole library.")
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where SSIM+PSNR both verified comparisons are visually_same or exactly_same (asks for confirmation unless --force)")
     parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media")
@@ -1157,6 +1237,26 @@ def main():
         except (subprocess.CalledProcessError, ValueError, OSError) as exc:
             color_print(f"Variant analysis failed: {exc}", "31")
             sys.exit(1)
+        if args.manual_overrides:
+            if not Path(args.input).is_file():
+                color_print("  --manual-overrides only applies in local-file mode; ignoring.", "33")
+            else:
+                anchor_path = Path(args.input).absolute()
+                talk_folder = anchor_path.parent.parent.name
+                try:
+                    overrides = load_manual_overrides(args.manual_overrides)
+                except Exception as exc:
+                    color_print(f"Failed to load --manual-overrides file: {exc}", "31")
+                    sys.exit(1)
+                manual_video = find_manual_video_entry(overrides, talk_folder, anchor_path.name)
+                if manual_video is None:
+                    color_print(
+                        f"  No --manual-overrides entry found for folder={talk_folder!r} anchor={anchor_path.name!r}.",
+                        "33",
+                    )
+                else:
+                    updated = apply_manual_overrides(variant_analysis, manual_video)
+                    color_print(f"  Applied manual overrides for: {', '.join(updated) or 'none'}", "36")
         if args.analyze_video_variants:
             print(json.dumps(variant_analysis, indent=2, sort_keys=True))
             return
