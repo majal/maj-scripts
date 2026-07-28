@@ -1129,59 +1129,78 @@ def main():
     else:
         color_print("✗ Merged video creation failed.", "31")
 
+    # Every path actually handed to ffmpeg as an -i input, across the merge above and the
+    # single-stream loop below. This -- not "everything local-file discovery happened to resolve" --
+    # is the only safe basis for --cleanup: a language merely probed as an audio-fallback candidate
+    # (e.g. swept in by -a's default covering more languages than -v ever requested) but never
+    # actually embedded in any output must never be deleted.
+    used_source_paths = set(input_paths)
+
     # 2. Mux single streams
     if args.single_streams and vid_langs:
         base_vid_lang = vid_langs[0]
         base_vid = local_files.get(base_vid_lang, {}).get('video')
-        
+
         if base_vid:
             color_print("\n>> Creating single-stream videos...", "34")
+            used_source_paths.add(str(base_vid))
             for lang in aud_langs:
                 if lang == base_vid_lang and len(aud_langs) == 1:
                     continue
-                    
+
                 out_single = out_dir / f"single_{lang}_{base_vid.stem}.mp4"
-                
+
                 if out_single.exists() and not args.force:
                     ans = input(f"File {out_single.name} already exists. Overwrite? [y/N] ")
                     if ans.lower() not in ['y', 'yes']:
                         color_print(f"Skipping {out_single.name}", "33")
                         continue
-                        
+
                 cmd_single = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(base_vid)]
                 maps = ["-map", "0:v"]
-                
+
                 media = local_files.get(lang, {})
                 audio_path = media.get('audio', media.get('video'))
-                
+
                 if audio_path:
+                    used_source_paths.add(str(audio_path))
                     if str(audio_path) != str(base_vid):
                         cmd_single.extend(["-i", str(audio_path)])
                         maps.extend(["-map", "1:a?"])
                     else:
                         maps.extend(["-map", "0:a?"])
-                
+
                 # Embed subtitle if present for this language, else use base subtitle
                 sub_file = media.get('sub', local_files.get(base_vid_lang, {}).get('sub'))
                 if sub_file:
+                    used_source_paths.add(str(sub_file))
                     sub_idx = 2 if (audio_path and str(audio_path) != str(base_vid)) else 1
                     cmd_single.extend(["-i", str(sub_file)])
                     maps.extend(["-map", f"{sub_idx}:s", "-c:s", "mov_text"])
-                    
+
                 cmd_single += maps + ["-c:v", "copy", "-c:a", "copy", str(out_single)]
                 subprocess.run(cmd_single)
                 color_print(f"  ✓ Single-stream created: {out_single.name}", "32")
 
     # Cleanup
     if args.cleanup:
-        color_print("\n>> Cleaning up source files...", "33")
+        color_print("\n>> Cleaning up source files actually used above (never anything merely discovered)...", "33")
+        skipped_unused = []
         for lang, media in local_files.items():
             for mtype, path in media.items():
+                if str(path) not in used_source_paths:
+                    skipped_unused.append(path.name)
+                    continue
                 if path.exists():
                     try:
                         path.unlink()
                     except Exception as e:
                         color_print(f"  Failed to delete {path.name}: {e}", "31")
+        if skipped_unused:
+            color_print(
+                f"  Left {len(skipped_unused)} file(s) untouched (resolved but never used in any output): "
+                f"{', '.join(sorted(set(skipped_unused)))}", "36",
+            )
         color_print("  Cleanup complete.", "32")
 
 if __name__ == "__main__":
