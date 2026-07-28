@@ -290,6 +290,47 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         updated = self.module.apply_manual_overrides(variant_analysis, manual_video)
         self.assertEqual(updated, [])
 
+    def test_sanitize_filename_removes_colon_and_other_unsafe_characters(self) -> None:
+        # The real trigger: an embedded ffprobe title containing "Title: Subtitle" renders as
+        # "Title/Subtitle" in Finder (macOS displays a literal `:` in a filename as `/`, an HFS-era
+        # legacy quirk) and is outright illegal on Windows/NTFS/FAT32.
+        self.assertEqual(
+            self.module.sanitize_filename("Soten Yoeun: My Search for the True God"),
+            "Soten Yoeun My Search for the True God",
+        )
+        self.assertEqual(self.module.sanitize_filename('a<b>c:d"e/f\\g|h?i*j'), "abcdefghij")
+
+    def test_sanitize_filename_collapses_resulting_whitespace(self) -> None:
+        self.assertEqual(self.module.sanitize_filename("a :  b"), "a b")
+
+    def test_sanitize_filename_leaves_ordinary_punctuation_alone(self) -> None:
+        # Curly quotes, em dashes, parentheses -- all filesystem-safe, shouldn't be touched.
+        name = "Mark Sanderson: “Be in Subjection” (Romans 13:1)"
+        self.assertNotIn(":", self.module.sanitize_filename(name))
+        self.assertIn("“Be in Subjection”", self.module.sanitize_filename(name))
+
+    def test_write_mpv_command_launcher_is_executable_and_valid_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "Play Tagalog.command"
+            self.module.write_mpv_command_launcher(out_path, "presentation-tg.edl", "audio-tg.mka", "subtitles-tg.srt", "tgl")
+            self.assertTrue(out_path.exists())
+            self.assertTrue(out_path.stat().st_mode & 0o111, "launcher must be executable")
+            result = subprocess.run(["bash", "-n", str(out_path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            content = out_path.read_text()
+            self.assertIn("presentation-tg.edl", content)
+            self.assertIn("--audio-file=", content)
+            self.assertIn("--sub-file=", content)
+            self.assertIn("--alang=tgl", content)
+
+    def test_write_mpv_command_launcher_omits_missing_audio_and_subs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "Play English.command"
+            self.module.write_mpv_command_launcher(out_path, "presentation-e.edl", None, None, "eng")
+            content = out_path.read_text()
+            self.assertNotIn("--audio-file=", content)
+            self.assertNotIn("--sub-file=", content)
+
     def test_load_manual_overrides_parses_toml_and_fallback_ok(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             toml_path = Path(tmp) / "overrides.toml"
@@ -512,6 +553,20 @@ class KeyframeSnappingIntegrationTest(_FfmpegFixtureCase):
         self.assertGreaterEqual(actual_end, 3.7)
         rounded_kf = {round(t, 2) for t in kf}
         self.assertIn(round(actual_start, 2), rounded_kf)
+
+    def test_extract_video_segment_uses_passed_in_keyframes_without_rescanning(self) -> None:
+        # build_adaptive_library scans each source file's keyframes once and reuses the list across
+        # every segment cut from it (a real 79-minute/97-segment library previously spent over half its
+        # runtime redundantly re-scanning the same few files). Passing a deliberately wrong keyframe
+        # list here proves the function actually uses what it's given rather than recomputing.
+        fake_keyframes = [0.0, 5.0]  # ref.mkv's real keyframes are every 1s (GOP=15@15fps); this is wrong
+        out_path = self.root / "fake_keyframe_segment.mkv"
+        actual_start, actual_end = self.module.extract_video_segment(
+            self.ref, 2.3, 3.7, out_path, keyframes=fake_keyframes,
+        )
+        self.assertEqual(actual_start, 0.0)  # snapped to the fake list's 0.0, not the real ~2.0 keyframe
+        self.assertEqual(actual_end, 5.0)
+        self.assertTrue(out_path.exists())
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
