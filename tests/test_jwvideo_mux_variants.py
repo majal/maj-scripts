@@ -674,13 +674,16 @@ class VariantFlagsNeverFallThroughToMuxTest(unittest.TestCase):
                     str(path),
                 ], check=True)
 
-            anchor = e_dir / "talk_E_18_r720P.mp4"
+            # No number right after the language code, so the numbered-disambiguation path (see
+            # test_numbered_sibling_prefix_disambiguates_same_day_videos below) doesn't apply --
+            # this falls back to the plain prefix, which both TG candidates below still match.
+            anchor = e_dir / "talk_E_r720P.mp4"
             make_clip(anchor)
             # Both share the "talk" prefix once "_E_"/"_TG_" is stripped -- the sibling glob for TG
             # matches both, so len(candidates) != 1 and TG is left unresolved (not an error, just "not
             # found"). video_paths ends up with only E in it.
-            make_clip(tg_dir / "talk_TG_18_r720P.mp4")
-            make_clip(tg_dir / "talk_TG_19_r720P.mp4")
+            make_clip(tg_dir / "talk_TG_partA_r720P.mp4")
+            make_clip(tg_dir / "talk_TG_partB_r720P.mp4")
 
             result = subprocess.run(
                 [sys.executable, self.JWVIDEOMUX, str(anchor), "-v", "E,TG", "-a", "NONE", "-s", "NONE",
@@ -692,6 +695,42 @@ class VariantFlagsNeverFallThroughToMuxTest(unittest.TestCase):
             self.assertNotIn("Merged video created", result.stdout)
             self.assertEqual(list(e_dir.glob("*.mkv")), [], "no output file should have been written")
             self.assertEqual(list(root.glob("*.mkv")), [])
+
+    def test_numbered_sibling_prefix_disambiguates_same_day_videos(self) -> None:
+        # Real case: SCE Media's "5-2 Jehovah Never Freezes People" has tscv_E_18_... and
+        # tscv_E_19_... anchors in the same folder, each with TG/HV/SA siblings named the same way.
+        # The number right after the language code must stay part of the sibling glob, or (as above)
+        # both "18" and "19" candidates match and neither resolves.
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-numbered-") as tmp:
+            root = Path(tmp)
+            e_dir, tg_dir = root / "E", root / "TG"
+            e_dir.mkdir()
+            tg_dir.mkdir()
+
+            def make_clip(path: Path) -> None:
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10:duration=1",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-pix_fmt", "yuv420p",
+                    str(path),
+                ], check=True)
+
+            anchor_18 = e_dir / "tscv_E_18_r720P.mp4"
+            make_clip(anchor_18)
+            make_clip(e_dir / "tscv_E_19_r720P.mp4")
+            make_clip(tg_dir / "tscv_TG_18_r720P.mp4")
+            make_clip(tg_dir / "tscv_TG_19_r720P.mp4")
+
+            result = subprocess.run(
+                [sys.executable, self.JWVIDEOMUX, str(anchor_18), "-v", "E,TG", "-a", "NONE", "-s", "NONE",
+                 "--analyze-video-variants"],
+                cwd=root, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            json_start = result.stdout.find("{")
+            self.assertNotEqual(json_start, -1, result.stdout)
+            analysis = json.loads(result.stdout[json_start:])
+            self.assertIn("TG", analysis["comparisons"])
 
 
 if __name__ == "__main__":
