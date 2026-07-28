@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -442,7 +443,8 @@ class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
             )
 
             result = subprocess.run(
-                [self.JWVIDEOMUX, str(anchor), "-v", "TG", "-a", "TG", "-s", "TG,E", "--cleanup", "--force"],
+                [sys.executable, self.JWVIDEOMUX, str(anchor), "-v", "TG", "-a", "TG", "-s", "TG,E",
+                 "--cleanup", "--force"],
                 cwd=root, capture_output=True, text=True, timeout=120,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -493,7 +495,7 @@ class VariantFlagsNeverFallThroughToMuxTest(unittest.TestCase):
             make_clip(tg_dir / "talk_TG_19_r720P.mp4")
 
             result = subprocess.run(
-                [self.JWVIDEOMUX, str(anchor), "-v", "E,TG", "-a", "NONE", "-s", "NONE",
+                [sys.executable, self.JWVIDEOMUX, str(anchor), "-v", "E,TG", "-a", "NONE", "-s", "NONE",
                  "--analyze-video-variants"],
                 cwd=root, capture_output=True, text=True, timeout=60,
             )

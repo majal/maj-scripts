@@ -413,11 +413,13 @@ def analyze_video_variants(
                     subprocess.run([
                         "ffmpeg", "-v", "error", "-i", str(video_paths[reference]), "-i", str(video_paths[lang]),
                         "-filter_complex", _comparison_filtergraph(
-                            ref_fps, ssim_stats, psnr_stats,
-                            region_specs=region_specs, region_ssim_paths=region_ssim_paths, region_psnr_paths=region_psnr_paths,
+                            ref_fps, Path(ssim_stats.name), Path(psnr_stats.name),
+                            region_specs=region_specs,
+                            region_ssim_paths={index: Path(path.name) for index, path in region_ssim_paths.items()},
+                            region_psnr_paths={index: Path(path.name) for index, path in region_psnr_paths.items()},
                         ),
                         "-f", "null", "-",
-                    ], check=True)
+                    ], check=True, cwd=tmp)
                     ssim_scores = parse_ssim_scores(ssim_stats)
                     psnr_scores = parse_psnr_scores(psnr_stats)
                     ssim_threshold, ssim_intervals = candidate_intervals(
