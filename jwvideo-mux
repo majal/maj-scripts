@@ -1255,30 +1255,38 @@ def main():
         base_lang = vid_langs[0] if vid_langs else (aud_langs[0] if aud_langs else "E")
         
         local_files[base_lang] = {'video': base_vid_path}
-        
-        # Attempt to find VTT for base video (same name but .vtt)
-        base_vtt = base_vid_path.with_suffix('.vtt')
-        if base_vtt.exists():
-            local_files[base_lang]['sub'] = base_vtt
-            
+
+        # Attempt to find a subtitle sidecar for the base video (same name, .vtt or .srt --
+        # jw.org API downloads land as .vtt, but real SCE-layout sources are commonly .srt).
+        for suffix in ('.vtt', '.srt'):
+            base_sub = base_vid_path.with_suffix(suffix)
+            if base_sub.exists():
+                local_files[base_lang]['sub'] = base_sub
+                break
+
         for lang in all_langs:
             if lang == base_lang:
                 continue
-            
+
             # Replace base_lang with target lang in the filename (case-sensitive or insensitive)
             # Example: "video_FSL_720p.mp4" -> "video_E_720p.mp4"
             target_name_mp4 = base_vid_path.name.replace(f"_{base_lang}_", f"_{lang}_")
             if target_name_mp4 == base_vid_path.name:
                 # Try without underscores
                 target_name_mp4 = base_vid_path.name.replace(base_lang, lang)
-                
+
             local_files[lang] = {}
             target_path_mp4 = out_dir / target_name_mp4
             target_path_mp3 = target_path_mp4.with_suffix('.mp3')
-            target_path_vtt = target_path_mp4.with_suffix('.vtt')
-            
+            # Resolved once the actual video path for this language is known below -- the subtitle
+            # sidecar sits next to THAT file, which for SCE-layout siblings is a different directory
+            # than out_dir (a bug: this used to always look for target_path_mp4's sidecar in out_dir,
+            # which is only right for the flat, non-SCE layout).
+            resolved_video_path = None
+
             if target_path_mp4.exists():
                 local_files[lang]['video'] = target_path_mp4
+                resolved_video_path = target_path_mp4
             elif base_vid_path.parent.name.upper() == base_lang:
                 # Typical SCE layout: one sibling directory per language, with
                 # descriptive filename tails that differ by translation.
@@ -1297,15 +1305,20 @@ def main():
                 candidates = sorted(sibling.glob(glob_pattern)) if sibling.is_dir() else []
                 if len(candidates) == 1:
                     local_files[lang]['video'] = candidates[0]
+                    resolved_video_path = candidates[0]
             if target_path_mp3.exists() and lang not in vid_langs:
                 # If MP3 exists and we aren't explicitly needing video for this lang, prefer audio
                 local_files[lang]['audio'] = target_path_mp3
                 if 'video' in local_files[lang]:
                     del local_files[lang]['video']
-            
-            if lang in sub_langs and target_path_vtt.exists():
-                local_files[lang]['sub'] = target_path_vtt
-                
+
+            if lang in sub_langs and resolved_video_path is not None:
+                for suffix in ('.vtt', '.srt'):
+                    target_sub = resolved_video_path.with_suffix(suffix)
+                    if target_sub.exists():
+                        local_files[lang]['sub'] = target_sub
+                        break
+
             if local_files[lang]:
                 color_print(f"  [{lang}] Found local: {', '.join(local_files[lang].keys())}", "32")
             else:
