@@ -274,7 +274,13 @@ Use a pre-downloaded local file:
   validation results). It never touches or deletes source files and always
   asks for confirmation before writing (skip with `--force`). Play a language
   with e.g. `mpv presentation-tg.edl --audio-file=audio-tg.mka
-  --sub-file=subtitles-tg.srt`. Segment boundaries are independently snapped
+  --sub-file=subtitles-tg.srt`, or just double-click the generated
+  `Play <Language>.command` file in the library folder — no terminal needed.
+  The library folder itself, and every file in it, has any `:` (and other
+  characters Windows/NTFS forbids) stripped from its name even if the source
+  video's own filename has one — macOS Finder renders a literal `:` in a
+  filename as `/`, which reads as a real path separator and is genuinely
+  confusing to run into. Segment boundaries are independently snapped
   to real keyframes per source file (never mid-GOP), so a splice can drift by
   a small amount between two files at the same nominal cut point; the
   manifest records both the analytical and actual cut times and warns if any

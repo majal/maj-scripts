@@ -831,10 +831,18 @@ def plan_adaptive_segments(intervals_by_lang: dict[str, list[tuple[float, float]
     return segments
 
 
-def extract_video_segment(video_path: Path, start: float, end: float, out_path: Path) -> tuple[float, float]:
+def extract_video_segment(
+    video_path: Path, start: float, end: float, out_path: Path, *, keyframes: list[float] | None = None,
+) -> tuple[float, float]:
     """Stream-copy a video-only slice, snapping to this file's own keyframes first so the copy is valid.
-    Returns the actual (snapped) start/end used, for manifest bookkeeping."""
-    snapped_start, snapped_end = snap_interval_to_keyframes(start, end, keyframe_times(video_path))
+    Returns the actual (snapped) start/end used, for manifest bookkeeping.
+
+    Pass keyframes in when extracting many segments from the same file (as build_adaptive_library does):
+    scanning a long video's full keyframe list isn't cheap (~10s for a 79-minute file), and it never
+    changes within one run, so computing it once per source file instead of once per segment matters --
+    it was previously the single largest cost in building a library for a long talk.
+    """
+    snapped_start, snapped_end = snap_interval_to_keyframes(start, end, keyframes if keyframes is not None else keyframe_times(video_path))
     duration = max(snapped_end - snapped_start, 0.0)
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -864,6 +872,38 @@ def write_mpv_edl(segment_files: list[Path], out_path: Path, edl_dir: Path):
             rel = path
         lines.append(str(rel))
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def sanitize_filename(name: str) -> str:
+    """Strip characters that are unsafe or misleading in a filename cross-platform. `:` is the common
+    offender here -- it's legal on POSIX filesystems, but Windows/NTFS/FAT32 forbid it outright, and
+    macOS Finder renders a literal `:` in a filename as `/` for legacy HFS reasons, which reads as an
+    actual path separator and is genuinely confusing. Removed rather than replaced (e.g. "Title: Sub"
+    -> "Title Sub"), since these characters almost always come from an embedded title's punctuation
+    where simply dropping them still reads naturally."""
+    for char in '<>:"/\\|?*':
+        name = name.replace(char, "")
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+def write_mpv_command_launcher(
+    out_path: Path, edl_name: str, audio_name: str | None, sub_name: str | None, iso: str,
+) -> None:
+    """Write a double-clickable macOS launcher (same pattern as the earlier adaptive-mpv-library pilot's
+    "Play <Language>.command" files): Finder runs a .command file's shebang in Terminal on double-click,
+    no CLI knowledge required to play a language's presentation."""
+    lines = ["#!/bin/bash", "set -euo pipefail", 'dir="$(cd "$(dirname "$0")" && pwd)"']
+    args = [f'"$dir/{edl_name}"']
+    if audio_name:
+        args.append(f'--audio-file="$dir/{audio_name}"')
+    if sub_name:
+        args.append(f'--sub-file="$dir/{sub_name}"')
+    args.append(f"--alang={iso}")
+    args.append(f"--slang={iso},eng")
+    lines.append("exec mpv " + " ".join(args))
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    out_path.chmod(0o755)
 
 
 def tool_version_string(cmd: list[str]) -> str | None:
@@ -997,11 +1037,23 @@ def build_adaptive_library(
             f"such splice: {', '.join(mismatched_resolution)}"
         )
 
+    # Each source file's keyframe list is scanned once here and reused for every segment cut from it --
+    # a full scan of a long talk isn't cheap (~10s for a 79-minute file) and it never changes within one
+    # run, so recomputing it per segment (as a naive per-call keyframe_times() would) previously dominated
+    # build time for long videos with many segments (a 79-minute, 97-segment library spent over half its
+    # total runtime re-scanning the same handful of files' keyframes from scratch, over and over).
+    keyframe_cache = {reference: keyframe_times(video_paths[reference])}
+    for lang in intervals_by_lang:
+        if lang not in keyframe_cache:
+            keyframe_cache[lang] = keyframe_times(video_paths[lang])
+
     max_drift = 0.0
     for segment in segments:
         common_name = f"common-{segment['index']:03d}.mkv"
         common_path = library_dir / common_name
-        actual_start, actual_end = extract_video_segment(video_paths[reference], segment["start"], segment["end"], common_path)
+        actual_start, actual_end = extract_video_segment(
+            video_paths[reference], segment["start"], segment["end"], common_path, keyframes=keyframe_cache[reference],
+        )
         drift = max(abs(actual_start - segment["start"]), abs(actual_end - segment["end"]))
         max_drift = max(max_drift, drift)
         manifest["segments"].append({
@@ -1012,7 +1064,9 @@ def build_adaptive_library(
         for lang in segment["divergent_languages"]:
             lang_name = f"{lang.lower()}-{segment['index']:03d}.mkv"
             lang_path = library_dir / lang_name
-            lang_start, lang_end = extract_video_segment(video_paths[lang], segment["start"], segment["end"], lang_path)
+            lang_start, lang_end = extract_video_segment(
+                video_paths[lang], segment["start"], segment["end"], lang_path, keyframes=keyframe_cache[lang],
+            )
             drift = max(abs(lang_start - segment["start"]), abs(lang_end - segment["end"]))
             max_drift = max(max_drift, drift)
             manifest["segments"].append({
@@ -1063,9 +1117,14 @@ def build_adaptive_library(
         if sub_name:
             playback_hint += f" --sub-file={sub_name}"
         playback_hint += f" --alang={iso} --slang={iso},eng"
+
+        launcher_name = f"Play {sanitize_filename(title)}.command"
+        write_mpv_command_launcher(library_dir / launcher_name, edl_name, audio_name, sub_name, iso)
+
         manifest["languages"][lang] = {
             "iso639": iso, "title": title, "edl": edl_name,
             "audio": audio_name, "subtitle": sub_name, "playback_hint": playback_hint,
+            "launcher": launcher_name,
         }
 
     if incompatible:
@@ -1312,7 +1371,7 @@ def main():
             return
         if args.adaptive_mpv_library:
             reference = variant_analysis["reference_language"]
-            library_dir = out_dir / f"{video_paths[reference].stem}_adaptive-library"
+            library_dir = out_dir / f"{sanitize_filename(video_paths[reference].stem)}_adaptive-library"
             localized = sorted(
                 lang for lang, record in variant_analysis["comparisons"].items()
                 if record["classification"] == "localized_candidates"
