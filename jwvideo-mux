@@ -6,6 +6,7 @@ into a single MKV/MP4 container or separate single-stream files.
 """
 
 import argparse
+import collections
 import json
 import os
 import re
@@ -350,7 +351,10 @@ def candidate_intervals(
     return threshold, runs
 
 
-def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float = 1.5) -> dict:
+def analyze_video_variants(
+    video_paths: dict[str, Path], *, min_seconds: float = 1.5,
+    scan_small_regions: bool = False, region_count: int = 8,
+) -> dict:
     """Analyze exact and localized reuse without altering media.
 
     Two independent similarity signals are computed for every non-reference language: SSIM (structural)
@@ -380,6 +384,11 @@ def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float =
     if reference:
         ref_profile = profiles[reference]
         ref_fps = fps_as_float(ref_profile["fps"])
+        region_specs = (
+            _region_crop_specs(ref_profile["width"], ref_profile["height"], region_count)
+            if scan_small_regions and ref_profile["width"] and ref_profile["height"]
+            else None
+        )
         with tempfile.TemporaryDirectory(prefix="jwvideo-mux-ssim-") as tmp:
             for lang in languages[1:]:
                 profile = profiles[lang]
@@ -395,9 +404,18 @@ def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float =
                 elif compatible:
                     ssim_stats = Path(tmp) / f"{reference}-{lang}.ssim.log"
                     psnr_stats = Path(tmp) / f"{reference}-{lang}.psnr.log"
+                    region_ssim_paths = {
+                        spec.index: Path(tmp) / f"{reference}-{lang}.region{spec.index}.ssim.log" for spec in region_specs
+                    } if region_specs else {}
+                    region_psnr_paths = {
+                        spec.index: Path(tmp) / f"{reference}-{lang}.region{spec.index}.psnr.log" for spec in region_specs
+                    } if region_specs else {}
                     subprocess.run([
                         "ffmpeg", "-v", "error", "-i", str(video_paths[reference]), "-i", str(video_paths[lang]),
-                        "-filter_complex", _ssim_psnr_filtergraph(ref_fps, ssim_stats, psnr_stats),
+                        "-filter_complex", _comparison_filtergraph(
+                            ref_fps, ssim_stats, psnr_stats,
+                            region_specs=region_specs, region_ssim_paths=region_ssim_paths, region_psnr_paths=region_psnr_paths,
+                        ),
                         "-f", "null", "-",
                     ], check=True)
                     ssim_scores = parse_ssim_scores(ssim_stats)
@@ -435,22 +453,155 @@ def analyze_video_variants(video_paths: dict[str, Path], *, min_seconds: float =
                         "globally_uncertain": globally_uncertain,
                         "classification": classification,
                     })
+                    if region_specs:
+                        record["region_candidates"] = region_candidate_intervals(
+                            {spec.index: parse_ssim_scores(region_ssim_paths[spec.index]) for spec in region_specs},
+                            {spec.index: parse_psnr_scores(region_psnr_paths[spec.index]) for spec in region_specs},
+                            ref_fps, min_seconds=min_seconds,
+                        )
                 comparisons[lang] = record
+
+        if region_specs:
+            _apply_region_evidence(comparisons)
+
     return {
         "reference_language": reference, "profiles": profiles, "hashes": hashes,
         "exact_groups": list(grouped.values()), "comparisons": comparisons,
     }
 
 
-def _ssim_psnr_filtergraph(ref_fps: float, ssim_stats: Path, psnr_stats: Path) -> str:
+_RegionSpec = collections.namedtuple("_RegionSpec", "index width height x y")
+
+
+def _region_crop_specs(width: int, height: int, num_strips: int) -> list["_RegionSpec"]:
+    """Split the frame into num_strips horizontal bands, in case a localized difference is small
+    enough (a name plate, a moving text label) that it barely moves the whole-frame average but
+    dominates one band."""
+    num_strips = max(1, min(num_strips, height))
+    strip_height = height // num_strips
+    specs = []
+    y = 0
+    for index in range(num_strips):
+        band_height = strip_height if index < num_strips - 1 else height - y
+        specs.append(_RegionSpec(index, width, band_height, 0, y))
+        y += band_height
+    return specs
+
+
+def _comparison_filtergraph(
+    ref_fps: float, ssim_stats: Path, psnr_stats: Path, *,
+    region_specs: list["_RegionSpec"] | None = None,
+    region_ssim_paths: dict[int, Path] | None = None, region_psnr_paths: dict[int, Path] | None = None,
+) -> str:
     """Resample both inputs onto the reference's frame-rate grid (fixing decode-order drift on VFR/
-    rounding-mismatched sources), then compute SSIM and PSNR in a single ffmpeg pass."""
+    rounding-mismatched sources), then compute whole-frame SSIM/PSNR -- and, if region_specs is given,
+    per-band SSIM/PSNR for each horizontal strip -- in a single ffmpeg pass (one decode, many cheap
+    crop+compare branches)."""
+    region_specs = region_specs or []
+    branch_count = 1 + len(region_specs)
     fps = f"fps={ref_fps:.6f}" if ref_fps > 0 else "null"
-    return (
-        f"[0:v:0]{fps}[r0];[1:v:0]{fps}[r1];"
-        f"[r0]split[r0a][r0b];[r1]split[r1a][r1b];"
-        f"[r0a][r1a]ssim=stats_file={ssim_stats};[r0b][r1b]psnr=stats_file={psnr_stats}"
-    )
+    parts = [f"[0:v:0]{fps}[r0]", f"[1:v:0]{fps}[r1]"]
+    if branch_count > 1:
+        parts.append(f"[r0]split={branch_count}" + "".join(f"[r0_{i}]" for i in range(branch_count)))
+        parts.append(f"[r1]split={branch_count}" + "".join(f"[r1_{i}]" for i in range(branch_count)))
+        whole0, whole1 = "[r0_0]", "[r1_0]"
+    else:
+        whole0, whole1 = "[r0]", "[r1]"
+    parts.append(f"{whole0}split[w0a][w0b]")
+    parts.append(f"{whole1}split[w1a][w1b]")
+    parts.append(f"[w0a][w1a]ssim=stats_file={ssim_stats}")
+    parts.append(f"[w0b][w1b]psnr=stats_file={psnr_stats}")
+    for branch, spec in enumerate(region_specs, start=1):
+        parts.append(f"[r0_{branch}]crop={spec.width}:{spec.height}:{spec.x}:{spec.y}[c0_{spec.index}]")
+        parts.append(f"[r1_{branch}]crop={spec.width}:{spec.height}:{spec.x}:{spec.y}[c1_{spec.index}]")
+        parts.append(f"[c0_{spec.index}]split[c0_{spec.index}a][c0_{spec.index}b]")
+        parts.append(f"[c1_{spec.index}]split[c1_{spec.index}a][c1_{spec.index}b]")
+        parts.append(f"[c0_{spec.index}a][c1_{spec.index}a]ssim=stats_file={region_ssim_paths[spec.index]}")
+        parts.append(f"[c0_{spec.index}b][c1_{spec.index}b]psnr=stats_file={region_psnr_paths[spec.index]}")
+    return ";".join(parts)
+
+
+def region_candidate_intervals(
+    ssim_scores_by_strip: dict[int, list[float]], psnr_scores_by_strip: dict[int, list[float]],
+    fps: float, *, min_seconds: float = 1.5,
+) -> list[dict]:
+    """Find sustained per-strip SSIM drops (the primary, better-behaved signal at this scale -- see
+    module docstring notes on region calibration) and coalesce overlapping strips/times into candidates.
+
+    PSNR is recorded as corroborating evidence only, never as a gate: calibrating against real footage
+    showed it both misses genuine small-region differences entirely on some clips (too much natural
+    per-region variance drives its own adaptive threshold below the real dip) and false-triggers on
+    others (a highly-detailed source region's independent compression noise can cross both metrics'
+    thresholds identically for two completely different candidate languages). Neither signal alone, nor
+    the two together, was reliable enough at region scale to auto-classify -- so results here are always
+    advisory, surfaced for a human via review_recommended rather than promoted to localized_candidates.
+    """
+    raw = []
+    for strip_index, ssim_scores in ssim_scores_by_strip.items():
+        _, ssim_intervals = candidate_intervals(
+            ssim_scores, fps, min_seconds=min_seconds, mad_multiplier=3.0, floor_margin=0.01, cap=0.99, min_threshold=0.85,
+        )
+        psnr_scores = psnr_scores_by_strip.get(strip_index, [])
+        _, psnr_intervals = candidate_intervals(
+            psnr_scores, fps, min_seconds=min_seconds, mad_multiplier=4.0, floor_margin=2.0, cap=None, min_threshold=15.0,
+        ) if psnr_scores else (0.0, [])
+        for start, end in ssim_intervals:
+            psnr_corroborated = any(s < end and e > start for s, e in psnr_intervals)
+            raw.append({"start": start, "end": end, "strips": [strip_index], "psnr_corroborated": psnr_corroborated})
+
+    raw.sort(key=lambda c: c["start"])
+    merged: list[dict] = []
+    for candidate in raw:
+        if merged and candidate["start"] < merged[-1]["end"]:
+            last = merged[-1]
+            last["start"] = min(last["start"], candidate["start"])
+            last["end"] = max(last["end"], candidate["end"])
+            last["psnr_corroborated"] = last["psnr_corroborated"] or candidate["psnr_corroborated"]
+            for strip in candidate["strips"]:
+                if strip not in last["strips"]:
+                    last["strips"].append(strip)
+        else:
+            merged.append(dict(candidate))
+    for candidate in merged:
+        candidate["strips"].sort()
+    return merged
+
+
+def _apply_region_evidence(comparisons: dict[str, dict]) -> None:
+    """Second pass across all languages' region_candidates: tag each with how many *other* languages
+    independently show an overlapping candidate (informational -- see region_candidate_intervals'
+    docstring for why this isn't treated as a reliable auto-confirm gate either), then fold the evidence
+    into classification/intervals conservatively:
+      - visually_same + any region candidate -> review_recommended (something to check, not "same")
+      - already localized_candidates -> region candidates outside the existing corroborated windows are
+        recorded separately as additional_region_windows (useful for future segment planning) without
+        touching the already-confident `intervals`
+      - review_recommended / incompatible / exactly_same -> unchanged classification, evidence attached
+    """
+    for lang, record in comparisons.items():
+        candidates = record.get("region_candidates") or []
+        for candidate in candidates:
+            others = 0
+            for other_lang, other_record in comparisons.items():
+                if other_lang == lang:
+                    continue
+                if any(
+                    oc["start"] < candidate["end"] and oc["end"] > candidate["start"]
+                    for oc in (other_record.get("region_candidates") or [])
+                ):
+                    others += 1
+            candidate["corroborating_languages"] = others
+
+        if not candidates:
+            continue
+        if record["classification"] == "visually_same":
+            record["classification"] = "review_recommended"
+        elif record["classification"] == "localized_candidates":
+            existing = record["intervals"]
+            record["additional_region_windows"] = [
+                {k: v for k, v in c.items()} for c in candidates
+                if not any(s < c["end"] and e > c["start"] for s, e in existing)
+            ]
 
 
 def _intersect_intervals(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -775,6 +926,8 @@ def main():
     parser.add_argument("--default-sub", help="Language code to set as default subtitle track")
     parser.add_argument("--analyze-video-variants", action="store_true", help="Report exact video reuse and reviewed localized-difference candidates; does not mux or delete media")
     parser.add_argument("--variant-min-seconds", type=float, default=1.5, help="Minimum sustained duration (seconds) a similarity drop must hold before it counts as a localized-difference candidate (default: 1.5)")
+    parser.add_argument("--scan-small-regions", action="store_true", help="Also compare horizontal frame bands (name plates, lower-third captions) that whole-frame SSIM/PSNR dilutes; slower, and never auto-confirms by itself -- surfaces review_recommended candidates and supplementary windows on already-localized videos")
+    parser.add_argument("--region-count", type=int, default=8, help="Number of horizontal bands to split the frame into for --scan-small-regions (default: 8)")
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where SSIM+PSNR both verified comparisons are visually_same or exactly_same (asks for confirmation unless --force)")
     parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media")
@@ -937,7 +1090,10 @@ def main():
     if any(variant_flags):
         color_print("\n>> Analyzing video variants...", "34")
         try:
-            variant_analysis = analyze_video_variants(video_paths, min_seconds=args.variant_min_seconds)
+            variant_analysis = analyze_video_variants(
+                video_paths, min_seconds=args.variant_min_seconds,
+                scan_small_regions=args.scan_small_regions, region_count=args.region_count,
+            )
         except (subprocess.CalledProcessError, ValueError, OSError) as exc:
             color_print(f"Variant analysis failed: {exc}", "31")
             sys.exit(1)
