@@ -892,17 +892,24 @@ def sanitize_filename(name: str) -> str:
 
 
 def write_mpv_command_launcher(
-    out_path: Path, edl_name: str, audio_name: str | None, sub_name: str | None, iso: str,
+    out_path: Path, edl_name: str, audio_name: str | None, sub_name: str | None, iso: str, *,
+    media_subdir: str | None = None,
 ) -> None:
     """Write a double-clickable macOS launcher (same pattern as the earlier adaptive-mpv-library pilot's
     "Play <Language>.command" files): Finder runs a .command file's shebang in Terminal on double-click,
-    no CLI knowledge required to play a language's presentation."""
+    no CLI knowledge required to play a language's presentation.
+
+    media_subdir is the path from the launcher's own directory down to where the EDL/audio/subtitle
+    files actually live -- "" (default) when the launcher sits alongside them inside the library folder,
+    or the library folder's own name when the launcher has been pulled up into the library's parent
+    directory instead (see build_adaptive_library's launchers_at_unit_root)."""
     lines = ["#!/bin/bash", "set -euo pipefail", 'dir="$(cd "$(dirname "$0")" && pwd)"']
-    args = [f'"$dir/{edl_name}"']
+    media_dir = f"$dir/{media_subdir}" if media_subdir else "$dir"
+    args = [f'"{media_dir}/{edl_name}"']
     if audio_name:
-        args.append(f'--audio-file="$dir/{audio_name}"')
+        args.append(f'--audio-file="{media_dir}/{audio_name}"')
     if sub_name:
-        args.append(f'--sub-file="$dir/{sub_name}"')
+        args.append(f'--sub-file="{media_dir}/{sub_name}"')
     args.append(f"--alang={iso}")
     args.append(f"--slang={iso},eng")
     lines.append("exec mpv " + " ".join(args))
@@ -974,9 +981,31 @@ def validate_edl_with_mpv(
     return {"ok": all(c["ok"] for c in results), "checkpoints": results}
 
 
+def friendly_video_label(name: str) -> str:
+    """Pull the human-readable title out of a library folder's own name for use in a disambiguated
+    launcher filename, e.g. "iut_E_r720P (Integrity Under Trial)_adaptive-library" -> "Integrity Under
+    Trial". Matches the OUTERMOST balanced parenthesis pair (tracking nesting depth) so a title that
+    itself contains "(...)" (e.g. a nested scripture reference like "(Mark Sanderson ... (Romans 13 1))")
+    still resolves to the full title, not just the innermost fragment. Falls back to the full name when
+    there's no parenthetical title to extract."""
+    name = name.removesuffix("_adaptive-library")
+    start = name.find("(")
+    if start == -1:
+        return name
+    depth = 0
+    for i in range(start, len(name)):
+        if name[i] == "(":
+            depth += 1
+        elif name[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return name[start + 1:i]
+    return name
+
+
 def build_adaptive_library(
     *, reference: str, video_paths: dict[str, Path], variant_analysis: dict,
-    local_files: dict, library_dir: Path, min_seconds: float,
+    local_files: dict, library_dir: Path, min_seconds: float, launchers_at_unit_root: bool = False,
 ) -> dict:
     """Materialize the adaptive mpv library: one shared common video-only file per fully-common stretch,
     one localized video-only file per language wherever it was confirmed to actually diverge, full
@@ -1122,13 +1151,24 @@ def build_adaptive_library(
             playback_hint += f" --sub-file={sub_name}"
         playback_hint += f" --alang={iso} --slang={iso},eng"
 
-        launcher_name = f"Play {sanitize_filename(title)}.command"
-        write_mpv_command_launcher(library_dir / launcher_name, edl_name, audio_name, sub_name, iso)
+        if launchers_at_unit_root:
+            launcher_dir = library_dir.parent
+            launcher_name = f"Play {sanitize_filename(title)} - {sanitize_filename(friendly_video_label(library_dir.name))}.command"
+            media_subdir = library_dir.name
+            launcher_rel = f"../{launcher_name}"
+        else:
+            launcher_dir = library_dir
+            launcher_name = f"Play {sanitize_filename(title)}.command"
+            media_subdir = None
+            launcher_rel = launcher_name
+        write_mpv_command_launcher(
+            launcher_dir / launcher_name, edl_name, audio_name, sub_name, iso, media_subdir=media_subdir,
+        )
 
         manifest["languages"][lang] = {
             "iso639": iso, "title": title, "edl": edl_name,
             "audio": audio_name, "subtitle": sub_name, "playback_hint": playback_hint,
-            "launcher": launcher_name,
+            "launcher": launcher_rel,
         }
 
     if incompatible:
@@ -1174,7 +1214,8 @@ def main():
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where SSIM+PSNR both verified comparisons are visually_same or exactly_same (asks for confirmation unless --force)")
     parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media")
-    
+    parser.add_argument("--launchers-in-unit-root", action="store_true", help="With --adaptive-mpv-library, write the Play <Language>.command launchers into the output directory (one level up from the library folder) instead of inside it, so every video's launchers for a unit are visible without opening each video's own subfolder. Launcher names are disambiguated with the video's own title since multiple videos in one unit would otherwise collide on plain 'Play <Language>.command'.")
+
     args = parser.parse_args()
     check_dependencies()
     
@@ -1394,6 +1435,7 @@ def main():
             manifest = build_adaptive_library(
                 reference=reference, video_paths=video_paths, variant_analysis=variant_analysis,
                 local_files=local_files, library_dir=library_dir, min_seconds=args.variant_min_seconds,
+                launchers_at_unit_root=args.launchers_in_unit_root,
             )
             for warning in manifest["warnings"]:
                 color_print(f"  ! {warning}", "33")
