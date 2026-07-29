@@ -290,18 +290,27 @@ Use a pre-downloaded local file:
   Windows/NTFS forbids) stripped from its name even if the source video's own
   filename has one — macOS Finder renders a literal `:` in a filename as `/`,
   which reads as a real path separator and is genuinely confusing to run
-  into. Segment boundaries are independently snapped to real keyframes per
-  source file (never mid-GOP), so a splice can drift by a small amount
-  between two files at the same nominal cut point; the manifest records both
-  the analytical and actual cut times and warns if any splice's drift is
-  large enough to warrant a manual look before relying on it. When keyframe
-  expansion would overlap the immediately preceding segment already
-  extracted from the same source file — confirmed against real footage with
-  a coarse keyframe interval, where it produced a visible rewind/skip during
-  playback — that segment is precisely re-encoded at its exact (unsnapped)
-  boundary instead, which by construction can never overlap a neighbor;
-  `manifest.json`'s `reencoded_segments` count and a warning note when this
-  happened. mpv validation spot-checks the start, the end, and a moment
+  into. Cut points are snapped **once, globally, to the reference video's own
+  keyframes** and every segment then covers exactly that shared window, so
+  all languages agree on where each boundary is. This exactness is the whole
+  contract: a presentation interleaves common segments (from the reference)
+  with localized clips (from a *different* file), so a segment covering even
+  slightly more than its window replays content at the splice, and slightly
+  less skips it. Consequently the reference is split in a single stream-copy
+  pass with ffmpeg's segment muxer — the "main" video is never re-encoded,
+  and this is much faster than one invocation per segment — while each
+  localized clip (short by construction: a title card, a name plate) is
+  re-encoded to land precisely on the shared boundary, since its own file
+  generally has no keyframe there and a stream copy can only start on one.
+  `manifest.json` reports how many clips this affected via
+  `reencoded_segments`. Frame counts are pinned explicitly rather than left
+  to a duration flag: with B-frames (universal in real jw.org H.264) a
+  duration-bounded stream copy is bounded by *decode* order and drags in a
+  frame or two past the requested end — which not only duplicates frames at
+  the splice but makes the concatenated video longer than the source while
+  the per-language audio stays full-length, drifting the two apart
+  progressively (measured on real footage at roughly a second across a
+  15-segment library). mpv validation spot-checks the start, the end, and a moment
   around every splice boundary rather than decoding the whole presentation
   front to back — headless mpv decode runs at roughly 2-3x realtime here, so
   a full decode of an hour-long talk could take 20-30 minutes just to
