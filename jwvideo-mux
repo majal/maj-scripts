@@ -850,9 +850,20 @@ def has_keyframe_at(t: float, keyframes: list[float], *, tolerance: float = 0.00
     return any(abs(k - t) <= tolerance for k in keyframes)
 
 
+def video_frame_count(path: Path) -> int:
+    """Number of video frames, counted by demuxing packets rather than decoding them. One video packet
+    is one frame here, and this runs in milliseconds even on an 80-minute file, where -count_frames
+    would mean a full decode."""
+    raw = command_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+        "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path),
+    ]).strip()
+    return int(raw) if raw.isdigit() else 0
+
+
 def split_reference_into_segments(
-    video_path: Path, cutpoints: list[float], out_paths: list[Path],
-) -> None:
+    video_path: Path, cutpoints: list[float], out_paths: list[Path], *, fps: float,
+) -> list[int]:
     """Stream-copy the reference into consecutive segments in ONE ffmpeg pass, using the segment muxer.
 
     Why the segment muxer rather than N separate -ss/-t extractions: with B-frames (universal in real
@@ -869,6 +880,18 @@ def split_reference_into_segments(
     keyframes and silently rounds a non-keyframe request forward to the next one, which would put the
     real boundary somewhere other than the plan says. build_adaptive_library guarantees this by snapping
     all cutpoints to the reference's own keyframes up front; this function re-checks rather than trusting.
+
+    Each requested time is then nudged back by half a frame before being handed to the muxer, because
+    the split condition is "first keyframe strictly AFTER segment_time" -- so passing a cutpoint that is
+    itself exactly a keyframe silently skips to the NEXT one. That is not theoretical: it put a real
+    library's first boundary 120 frames (4 seconds) late, which then stole those frames from the final
+    segment. Half a frame is far less than any keyframe interval, so it can never select an earlier
+    keyframe by mistake.
+
+    Returns the per-segment frame counts actually produced. Callers should use these rather than
+    recomputing from durations: they are the authoritative tiling, and each localized clip must match
+    the count of the common segment it stands in for exactly (a rounding difference of even one frame
+    desyncs that language against the others for the rest of the presentation).
     """
     if len(out_paths) != len(cutpoints) + 1:
         raise ValueError(f"{len(cutpoints)} cutpoints need {len(cutpoints) + 1} outputs, got {len(out_paths)}")
@@ -878,7 +901,7 @@ def split_reference_into_segments(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video_path),
             "-map", "0:v:0", "-c", "copy", str(out_paths[0]),
         ], check=True)
-        return
+        return [video_frame_count(out_paths[0])]
 
     keyframes = keyframe_times(video_path)
     off_grid = [t for t in cutpoints if not has_keyframe_at(t, keyframes)]
@@ -888,13 +911,17 @@ def split_reference_into_segments(
             "would silently move these to the next keyframe, desynchronizing every language's timeline."
         )
 
+    if not fps:
+        raise ValueError(f"A frame rate is required to split {video_path.name} safely.")
+    nudge = 0.5 / fps
+    segment_times = ",".join(f"{max(0.0, t - nudge):.6f}" for t in cutpoints)
+
     with tempfile.TemporaryDirectory(prefix="jwvideo-mux-segments-") as tmp:
         pattern = str(Path(tmp) / "part%05d.mkv")
         subprocess.run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video_path),
             "-map", "0:v:0", "-c", "copy", "-f", "segment",
-            "-segment_times", ",".join(f"{t:.6f}" for t in cutpoints),
-            "-reset_timestamps", "1", pattern,
+            "-segment_times", segment_times, "-reset_timestamps", "1", pattern,
         ], check=True)
         produced = sorted(Path(tmp).glob("part*.mkv"))
         if len(produced) != len(out_paths):
@@ -904,13 +931,39 @@ def split_reference_into_segments(
         for src, dest in zip(produced, out_paths):
             shutil.move(str(src), str(dest))
 
+    counts = [video_frame_count(p) for p in out_paths]
+
+    # Verify the split landed where the plan says rather than assuming it did -- a misplaced boundary
+    # is silent, survives mpv validation (every piece still decodes fine), and only shows up as content
+    # replaying or vanishing during real playback. Compare each segment against its planned length and
+    # the whole against the source.
+    boundaries = [0.0, *cutpoints, video_frame_count(video_path) / fps]
+    expected = [round((boundaries[i + 1] - boundaries[i]) * fps) for i in range(len(out_paths))]
+    misplaced = [
+        f"{out_paths[i].name}: {counts[i]} frames, planned ~{expected[i]}"
+        for i in range(len(out_paths)) if abs(counts[i] - expected[i]) > 1
+    ]
+    total, source_total = sum(counts), video_frame_count(video_path)
+    if misplaced or total != source_total:
+        raise ValueError(
+            f"Segment split of {video_path.name} did not land on the planned boundaries "
+            f"(total {total} frames vs source {source_total})."
+            + (" Misplaced: " + "; ".join(misplaced) if misplaced else "")
+        )
+    return counts
+
 
 def extract_localized_segment(
-    video_path: Path, start: float, end: float, out_path: Path, *, fps: float,
+    video_path: Path, start: float, out_path: Path, *, frames: int, fps: float,
     video_filter: str | None = None,
 ) -> None:
     """Re-encode one language's localized clip so it covers EXACTLY the same window as the common
-    segment it replaces -- same start, same end, same frame count.
+    segment it replaces -- same start, same frame rate, same frame count.
+
+    `frames` is the frame count of that very common segment as actually produced, not a number derived
+    from the window's duration. Deriving it independently drifts by a frame or two against the real
+    split (observed on real libraries: +1 frame on one, +9 on another), and one frame of difference
+    desyncs that language against every other for the remainder of the presentation.
 
     Exactness is the whole contract, and it is not negotiable: a language's presentation is these
     segment files concatenated in EDL order, interleaving common segments (cut from the reference) with
@@ -933,7 +986,6 @@ def extract_localized_segment(
     the reference's frame rate, then take exactly that many frames) rather than left to `-t`, because
     with B-frames a duration-bounded cut is DTS-bounded and overshoots.
     """
-    frames = max(1, round((end - start) * fps))
     filters = [video_filter] if video_filter else []
     filters.append(f"fps={fps:.10f}")
     subprocess.run([
@@ -942,6 +994,13 @@ def extract_localized_segment(
         "-vf", ",".join(filters), "-frames:v", str(frames),
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", str(out_path),
     ], check=True)
+    produced = video_frame_count(out_path)
+    if produced != frames:
+        raise ValueError(
+            f"{out_path.name}: needed {frames} frames to match the common segment it replaces, but the "
+            f"source could only supply {produced}. This language's video is likely shorter than the "
+            "reference here; it cannot be spliced in without desynchronizing the presentation."
+        )
 
 
 def extract_audio_track(source_path: Path, out_path: Path):
@@ -971,12 +1030,21 @@ def sanitize_filename(name: str) -> str:
     macOS Finder renders a literal `:` in a filename as `/` for legacy HFS reasons, which reads as an
     actual path separator and is genuinely confusing.
 
-    Replaced with a space (not deleted outright) before whitespace collapses: "Title: Sub" -> "Title
+    Separator-like characters collapse through a SPACE rather than being deleted: "Title: Sub" -> "Title
     Sub" reads the same either way, but a scripture-style reference like "Romans 3:2" would silently
-    become the wrong-looking "Romans 32" under plain deletion -- collapsing through a space instead
-    keeps the two sides distinct without ever leaving the unsafe character in the name.
+    become the wrong-looking "Romans 32" under plain deletion.
+
+    The straight double quote is the exception and is deleted outright, because it wraps text rather
+    than separating it -- replacing it with a space stranded the padding inside the surrounding
+    punctuation and produced real, visibly odd folder names on this corpus:
+    `cew_E_r720P ("Completely Equipped for Every Good Work")` came out as `... ( Completely Equipped
+    for Every Good Work )`, and `(Develop the "Art of Teaching")` as `(Develop the Art of Teaching )`.
+    Nothing is lost by dropping it, since no two words are being run together. Curly quotes are
+    filesystem-safe and are deliberately left alone entirely (see the test); only the straight `"`,
+    which Windows forbids, has to go.
     """
-    for char in '<>:"/\\|?*':
+    name = name.replace('"', "")
+    for char in '<>:/\\|?*':
         name = name.replace(char, " ")
     name = re.sub(r"\s+", " ", name).strip()
     return name
@@ -1197,19 +1265,20 @@ def build_adaptive_library(
         raise ValueError(f"Reference language {reference} has no usable frame rate; cannot cut segments.")
 
     common_paths = [library_dir / f"common-{segment['index']:03d}.mkv" for segment in segments]
-    split_reference_into_segments(
-        video_paths[reference], [segment["start"] for segment in segments[1:]], common_paths,
+    common_frames = split_reference_into_segments(
+        video_paths[reference], [segment["start"] for segment in segments[1:]], common_paths, fps=ref_fps,
     )
-    for segment, common_path in zip(segments, common_paths):
+    for segment, common_path, frames in zip(segments, common_paths, common_frames):
         manifest["segments"].append({
             "index": segment["index"], "kind": "common", "file": common_path.name,
             "source_language": reference,
             "analytical_start": segment["start"], "analytical_end": segment["end"],
             "extracted_start": segment["start"], "extracted_end": segment["end"],
+            "frames": frames,
         })
 
     reencoded_segments = 0
-    for segment in segments:
+    for segment, frames in zip(segments, common_frames):
         for lang in segment["divergent_languages"]:
             lang_name = f"{lang.lower()}-{segment['index']:03d}.mkv"
             video_filter = None
@@ -1218,15 +1287,18 @@ def build_adaptive_library(
                     profiles[lang]["width"], profiles[lang]["height"],
                     ref_profile["width"], ref_profile["height"],
                 )
+            # Match the common segment's ACTUAL frame count, not one recomputed from the window's
+            # duration -- see extract_localized_segment's docstring.
             extract_localized_segment(
-                video_paths[lang], segment["start"], segment["end"], library_dir / lang_name,
-                fps=ref_fps, video_filter=video_filter,
+                video_paths[lang], segment["start"], library_dir / lang_name,
+                frames=frames, fps=ref_fps, video_filter=video_filter,
             )
             reencoded_segments += 1
             manifest["segments"].append({
                 "index": segment["index"], "kind": "localized", "file": lang_name, "source_language": lang,
                 "analytical_start": segment["start"], "analytical_end": segment["end"],
                 "extracted_start": segment["start"], "extracted_end": segment["end"],
+                "frames": frames,
             })
 
     if reencoded_segments:
