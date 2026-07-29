@@ -658,6 +658,107 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
         )
         self.assertTrue(any("different resolution than the reference" in w for w in manifest["warnings"]))
 
+    def test_normalize_mismatched_aspect_crops_and_matches_reference_resolution(self) -> None:
+        # Real-world case this models: an old 4:3 reference talk with a 16:9 localized title-card
+        # insert -- mpv visibly resizes its window at that splice unless the mismatched clip is
+        # cropped/scaled to the reference's own aspect ratio and resolution first.
+        widescreen = self.root / "widescreen_localized.mkv"
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=480x270:rate=15:duration=8",  # 16:9, vs. self.ref's 4:3
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=8",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-g", str(self.GOP), "-c:a", "aac", "-shortest", str(widescreen),
+        ], check=True)
+
+        video_paths = {"E": self.ref, "SA": widescreen}
+        variant_analysis = self.module.analyze_video_variants(video_paths)
+        self.module.apply_manual_overrides(
+            variant_analysis, {"languages": ["SA"], "differences": [{"start_s": 1.0, "end_s": 3.0, "label": "test"}]},
+        )
+        self.assertEqual(variant_analysis["comparisons"]["SA"]["classification"], "localized_candidates")
+        local_files = {
+            "E": {"video": self.ref, "audio": self.audio, "sub": self.subtitle},
+            "SA": {"video": widescreen, "audio": self.audio},
+        }
+        manifest = self.module.build_adaptive_library(
+            reference="E", video_paths=video_paths, variant_analysis=variant_analysis,
+            local_files=local_files, library_dir=self.root / "adaptive-library-aspect", min_seconds=1.5,
+            normalize_mismatched_aspect=True,
+        )
+        self.assertTrue(any("center-cropped to the reference's aspect ratio" in w for w in manifest["warnings"]))
+        self.assertFalse(any("will visibly resize" in w for w in manifest["warnings"]))
+
+        localized_files = [s["file"] for s in manifest["segments"] if s["source_language"] == "SA"]
+        self.assertTrue(localized_files, "expected at least one SA localized segment")
+        for name in localized_files:
+            profile = self.module.probe_video(self.root / "adaptive-library-aspect" / name)
+            self.assertEqual(
+                (profile["width"], profile["height"]), (self.ref_profile_dims()),
+                f"{name} should have been cropped+scaled to the reference's exact resolution",
+            )
+
+    def ref_profile_dims(self) -> tuple[int, int]:
+        profile = self.module.probe_video(self.ref)
+        return (profile["width"], profile["height"])
+
+    def test_coarse_keyframes_never_produce_overlapping_same_file_segments(self) -> None:
+        # Reproduces a real incident (2026-07-29): on footage with a keyframe interval coarse relative
+        # to segment length, independent per-segment keyframe expansion snapped a later common segment's
+        # start BACK to before an earlier common segment's (already keyframe-expanded) end -- both cut
+        # from the SAME reference file -- so playback of the reference language's own EDL (which should
+        # have zero divergence from itself) visibly rewound/skipped at the splice. Build a reference with
+        # a deliberately coarse GOP (keyframe roughly every 2.7s at 15fps) and a short (~1.6s) localized
+        # window positioned so keyframe expansion of the surrounding common segments would previously
+        # have overlapped.
+        coarse_gop = 40  # ~2.67s between keyframes at 15fps
+        ref = self.root / "coarse_ref.mkv"
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size={self.SIZE}:rate={self.RATE}:duration=6",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-g", str(coarse_gop), "-c:a", "aac", "-shortest", str(ref),
+        ], check=True)
+        localized = self.root / "coarse_localized.mkv"
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size={self.SIZE}:rate={self.RATE}:duration=6",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=6",
+            "-vf", "drawbox=x=40:y=40:w=200:h=120:color=red@1.0:t=fill:enable='between(t,1.0,2.6)'",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-g", str(coarse_gop), "-c:a", "aac", "-shortest", str(localized),
+        ], check=True)
+
+        video_paths = {"E": ref, "HV": localized}
+        variant_analysis = self.module.analyze_video_variants(video_paths)
+        self.assertEqual(variant_analysis["comparisons"]["HV"]["classification"], "localized_candidates")
+
+        local_files = {"E": {"video": ref, "audio": self.audio}, "HV": {"video": localized}}
+        library_dir = self.root / "coarse-adaptive-library"
+        manifest = self.module.build_adaptive_library(
+            reference="E", video_paths=video_paths, variant_analysis=variant_analysis,
+            local_files=local_files, library_dir=library_dir, min_seconds=1.5,
+        )
+
+        self.assertGreater(
+            manifest["reencoded_segments"], 0,
+            "this fixture is specifically constructed to need the overlap-prevention fallback -- if "
+            "nothing triggered it, the fixture (or the fix) needs a second look",
+        )
+
+        by_file: dict[str, list[dict]] = {}
+        for seg in sorted(manifest["segments"], key=lambda s: s["index"]):
+            by_file.setdefault(seg["source_language"], []).append(seg)
+        for lang, segs in by_file.items():
+            for prev, cur in zip(segs, segs[1:]):
+                self.assertGreaterEqual(
+                    cur["extracted_start"], prev["extracted_end"] - 1e-6,
+                    f"{lang}: segment {cur['index']} ({cur['file']}) starts at {cur['extracted_start']} "
+                    f"before the previous same-file segment {prev['file']} ends at {prev['extracted_end']} "
+                    "-- this is exactly the overlap that caused visible rewind/skip during real playback",
+                )
+
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
 class CleanupOnlyDeletesUsedFilesTest(unittest.TestCase):
@@ -833,6 +934,62 @@ class VariantFlagsNeverFallThroughToMuxTest(unittest.TestCase):
             self.assertNotEqual(json_start, -1, result.stdout)
             analysis = json.loads(result.stdout[json_start:])
             self.assertIn("TG", analysis["comparisons"])
+
+
+@unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
+class AdaptiveLibraryFallsBackWhenNothingLocalizedTest(unittest.TestCase):
+    """Real-world case: several SCE videos (e.g. a plain workshop clip with no per-language visual
+    differences at all) have nothing for --adaptive-mpv-library to actually split -- every language is
+    exactly_same/visually_same. Building a whole EDL library (manifest, per-language audio/subs/EDL/
+    launchers) for a presentation that's really just one video is needless ceremony. In that case
+    jwvideo-mux should fall back to an ordinary single-file mux with one shared video track, written
+    directly to the output directory -- no library subfolder, no EDL, no launchers."""
+
+    JWVIDEOMUX = str(Path(__file__).resolve().parents[1] / "jwvideo-mux")
+
+    def test_no_localized_differences_produces_single_mkv_not_a_library(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="jwvideo-mux-fallback-") as tmp:
+            root = Path(tmp)
+            e_dir, tg_dir = root / "E", root / "TG"
+            e_dir.mkdir()
+            tg_dir.mkdir()
+
+            def make_clip(path: Path, *, crf: int) -> None:
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=4",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
+                ], check=True)
+
+            anchor = e_dir / "prefix_E_test.mp4"
+            make_clip(anchor, crf=20)
+            # Different encode (crf), same visual content -- this is exactly "visually_same," the
+            # ordinary case of the same footage encoded twice, not a real localized difference.
+            make_clip(tg_dir / "prefix_TG_test.mp4", crf=28)
+
+            result = subprocess.run(
+                [sys.executable, self.JWVIDEOMUX, str(anchor), "-v", "E,TG", "-a", "E,TG", "-s", "NONE",
+                 "-o", "..", "--adaptive-mpv-library", "--force"],
+                cwd=e_dir, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("nothing to adapt", result.stdout)
+
+            no_library_dirs = [p for p in root.iterdir() if p.is_dir() and p.name not in ("E", "TG")]
+            self.assertEqual(no_library_dirs, [], f"expected no library subfolder, found: {no_library_dirs}")
+
+            mkvs = list(root.glob("*.mkv"))
+            self.assertEqual(len(mkvs), 1, f"expected exactly one output MKV in {root}, found: {mkvs}")
+
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index",
+                 "-of", "csv=p=0", str(mkvs[0])],
+                capture_output=True, text=True, check=True,
+            )
+            video_stream_count = len([l for l in probe.stdout.splitlines() if l.strip()])
+            self.assertEqual(video_stream_count, 1, "expected exactly one shared video track, not one per language")
 
 
 if __name__ == "__main__":

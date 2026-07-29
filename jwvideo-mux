@@ -831,26 +831,80 @@ def plan_adaptive_segments(intervals_by_lang: dict[str, list[tuple[float, float]
     return segments
 
 
+def aspect_normalize_filter(src_width: int, src_height: int, ref_width: int, ref_height: int) -> str:
+    """Center-crop src to ref's aspect ratio, then scale to ref's exact pixel dimensions, so a
+    localized clip splices in without mpv visibly resizing its window. Crops width when the source is
+    relatively wider than the reference (e.g. a 16:9 insert against a 4:3 reference), or height when
+    the source is relatively taller -- either way the fuller of the two source dimensions is kept and
+    only the excess on the other axis is trimmed, matching "clip the wide one down," not stretched."""
+    return (
+        f"crop='if(gt(iw/ih,{ref_width}/{ref_height}),ih*{ref_width}/{ref_height},iw)'"
+        f":'if(gt(iw/ih,{ref_width}/{ref_height}),ih,iw*{ref_height}/{ref_width})',"
+        f"scale={ref_width}:{ref_height}:flags=lanczos,setsar=1"
+    )
+
+
 def extract_video_segment(
     video_path: Path, start: float, end: float, out_path: Path, *, keyframes: list[float] | None = None,
+    min_start: float = 0.0, video_filter: str | None = None,
 ) -> tuple[float, float]:
-    """Stream-copy a video-only slice, snapping to this file's own keyframes first so the copy is valid.
-    Returns the actual (snapped) start/end used, for manifest bookkeeping.
+    """Extract a video-only slice. Two extraction modes:
+
+    - Stream-copy (the default, fast/lossless path): snaps outward to this file's own keyframes so the
+      copy is valid, since a mid-GOP stream-copy split produces a broken file.
+    - Precise re-encode: used whenever keyframe expansion would overlap the immediately preceding
+      segment already extracted from this same file (min_start), or whenever a video_filter is given
+      (aspect-ratio normalization -- cropping/scaling requires decoding, so it can never be a stream
+      copy). Cuts at the EXACT requested start/end, no keyframe snapping needed since re-encoding can
+      start at any frame.
+
+    Returns the actual (start, end) used, for manifest bookkeeping.
 
     Pass keyframes in when extracting many segments from the same file (as build_adaptive_library does):
     scanning a long video's full keyframe list isn't cheap (~10s for a 79-minute file), and it never
     changes within one run, so computing it once per source file instead of once per segment matters --
     it was previously the single largest cost in building a library for a long talk.
+
+    min_start guards against a real, confirmed incident: keyframe snapping ALWAYS expands a segment
+    outward (see snap_interval_to_keyframes), which is safe in isolation but not when two adjacent
+    segments from the SAME source file (e.g. two consecutive common-*.mkv slices of the reference, or
+    two consecutive localized clips for one language) both expand independently -- on footage with a
+    coarse keyframe interval relative to segment length, this can snap a later segment's start BEFORE
+    an earlier segment's already-extracted end, so the two files overlap and playback visibly rewinds/
+    skips at that splice (confirmed live against a real SCE clip's English presentation, 2026-07-29,
+    where an ~4s segment snapped back to the start of the PREVIOUS ~1s segment). Falling back to a
+    precise re-encode clamped to start no earlier than min_start guarantees no overlap: the earlier
+    segment's own expansion already covers everything up to min_start with identical underlying source
+    frames (there's no OTHER content to lose there -- it's the same file), so trimming this segment's
+    start up to min_start when needed only ever removes an already-shown duplicate, never new content.
     """
-    snapped_start, snapped_end = snap_interval_to_keyframes(start, end, keyframes if keyframes is not None else keyframe_times(video_path))
-    duration = max(snapped_end - snapped_start, 0.0)
+    if video_filter is None:
+        snapped_start, snapped_end = snap_interval_to_keyframes(
+            start, end, keyframes if keyframes is not None else keyframe_times(video_path),
+        )
+        if snapped_start >= min_start:
+            duration = max(snapped_end - snapped_start, 0.0)
+            cmd = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", f"{snapped_start:.6f}", "-i", str(video_path), "-t", f"{duration:.6f}",
+                "-map", "0:v:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(out_path),
+            ]
+            subprocess.run(cmd, check=True)
+            return snapped_start, snapped_end
+        # Keyframe expansion would overlap the previous segment from this file -- fall through to a
+        # precise re-encode, clamped so it can never start before that segment's actual end.
+
+    actual_start = max(start, min_start)
+    duration = max(end - actual_start, 0.0)
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", f"{snapped_start:.6f}", "-i", str(video_path), "-t", f"{duration:.6f}",
-        "-map", "0:v:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(out_path),
+        "-ss", f"{actual_start:.6f}", "-i", str(video_path), "-t", f"{duration:.6f}", "-map", "0:v:0",
     ]
+    if video_filter:
+        cmd += ["-vf", video_filter]
+    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", str(out_path)]
     subprocess.run(cmd, check=True)
-    return snapped_start, snapped_end
+    return actual_start, end
 
 
 def extract_audio_track(source_path: Path, out_path: Path):
@@ -1006,6 +1060,7 @@ def friendly_video_label(name: str) -> str:
 def build_adaptive_library(
     *, reference: str, video_paths: dict[str, Path], variant_analysis: dict,
     local_files: dict, library_dir: Path, min_seconds: float, launchers_at_unit_root: bool = False,
+    normalize_mismatched_aspect: bool = False,
 ) -> dict:
     """Materialize the adaptive mpv library: one shared common video-only file per fully-common stretch,
     one localized video-only file per language wherever it was confirmed to actually diverge, full
@@ -1061,13 +1116,22 @@ def build_adaptive_library(
             f"localized segments cut) rather than guessed either way -- review manually if you expect a "
             f"real difference: {', '.join(review_recommended)}"
         )
-    if mismatched_resolution:
+    if mismatched_resolution and normalize_mismatched_aspect:
+        manifest["warnings"].append(
+            "These languages' localized segments were at a different resolution than the reference "
+            "(typically a --manual-overrides entry confirming real content on a technically-incompatible "
+            "pair, e.g. a pillarboxed remaster) -- center-cropped to the reference's aspect ratio and "
+            f"re-encoded to its exact resolution so there's no mid-presentation resize: {', '.join(mismatched_resolution)}"
+        )
+    elif mismatched_resolution:
         manifest["warnings"].append(
             "These languages have localized segments at a different resolution than the reference "
             "(typically a --manual-overrides entry confirming real content on a technically-incompatible "
             "pair, e.g. a pillarboxed remaster) -- mpv plays straight through a mid-presentation "
-            "resolution change without erroring, but the video window will visibly resize at each "
-            f"such splice: {', '.join(mismatched_resolution)}"
+            "resolution change without erroring, but the video window will visibly resize at each such "
+            f"splice: {', '.join(mismatched_resolution)}. Pass --normalize-mismatched-aspect to "
+            "center-crop and re-encode just these languages' localized clips to the reference's aspect/"
+            "resolution instead."
         )
 
     # Each source file's keyframe list is scanned once here and reused for every segment cut from it --
@@ -1080,13 +1144,25 @@ def build_adaptive_library(
         if lang not in keyframe_cache:
             keyframe_cache[lang] = keyframe_times(video_paths[lang])
 
+    # Tracks, per actual source file, the end of the last segment already extracted from it -- passed as
+    # min_start so extract_video_segment can detect when keyframe expansion would overlap that segment
+    # and fall back to a precise re-encode instead (see extract_video_segment's docstring for the real
+    # incident this fixes: independent per-segment keyframe snapping can expand a later segment's start
+    # to BEFORE an earlier segment's end on coarse-keyframe footage, producing a visible rewind/skip).
+    last_extracted_end: dict[Path, float] = {}
+    reencoded_segments = 0
     max_drift = 0.0
     for segment in segments:
         common_name = f"common-{segment['index']:03d}.mkv"
         common_path = library_dir / common_name
+        ref_path = video_paths[reference]
         actual_start, actual_end = extract_video_segment(
-            video_paths[reference], segment["start"], segment["end"], common_path, keyframes=keyframe_cache[reference],
+            ref_path, segment["start"], segment["end"], common_path, keyframes=keyframe_cache[reference],
+            min_start=last_extracted_end.get(ref_path, 0.0),
         )
+        if actual_start > segment["start"] + 1e-6 or actual_end < segment["end"] - 1e-6:
+            reencoded_segments += 1
+        last_extracted_end[ref_path] = actual_end
         drift = max(abs(actual_start - segment["start"]), abs(actual_end - segment["end"]))
         max_drift = max(max_drift, drift)
         manifest["segments"].append({
@@ -1097,9 +1173,20 @@ def build_adaptive_library(
         for lang in segment["divergent_languages"]:
             lang_name = f"{lang.lower()}-{segment['index']:03d}.mkv"
             lang_path = library_dir / lang_name
+            lang_video_path = video_paths[lang]
+            video_filter = None
+            if normalize_mismatched_aspect and lang in mismatched_resolution:
+                video_filter = aspect_normalize_filter(
+                    profiles[lang]["width"], profiles[lang]["height"],
+                    ref_profile["width"], ref_profile["height"],
+                )
             lang_start, lang_end = extract_video_segment(
-                video_paths[lang], segment["start"], segment["end"], lang_path, keyframes=keyframe_cache[lang],
+                lang_video_path, segment["start"], segment["end"], lang_path, keyframes=keyframe_cache[lang],
+                min_start=last_extracted_end.get(lang_video_path, 0.0), video_filter=video_filter,
             )
+            if lang_start > segment["start"] + 1e-6 or lang_end < segment["end"] - 1e-6 or video_filter:
+                reencoded_segments += 1
+            last_extracted_end[lang_video_path] = lang_end
             drift = max(abs(lang_start - segment["start"]), abs(lang_end - segment["end"]))
             max_drift = max(max_drift, drift)
             manifest["segments"].append({
@@ -1114,7 +1201,14 @@ def build_adaptive_library(
             f"the largest resulting boundary drift was {max_drift:.2f}s. Review the affected splice points "
             f"before trusting the presentations -- see build_adaptive_library's docstring."
         )
+    if reencoded_segments:
+        manifest["warnings"].append(
+            f"{reencoded_segments} segment(s) were precisely re-encoded (exact cut, not stream-copied) "
+            "instead of keyframe-snapped -- either to prevent overlapping the previous segment from the "
+            "same source file (see extract_video_segment's docstring), or for aspect normalization."
+        )
     manifest["max_boundary_drift_seconds"] = max_drift
+    manifest["reencoded_segments"] = reencoded_segments
     duration_by_file = {seg["file"]: seg["extracted_end"] - seg["extracted_start"] for seg in manifest["segments"]}
 
     segment_durations_by_lang = {}
@@ -1213,8 +1307,9 @@ def main():
     parser.add_argument("--manual-overrides", type=Path, help="TOML file (ground-truth.toml schema: talks -> videos -> differences, with an optional fallback_ok flag per difference) of human-confirmed evidence for local-file-mode SCE-layout input; always wins over automatic detection for the languages/windows it covers. Matched by exact talk-folder-name + anchor-filename, so reuse one file across a whole library.")
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where SSIM+PSNR both verified comparisons are visually_same or exactly_same (asks for confirmation unless --force)")
-    parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media")
-    parser.add_argument("--launchers-in-unit-root", action="store_true", help="With --adaptive-mpv-library, write the Play <Language>.command launchers into the output directory (one level up from the library folder) instead of inside it, so every video's launchers for a unit are visible without opening each video's own subfolder. Launcher names are disambiguated with the video's own title since multiple videos in one unit would otherwise collide on plain 'Play <Language>.command'.")
+    parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media. If analysis finds no real localized differences for any language, falls back to an ordinary single-file mux (one shared video track) written directly to the output directory instead of building an unnecessary EDL library.")
+    parser.add_argument("--launchers-in-video-folder", action="store_true", help="With --adaptive-mpv-library, write the Play <Language>.command launchers inside the per-video library folder (the old default) instead of the output directory (the unit root). Default is the unit root, one level up, so every video's launchers for a unit are visible without opening each video's own subfolder; launcher names there are disambiguated with the video's own title since multiple videos in one unit would otherwise collide on plain 'Play <Language>.command'.")
+    parser.add_argument("--normalize-mismatched-aspect", action="store_true", help="With --adaptive-mpv-library, when a language's localized clips are a different resolution/aspect ratio than the reference (e.g. a 16:9 insert against a 4:3 reference), center-crop and re-encode just those short localized clips to the reference's exact aspect ratio and resolution so mpv never visibly resizes mid-presentation. The shared common/reference segments are never re-encoded -- only the mismatched language's own short localized clips are.")
 
     args = parser.parse_args()
     check_dependencies()
@@ -1429,7 +1524,6 @@ def main():
             return
         if args.adaptive_mpv_library:
             reference = variant_analysis["reference_language"]
-            library_dir = out_dir / f"{sanitize_filename(video_paths[reference].stem)}_adaptive-library"
             localized = sorted(
                 lang for lang, record in variant_analysis["comparisons"].items()
                 if record["classification"] == "localized_candidates"
@@ -1438,27 +1532,39 @@ def main():
                 lang for lang, record in variant_analysis["comparisons"].items()
                 if record["classification"] == "review_recommended"
             )
-            color_print(f"\n>> Adaptive library plan: reference={reference}, localized={localized or 'none'}, review_recommended={review or 'none'}", "34")
-            color_print(f"  Output directory: {library_dir}", "34")
-            if not args.force:
-                ans = input("Write the adaptive mpv library now? Source files are never modified or deleted. [y/N] ")
-                if ans.lower() not in ("y", "yes"):
-                    color_print("Aborting adaptive library export.", "31")
-                    return
-            manifest = build_adaptive_library(
-                reference=reference, video_paths=video_paths, variant_analysis=variant_analysis,
-                local_files=local_files, library_dir=library_dir, min_seconds=args.variant_min_seconds,
-                launchers_at_unit_root=args.launchers_in_unit_root,
-            )
-            for warning in manifest["warnings"]:
-                color_print(f"  ! {warning}", "33")
-            failed = [lang for lang, v in manifest["validation"].items() if v.get("ok") is False]
-            if failed:
-                color_print(f"  mpv validation FAILED for: {', '.join(failed)} -- inspect manifest.json before use.", "31")
+            if not localized:
+                color_print(
+                    f"\n>> No corroborated localized differences found (reference={reference}, "
+                    f"review_recommended={review or 'none'}) -- nothing to adapt, so this is really just "
+                    "one video. Falling back to an ordinary single-file mux with one shared video track "
+                    "instead of building an EDL library.", "34",
+                )
+                args.dedupe_visually_same = True
+                # Fall through to the dedupe_visually_same / classic-mux code below (no early return).
             else:
-                color_print("  mpv validation passed for every language presentation.", "32")
-            color_print(f"✓ Adaptive library written to {library_dir}", "32")
-            return
+                library_dir = out_dir / sanitize_filename(video_paths[reference].stem)
+                color_print(f"\n>> Adaptive library plan: reference={reference}, localized={localized}, review_recommended={review or 'none'}", "34")
+                color_print(f"  Output directory: {library_dir}", "34")
+                if not args.force:
+                    ans = input("Write the adaptive mpv library now? Source files are never modified or deleted. [y/N] ")
+                    if ans.lower() not in ("y", "yes"):
+                        color_print("Aborting adaptive library export.", "31")
+                        return
+                manifest = build_adaptive_library(
+                    reference=reference, video_paths=video_paths, variant_analysis=variant_analysis,
+                    local_files=local_files, library_dir=library_dir, min_seconds=args.variant_min_seconds,
+                    launchers_at_unit_root=not args.launchers_in_video_folder,
+                    normalize_mismatched_aspect=args.normalize_mismatched_aspect,
+                )
+                for warning in manifest["warnings"]:
+                    color_print(f"  ! {warning}", "33")
+                failed = [lang for lang, v in manifest["validation"].items() if v.get("ok") is False]
+                if failed:
+                    color_print(f"  mpv validation FAILED for: {', '.join(failed)} -- inspect manifest.json before use.", "31")
+                else:
+                    color_print("  mpv validation passed for every language presentation.", "32")
+                color_print(f"✓ Adaptive library written to {library_dir}", "32")
+                return
         if args.dedupe_identical_video:
             duplicate_langs = {
                 lang

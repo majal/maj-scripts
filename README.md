@@ -272,30 +272,54 @@ Use a pre-downloaded local file:
   and subtitles, a per-language mpv EDL presentation, and a `manifest.json`
   tying it together (source hashes, tool versions, cut points, and any mpv
   validation results). It never touches or deletes source files and always
-  asks for confirmation before writing (skip with `--force`). Play a language
-  with e.g. `mpv presentation-tg.edl --audio-file=audio-tg.mka
-  --sub-file=subtitles-tg.srt`, or just double-click the generated
-  `Play <Language>.command` file in the library folder — no terminal needed.
-  The library folder itself, and every file in it, has any `:` (and other
-  characters Windows/NTFS forbids) stripped from its name even if the source
-  video's own filename has one — macOS Finder renders a literal `:` in a
-  filename as `/`, which reads as a real path separator and is genuinely
-  confusing to run into. Segment boundaries are independently snapped
-  to real keyframes per source file (never mid-GOP), so a splice can drift by
-  a small amount between two files at the same nominal cut point; the
-  manifest records both the analytical and actual cut times and warns if any
-  splice's drift is large enough to warrant a manual look before relying on
-  it. mpv validation spot-checks the start, the end, and a moment around
-  every splice boundary rather than decoding the whole presentation front to
-  back — headless mpv decode runs at roughly 2-3x realtime here, so a full
-  decode of an hour-long talk could take 20-30 minutes just to validate;
-  spot-checking catches the failure mode that actually matters (a bad
-  splice) in a few seconds per checkpoint regardless of runtime. If a
+  asks for confirmation before writing (skip with `--force`). If analysis
+  finds no corroborated localized differences for any language, there's
+  nothing to adapt, so it falls back automatically to an ordinary single-file
+  mux with one shared video track (like `--dedupe-visually-same`) written
+  directly to the output directory instead of building an unnecessary EDL
+  library folder. Play a language with e.g. `mpv presentation-tg.edl
+  --audio-file=audio-tg.mka --sub-file=subtitles-tg.srt`, or just
+  double-click the generated `Play <Language>.command` file — no terminal
+  needed. That launcher lands in the *output directory* (the unit root, one
+  level up from the library folder) by default, named
+  `Play <Language> - <video title>.command` so multiple videos in the same
+  unit don't collide; pass `--launchers-in-video-folder` to put it back
+  inside the library folder instead (the old default). The library folder
+  itself is just the video's own sanitized name — no `_adaptive-library`
+  suffix. It, and every file in it, has any `:` (and other characters
+  Windows/NTFS forbids) stripped from its name even if the source video's own
+  filename has one — macOS Finder renders a literal `:` in a filename as `/`,
+  which reads as a real path separator and is genuinely confusing to run
+  into. Segment boundaries are independently snapped to real keyframes per
+  source file (never mid-GOP), so a splice can drift by a small amount
+  between two files at the same nominal cut point; the manifest records both
+  the analytical and actual cut times and warns if any splice's drift is
+  large enough to warrant a manual look before relying on it. When keyframe
+  expansion would overlap the immediately preceding segment already
+  extracted from the same source file — confirmed against real footage with
+  a coarse keyframe interval, where it produced a visible rewind/skip during
+  playback — that segment is precisely re-encoded at its exact (unsnapped)
+  boundary instead, which by construction can never overlap a neighbor;
+  `manifest.json`'s `reencoded_segments` count and a warning note when this
+  happened. mpv validation spot-checks the start, the end, and a moment
+  around every splice boundary rather than decoding the whole presentation
+  front to back — headless mpv decode runs at roughly 2-3x realtime here, so
+  a full decode of an hour-long talk could take 20-30 minutes just to
+  validate; spot-checking catches the failure mode that actually matters (a
+  bad splice) in a few seconds per checkpoint regardless of runtime. If a
   `--manual-overrides` entry confirms a real difference on a pair that's
   otherwise a different resolution (e.g. a pillarboxed remaster), the
   library still builds — mpv plays through a mid-presentation resolution
-  change without erroring — but the manifest warns that the video window
-  will visibly resize at that splice.
+  change without erroring, but by default the manifest warns that the video
+  window will visibly resize at that splice. Pass
+  `--normalize-mismatched-aspect` to avoid that: it center-crops and
+  re-encodes just that language's short localized clips to the reference's
+  exact aspect ratio and resolution (e.g. a 16:9 insert cropped down to a 4:3
+  reference), so mpv never has to resize mid-presentation. The shared
+  common/reference segments are never touched by this — only the
+  short, already-localized clips of the mismatched language(s) are
+  re-encoded, at a balanced `libx264 -crf 20` (not stream-copied, since
+  cropping/scaling requires decoding).
 - `--scan-small-regions` (with `--region-count`, default `8`) additionally
   splits the frame into horizontal bands and compares each one, because a
   small graphic — a name plate, a lower-third caption — can be too small to
