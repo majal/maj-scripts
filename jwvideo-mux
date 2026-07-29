@@ -844,67 +844,104 @@ def aspect_normalize_filter(src_width: int, src_height: int, ref_width: int, ref
     )
 
 
-def extract_video_segment(
-    video_path: Path, start: float, end: float, out_path: Path, *, keyframes: list[float] | None = None,
-    min_start: float = 0.0, video_filter: str | None = None,
-) -> tuple[float, float]:
-    """Extract a video-only slice. Two extraction modes:
+def has_keyframe_at(t: float, keyframes: list[float], *, tolerance: float = 0.002) -> bool:
+    """Whether this file has a keyframe essentially exactly at t -- i.e. whether a stream copy can
+    start there without landing mid-GOP."""
+    return any(abs(k - t) <= tolerance for k in keyframes)
 
-    - Stream-copy (the default, fast/lossless path): snaps outward to this file's own keyframes so the
-      copy is valid, since a mid-GOP stream-copy split produces a broken file.
-    - Precise re-encode: used whenever keyframe expansion would overlap the immediately preceding
-      segment already extracted from this same file (min_start), or whenever a video_filter is given
-      (aspect-ratio normalization -- cropping/scaling requires decoding, so it can never be a stream
-      copy). Cuts at the EXACT requested start/end, no keyframe snapping needed since re-encoding can
-      start at any frame.
 
-    Returns the actual (start, end) used, for manifest bookkeeping.
+def split_reference_into_segments(
+    video_path: Path, cutpoints: list[float], out_paths: list[Path],
+) -> None:
+    """Stream-copy the reference into consecutive segments in ONE ffmpeg pass, using the segment muxer.
 
-    Pass keyframes in when extracting many segments from the same file (as build_adaptive_library does):
-    scanning a long video's full keyframe list isn't cheap (~10s for a 79-minute file), and it never
-    changes within one run, so computing it once per source file instead of once per segment matters --
-    it was previously the single largest cost in building a library for a long talk.
+    Why the segment muxer rather than N separate -ss/-t extractions: with B-frames (universal in real
+    jw.org H.264), `-t`/`-to` bound by DTS, not PTS, so a copy reliably drags in 1-2 trailing frames
+    past the requested end. Each such overshoot is a frame or two of duplicated content at that splice,
+    and -- worse -- it makes the concatenated video longer than the source while the per-language audio
+    stays full-length and untouched, so the two progressively desync (measured on real footage: ~2
+    extra frames per splice; a 15-segment library would drift the better part of a second by the end).
+    The segment muxer splits at packet boundaries with correct B-frame handling, so the pieces tile the
+    source exactly: verified frame-for-frame on a real clip (180 + 2123 == 2303 source frames, no
+    duplicates, no drops).
 
-    min_start guards against a real, confirmed incident: keyframe snapping ALWAYS expands a segment
-    outward (see snap_interval_to_keyframes), which is safe in isolation but not when two adjacent
-    segments from the SAME source file (e.g. two consecutive common-*.mkv slices of the reference, or
-    two consecutive localized clips for one language) both expand independently -- on footage with a
-    coarse keyframe interval relative to segment length, this can snap a later segment's start BEFORE
-    an earlier segment's already-extracted end, so the two files overlap and playback visibly rewinds/
-    skips at that splice (confirmed live against a real SCE clip's English presentation, 2026-07-29,
-    where an ~4s segment snapped back to the start of the PREVIOUS ~1s segment). Falling back to a
-    precise re-encode clamped to start no earlier than min_start guarantees no overlap: the earlier
-    segment's own expansion already covers everything up to min_start with identical underlying source
-    frames (there's no OTHER content to lose there -- it's the same file), so trimming this segment's
-    start up to min_start when needed only ever removes an already-shown duplicate, never new content.
+    Every cutpoint MUST be a keyframe in this file. In stream-copy mode the muxer can only split at
+    keyframes and silently rounds a non-keyframe request forward to the next one, which would put the
+    real boundary somewhere other than the plan says. build_adaptive_library guarantees this by snapping
+    all cutpoints to the reference's own keyframes up front; this function re-checks rather than trusting.
     """
-    if video_filter is None:
-        snapped_start, snapped_end = snap_interval_to_keyframes(
-            start, end, keyframes if keyframes is not None else keyframe_times(video_path),
-        )
-        if snapped_start >= min_start:
-            duration = max(snapped_end - snapped_start, 0.0)
-            cmd = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", f"{snapped_start:.6f}", "-i", str(video_path), "-t", f"{duration:.6f}",
-                "-map", "0:v:0", "-c", "copy", "-avoid_negative_ts", "make_zero", str(out_path),
-            ]
-            subprocess.run(cmd, check=True)
-            return snapped_start, snapped_end
-        # Keyframe expansion would overlap the previous segment from this file -- fall through to a
-        # precise re-encode, clamped so it can never start before that segment's actual end.
+    if len(out_paths) != len(cutpoints) + 1:
+        raise ValueError(f"{len(cutpoints)} cutpoints need {len(cutpoints) + 1} outputs, got {len(out_paths)}")
 
-    actual_start = max(start, min_start)
-    duration = max(end - actual_start, 0.0)
-    cmd = [
+    if not cutpoints:
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video_path),
+            "-map", "0:v:0", "-c", "copy", str(out_paths[0]),
+        ], check=True)
+        return
+
+    keyframes = keyframe_times(video_path)
+    off_grid = [t for t in cutpoints if not has_keyframe_at(t, keyframes)]
+    if off_grid:
+        raise ValueError(
+            f"Reference cutpoints not on keyframes of {video_path.name}: {off_grid}. A stream-copy split "
+            "would silently move these to the next keyframe, desynchronizing every language's timeline."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="jwvideo-mux-segments-") as tmp:
+        pattern = str(Path(tmp) / "part%05d.mkv")
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video_path),
+            "-map", "0:v:0", "-c", "copy", "-f", "segment",
+            "-segment_times", ",".join(f"{t:.6f}" for t in cutpoints),
+            "-reset_timestamps", "1", pattern,
+        ], check=True)
+        produced = sorted(Path(tmp).glob("part*.mkv"))
+        if len(produced) != len(out_paths):
+            raise ValueError(
+                f"Expected {len(out_paths)} segments from {video_path.name}, ffmpeg produced {len(produced)}."
+            )
+        for src, dest in zip(produced, out_paths):
+            shutil.move(str(src), str(dest))
+
+
+def extract_localized_segment(
+    video_path: Path, start: float, end: float, out_path: Path, *, fps: float,
+    video_filter: str | None = None,
+) -> None:
+    """Re-encode one language's localized clip so it covers EXACTLY the same window as the common
+    segment it replaces -- same start, same end, same frame count.
+
+    Exactness is the whole contract, and it is not negotiable: a language's presentation is these
+    segment files concatenated in EDL order, interleaving common segments (cut from the reference) with
+    that language's own localized clips (cut from a DIFFERENT file). Cover even slightly more than the
+    planned window and the extra replays at the splice; cover less and content is skipped. Two real
+    incidents came from violating this (2026-07-29):
+      1. Adjacent segments from the same file each keyframe-expanded outward and overlapped each other.
+      2. (The one that survived the first fix.) A localized clip keyframe-expanded from its planned
+         [1.0, 4.97] out to [0.0, 6.01] -- its own file's nearest keyframes -- while the common segments
+         around it stayed at their planned bounds. Playing TG's presentation therefore ran
+         0->2.0 (common), then 0->6.01 (localized: replaying 0-2.0), then 4.97->76.84 (common:
+         replaying 4.97-6.01). Per-file overlap tracking cannot catch this, because the overlapping
+         segments come from different files; only exact cuts can.
+
+    Always a re-encode, never a stream copy: the shared cut points are the REFERENCE's keyframes, which
+    this file generally has no keyframe at, and a copy starting mid-GOP decodes as garbage. That's an
+    acceptable and bounded cost -- localized clips are short by construction (a title card, a name
+    plate), while the reference's own common segments, which carry the bulk of the runtime, are always
+    stream-copied by split_reference_into_segments. The frame count is pinned explicitly (normalize to
+    the reference's frame rate, then take exactly that many frames) rather than left to `-t`, because
+    with B-frames a duration-bounded cut is DTS-bounded and overshoots.
+    """
+    frames = max(1, round((end - start) * fps))
+    filters = [video_filter] if video_filter else []
+    filters.append(f"fps={fps:.10f}")
+    subprocess.run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", f"{actual_start:.6f}", "-i", str(video_path), "-t", f"{duration:.6f}", "-map", "0:v:0",
-    ]
-    if video_filter:
-        cmd += ["-vf", video_filter]
-    cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", str(out_path)]
-    subprocess.run(cmd, check=True)
-    return actual_start, end
+        "-ss", f"{start:.6f}", "-i", str(video_path), "-map", "0:v:0",
+        "-vf", ",".join(filters), "-frames:v", str(frames),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", str(out_path),
+    ], check=True)
 
 
 def extract_audio_track(source_path: Path, out_path: Path):
@@ -1097,6 +1134,19 @@ def build_adaptive_library(
         if (profiles[lang]["width"], profiles[lang]["height"]) != (ref_profile["width"], ref_profile["height"])
     )
 
+    # Snap every localized window outward to the REFERENCE file's own keyframes ONCE, here, before
+    # planning segments, so that every resulting cut point is a reference keyframe shared by the whole
+    # plan. That is what lets the reference be split by stream copy (which can only cut on keyframes)
+    # while every language's timeline still agrees on exactly where the boundaries are. Snapping
+    # outward rather than to the nearest keyframe means a confirmed difference is never clipped short.
+    ref_keyframes = keyframe_times(video_paths[reference])
+    intervals_by_lang = {
+        lang: merge_intervals([
+            snap_interval_to_keyframes(start, end, ref_keyframes) for start, end in intervals
+        ])
+        for lang, intervals in intervals_by_lang.items()
+    }
+
     segments = plan_adaptive_segments(intervals_by_lang, total_duration)
 
     manifest = {
@@ -1134,80 +1184,59 @@ def build_adaptive_library(
             "resolution instead."
         )
 
-    # Each source file's keyframe list is scanned once here and reused for every segment cut from it --
-    # a full scan of a long talk isn't cheap (~10s for a 79-minute file) and it never changes within one
-    # run, so recomputing it per segment (as a naive per-call keyframe_times() would) previously dominated
-    # build time for long videos with many segments (a 79-minute, 97-segment library spent over half its
-    # total runtime re-scanning the same handful of files' keyframes from scratch, over and over).
-    keyframe_cache = {reference: keyframe_times(video_paths[reference])}
-    for lang in intervals_by_lang:
-        if lang not in keyframe_cache:
-            keyframe_cache[lang] = keyframe_times(video_paths[lang])
+    # Every segment covers EXACTLY its planned window -- see split_reference_into_segments and
+    # extract_localized_segment for why that is mandatory rather than merely tidy, and for the two real
+    # replay incidents that came from violating it. The plan IS the result, so there is no per-file
+    # overlap bookkeeping and no boundary drift to report.
+    #
+    # The whole reference is split in ONE stream-copy pass (the "main" video is never re-encoded, and
+    # this is also far faster than one ffmpeg invocation per segment); each language's localized clips
+    # are re-encoded individually to land on the same shared, reference-aligned boundaries.
+    ref_fps = fps_as_float(ref_profile.get("fps")) or 0.0
+    if not ref_fps:
+        raise ValueError(f"Reference language {reference} has no usable frame rate; cannot cut segments.")
 
-    # Tracks, per actual source file, the end of the last segment already extracted from it -- passed as
-    # min_start so extract_video_segment can detect when keyframe expansion would overlap that segment
-    # and fall back to a precise re-encode instead (see extract_video_segment's docstring for the real
-    # incident this fixes: independent per-segment keyframe snapping can expand a later segment's start
-    # to BEFORE an earlier segment's end on coarse-keyframe footage, producing a visible rewind/skip).
-    last_extracted_end: dict[Path, float] = {}
-    reencoded_segments = 0
-    max_drift = 0.0
-    for segment in segments:
-        common_name = f"common-{segment['index']:03d}.mkv"
-        common_path = library_dir / common_name
-        ref_path = video_paths[reference]
-        actual_start, actual_end = extract_video_segment(
-            ref_path, segment["start"], segment["end"], common_path, keyframes=keyframe_cache[reference],
-            min_start=last_extracted_end.get(ref_path, 0.0),
-        )
-        if actual_start > segment["start"] + 1e-6 or actual_end < segment["end"] - 1e-6:
-            reencoded_segments += 1
-        last_extracted_end[ref_path] = actual_end
-        drift = max(abs(actual_start - segment["start"]), abs(actual_end - segment["end"]))
-        max_drift = max(max_drift, drift)
+    common_paths = [library_dir / f"common-{segment['index']:03d}.mkv" for segment in segments]
+    split_reference_into_segments(
+        video_paths[reference], [segment["start"] for segment in segments[1:]], common_paths,
+    )
+    for segment, common_path in zip(segments, common_paths):
         manifest["segments"].append({
-            "index": segment["index"], "kind": "common", "file": common_name, "source_language": reference,
+            "index": segment["index"], "kind": "common", "file": common_path.name,
+            "source_language": reference,
             "analytical_start": segment["start"], "analytical_end": segment["end"],
-            "extracted_start": actual_start, "extracted_end": actual_end,
+            "extracted_start": segment["start"], "extracted_end": segment["end"],
         })
+
+    reencoded_segments = 0
+    for segment in segments:
         for lang in segment["divergent_languages"]:
             lang_name = f"{lang.lower()}-{segment['index']:03d}.mkv"
-            lang_path = library_dir / lang_name
-            lang_video_path = video_paths[lang]
             video_filter = None
             if normalize_mismatched_aspect and lang in mismatched_resolution:
                 video_filter = aspect_normalize_filter(
                     profiles[lang]["width"], profiles[lang]["height"],
                     ref_profile["width"], ref_profile["height"],
                 )
-            lang_start, lang_end = extract_video_segment(
-                lang_video_path, segment["start"], segment["end"], lang_path, keyframes=keyframe_cache[lang],
-                min_start=last_extracted_end.get(lang_video_path, 0.0), video_filter=video_filter,
+            extract_localized_segment(
+                video_paths[lang], segment["start"], segment["end"], library_dir / lang_name,
+                fps=ref_fps, video_filter=video_filter,
             )
-            if lang_start > segment["start"] + 1e-6 or lang_end < segment["end"] - 1e-6 or video_filter:
-                reencoded_segments += 1
-            last_extracted_end[lang_video_path] = lang_end
-            drift = max(abs(lang_start - segment["start"]), abs(lang_end - segment["end"]))
-            max_drift = max(max_drift, drift)
+            reencoded_segments += 1
             manifest["segments"].append({
                 "index": segment["index"], "kind": "localized", "file": lang_name, "source_language": lang,
                 "analytical_start": segment["start"], "analytical_end": segment["end"],
-                "extracted_start": lang_start, "extracted_end": lang_end,
+                "extracted_start": segment["start"], "extracted_end": segment["end"],
             })
 
-    if max_drift > 0.5:
-        manifest["warnings"].append(
-            f"Common and localized segments were snapped to keyframes independently per source file, and "
-            f"the largest resulting boundary drift was {max_drift:.2f}s. Review the affected splice points "
-            f"before trusting the presentations -- see build_adaptive_library's docstring."
-        )
     if reencoded_segments:
         manifest["warnings"].append(
-            f"{reencoded_segments} segment(s) were precisely re-encoded (exact cut, not stream-copied) "
-            "instead of keyframe-snapped -- either to prevent overlapping the previous segment from the "
-            "same source file (see extract_video_segment's docstring), or for aspect normalization."
+            f"{reencoded_segments} localized clip(s) were re-encoded so they land exactly on the shared, "
+            "reference-aligned cut points (their own files have no keyframe there, and a stream copy can "
+            "only start on one). The reference's own common segments -- the bulk of the runtime -- are "
+            "always stream-copied, never re-encoded."
         )
-    manifest["max_boundary_drift_seconds"] = max_drift
+    manifest["max_boundary_drift_seconds"] = 0.0
     manifest["reencoded_segments"] = reencoded_segments
     duration_by_file = {seg["file"]: seg["extracted_end"] - seg["extracted_start"] for seg in manifest["segments"]}
 

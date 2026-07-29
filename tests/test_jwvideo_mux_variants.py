@@ -549,31 +549,56 @@ class AnalyzeVideoVariantsIntegrationTest(_FfmpegFixtureCase):
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
 class KeyframeSnappingIntegrationTest(_FfmpegFixtureCase):
-    def test_extract_video_segment_snaps_a_non_keyframe_request_outward(self) -> None:
-        kf = self.module.keyframe_times(self.ref)
-        self.assertIn(2.0, [round(t, 3) for t in kf])  # GOP=15 @ 15fps -> keyframe every 1s
-        out_path = self.root / "snapped_segment.mkv"
-        # Request a mid-GOP window; the caller never guarantees keyframe-aligned input.
-        actual_start, actual_end = self.module.extract_video_segment(self.ref, 2.3, 3.7, out_path)
-        self.assertTrue(out_path.exists())
-        self.assertLessEqual(actual_start, 2.3)
-        self.assertGreaterEqual(actual_end, 3.7)
-        rounded_kf = {round(t, 2) for t in kf}
-        self.assertIn(round(actual_start, 2), rounded_kf)
+    @staticmethod
+    def _frame_count(path: Path) -> int:
+        raw = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+             "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        return int(raw)
 
-    def test_extract_video_segment_uses_passed_in_keyframes_without_rescanning(self) -> None:
-        # build_adaptive_library scans each source file's keyframes once and reuses the list across
-        # every segment cut from it (a real 79-minute/97-segment library previously spent over half its
-        # runtime redundantly re-scanning the same few files). Passing a deliberately wrong keyframe
-        # list here proves the function actually uses what it's given rather than recomputing.
-        fake_keyframes = [0.0, 5.0]  # ref.mkv's real keyframes are every 1s (GOP=15@15fps); this is wrong
-        out_path = self.root / "fake_keyframe_segment.mkv"
-        actual_start, actual_end = self.module.extract_video_segment(
-            self.ref, 2.3, 3.7, out_path, keyframes=fake_keyframes,
+    def test_reference_split_tiles_the_source_frame_for_frame(self) -> None:
+        # The split must be frame-exact, not merely "about right": every language's audio is a separate
+        # full-length track, so if the concatenated video runs even slightly long or short the two drift
+        # apart, progressively, for the rest of the presentation. Measured on real footage before this
+        # was fixed: `-t`-bounded stream copies overshot by ~2 frames per splice (B-frames make `-t`
+        # bound DTS, not PTS), which a 15-segment library turns into most of a second of desync.
+        total_frames = self._frame_count(self.ref)
+        cutpoints = [2.0, 5.0]  # both real keyframes for this fixture (GOP=15 @ 15fps)
+        kf = self.module.keyframe_times(self.ref)
+        for t in cutpoints:
+            self.assertTrue(self.module.has_keyframe_at(t, kf), f"fixture assumption broken: {t} not a keyframe")
+
+        out_paths = [self.root / f"split-{i}.mkv" for i in range(len(cutpoints) + 1)]
+        self.module.split_reference_into_segments(self.ref, cutpoints, out_paths)
+
+        for path in out_paths:
+            self.assertTrue(path.exists(), f"{path.name} was not produced")
+        self.assertEqual(
+            sum(self._frame_count(p) for p in out_paths), total_frames,
+            "split segments must tile the source exactly -- no duplicated frames, none dropped",
         )
-        self.assertEqual(actual_start, 0.0)  # snapped to the fake list's 0.0, not the real ~2.0 keyframe
-        self.assertEqual(actual_end, 5.0)
-        self.assertTrue(out_path.exists())
+
+    def test_reference_split_refuses_a_non_keyframe_cutpoint(self) -> None:
+        # A stream-copy split silently rounds a non-keyframe cut forward to the next keyframe, which
+        # would put the real boundary somewhere other than the plan (and every other language's
+        # timeline) says. Refusing loudly beats a library that looks fine and plays wrong.
+        kf = self.module.keyframe_times(self.ref)
+        self.assertFalse(self.module.has_keyframe_at(2.3, kf), "2.3 should be mid-GOP for this fixture")
+        with self.assertRaises(ValueError) as ctx:
+            self.module.split_reference_into_segments(
+                self.ref, [2.3], [self.root / "bad-0.mkv", self.root / "bad-1.mkv"],
+            )
+        self.assertIn("keyframe", str(ctx.exception).lower())
+
+    def test_localized_segment_is_frame_exact_against_the_window_it_replaces(self) -> None:
+        # A localized clip has to occupy exactly the same slot as the common segment it stands in for,
+        # or the languages that use it desync from the ones that don't.
+        fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
+        out_path = self.root / "localized_exact.mkv"
+        self.module.extract_localized_segment(self.localized, 2.0, 5.0, out_path, fps=fps)
+        self.assertEqual(self._frame_count(out_path), round(3.0 * fps))
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
@@ -613,6 +638,10 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
         self.assertTrue((library_dir / manifest["languages"]["HV"]["audio"]).exists())
         self.assertIsNone(manifest["languages"]["HV"]["subtitle"])
         self.assertTrue(any("No local subtitle found for language HV" in w for w in manifest["warnings"]))
+
+        # Every presentation must tile the timeline exactly -- mpv validation only spot-checks that
+        # each splice DECODES, which a replayed/skipped span passes just fine.
+        self._assert_presentations_are_gapless(manifest, library_dir)
 
         if MPV_AVAILABLE:
             for lang, verdict in manifest["validation"].items():
@@ -741,23 +770,61 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
             local_files=local_files, library_dir=library_dir, min_seconds=1.5,
         )
 
+        # The fixture must actually exercise splicing, or the gapless check below proves nothing.
         self.assertGreater(
-            manifest["reencoded_segments"], 0,
-            "this fixture is specifically constructed to need the overlap-prevention fallback -- if "
-            "nothing triggered it, the fixture (or the fix) needs a second look",
+            len({seg["index"] for seg in manifest["segments"]}), 1,
+            "expected the localized window to split this into multiple segments",
         )
+        self.assertTrue(
+            any(seg["kind"] == "localized" for seg in manifest["segments"]),
+            "expected at least one localized segment spliced in from the other file",
+        )
+        self._assert_presentations_are_gapless(manifest, library_dir)
 
-        by_file: dict[str, list[dict]] = {}
-        for seg in sorted(manifest["segments"], key=lambda s: s["index"]):
-            by_file.setdefault(seg["source_language"], []).append(seg)
-        for lang, segs in by_file.items():
-            for prev, cur in zip(segs, segs[1:]):
-                self.assertGreaterEqual(
-                    cur["extracted_start"], prev["extracted_end"] - 1e-6,
-                    f"{lang}: segment {cur['index']} ({cur['file']}) starts at {cur['extracted_start']} "
-                    f"before the previous same-file segment {prev['file']} ends at {prev['extracted_end']} "
-                    "-- this is exactly the overlap that caused visible rewind/skip during real playback",
+    def _assert_presentations_are_gapless(self, manifest: dict, library_dir: Path) -> None:
+        """Walk each language's EDL in real playback order and assert the segments tile the source
+        timeline exactly -- no replayed span, no skipped span.
+
+        This is the check that actually matters, and an earlier, weaker version of it (comparing only
+        segments sharing a source_language) is why the second real incident shipped: a presentation
+        interleaves segments cut from DIFFERENT files, so an overlap between a common segment and the
+        localized clip spliced next to it is invisible to any same-file comparison. Verified against
+        real footage: TG's presentation ran 0->2.0 (common), 0->6.01 (localized), 4.97->76.84 (common)
+        -- each file individually fine, the presentation badly broken.
+        """
+        by_name = {seg["file"]: seg for seg in manifest["segments"]}
+        for lang, info in manifest["languages"].items():
+            edl_lines = (library_dir / info["edl"]).read_text(encoding="utf-8").splitlines()
+            played = [by_name[line] for line in edl_lines if line in by_name]
+            self.assertTrue(played, f"{lang}: EDL referenced no known segments")
+            cursor = 0.0
+            for seg in played:
+                self.assertAlmostEqual(
+                    seg["extracted_start"], cursor, places=3,
+                    msg=(
+                        f"{lang}: {seg['file']} covers [{seg['extracted_start']}, {seg['extracted_end']}] "
+                        f"but the presentation timeline had reached {cursor} -- "
+                        + ("content REPLAYS here" if seg["extracted_start"] < cursor else "content is SKIPPED here")
+                    ),
                 )
+                cursor = seg["extracted_end"]
+            self.assertAlmostEqual(
+                cursor, manifest["total_duration"], places=2,
+                msg=f"{lang}: presentation ends at {cursor}, expected the full {manifest['total_duration']}",
+            )
+
+            # The manifest is only bookkeeping -- also confirm the FILES on disk really run that long,
+            # since it's their real durations that mpv plays against the full-length audio track.
+            played_duration = sum(
+                self.module.probe_video(library_dir / seg["file"])["duration"] for seg in played
+            )
+            self.assertAlmostEqual(
+                played_duration, manifest["total_duration"], delta=0.1,
+                msg=(
+                    f"{lang}: the segment files actually total {played_duration:.3f}s but the source is "
+                    f"{manifest['total_duration']:.3f}s -- the video would drift against its audio"
+                ),
+            )
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
