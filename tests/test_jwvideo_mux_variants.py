@@ -302,6 +302,20 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         for char in '<>:"/\\|?*':
             self.assertNotIn(char, self.module.sanitize_filename(f"x{char}y"))
 
+    def test_sanitize_filename_drops_straight_quotes_without_stranding_padding(self) -> None:
+        # Straight quotes wrap text rather than separating it, so unlike `:` they must be deleted, not
+        # collapsed through a space. Both of these are real SCE titles that produced visibly odd folder
+        # names ("... ( Completely Equipped ... )" / "(Develop the Art of Teaching )") under the old
+        # space-replacement.
+        self.assertEqual(
+            self.module.sanitize_filename('cew_E_r720P ("Completely Equipped for Every Good Work")'),
+            "cew_E_r720P (Completely Equipped for Every Good Work)",
+        )
+        self.assertEqual(
+            self.module.sanitize_filename('tscv_E_07_r720P (Develop the "Art of Teaching")'),
+            "tscv_E_07_r720P (Develop the Art of Teaching)",
+        )
+
     def test_sanitize_filename_avoids_merging_a_scripture_style_reference(self) -> None:
         # A colon with no surrounding space (e.g. a chapter:verse citation) must not collapse into a
         # single misleading number -- "Romans 3:2" becoming "Romans 32" reads as a different verse.
@@ -570,8 +584,9 @@ class KeyframeSnappingIntegrationTest(_FfmpegFixtureCase):
         for t in cutpoints:
             self.assertTrue(self.module.has_keyframe_at(t, kf), f"fixture assumption broken: {t} not a keyframe")
 
+        fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
         out_paths = [self.root / f"split-{i}.mkv" for i in range(len(cutpoints) + 1)]
-        self.module.split_reference_into_segments(self.ref, cutpoints, out_paths)
+        counts = self.module.split_reference_into_segments(self.ref, cutpoints, out_paths, fps=fps)
 
         for path in out_paths:
             self.assertTrue(path.exists(), f"{path.name} was not produced")
@@ -579,26 +594,55 @@ class KeyframeSnappingIntegrationTest(_FfmpegFixtureCase):
             sum(self._frame_count(p) for p in out_paths), total_frames,
             "split segments must tile the source exactly -- no duplicated frames, none dropped",
         )
+        self.assertEqual(counts, [self._frame_count(p) for p in out_paths])
+
+    def test_reference_split_lands_on_the_requested_keyframe_not_the_next_one(self) -> None:
+        # The segment muxer splits at the first keyframe STRICTLY AFTER segment_time, so handing it a
+        # cutpoint that is itself a keyframe silently skips a whole GOP. On a real library this pushed
+        # the first boundary 120 frames (4s) late and stole those frames from the final segment, while
+        # every individual file still decoded fine. The fix nudges each request back half a frame.
+        fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
+        cut = 2.0
+        self.assertTrue(self.module.has_keyframe_at(cut, self.module.keyframe_times(self.ref)))
+        out_paths = [self.root / "onkf-0.mkv", self.root / "onkf-1.mkv"]
+        counts = self.module.split_reference_into_segments(self.ref, [cut], out_paths, fps=fps)
+        self.assertEqual(
+            counts[0], round(cut * fps),
+            "first segment should end at the requested keyframe, not the following one",
+        )
 
     def test_reference_split_refuses_a_non_keyframe_cutpoint(self) -> None:
         # A stream-copy split silently rounds a non-keyframe cut forward to the next keyframe, which
         # would put the real boundary somewhere other than the plan (and every other language's
         # timeline) says. Refusing loudly beats a library that looks fine and plays wrong.
         kf = self.module.keyframe_times(self.ref)
+        fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
         self.assertFalse(self.module.has_keyframe_at(2.3, kf), "2.3 should be mid-GOP for this fixture")
         with self.assertRaises(ValueError) as ctx:
             self.module.split_reference_into_segments(
-                self.ref, [2.3], [self.root / "bad-0.mkv", self.root / "bad-1.mkv"],
+                self.ref, [2.3], [self.root / "bad-0.mkv", self.root / "bad-1.mkv"], fps=fps,
             )
         self.assertIn("keyframe", str(ctx.exception).lower())
 
-    def test_localized_segment_is_frame_exact_against_the_window_it_replaces(self) -> None:
+    def test_localized_segment_matches_the_requested_frame_count_exactly(self) -> None:
         # A localized clip has to occupy exactly the same slot as the common segment it stands in for,
-        # or the languages that use it desync from the ones that don't.
+        # or the languages that use it desync from the ones that don't. The count is dictated by the
+        # caller (the real common segment's own frame count), never recomputed from a duration.
         fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
         out_path = self.root / "localized_exact.mkv"
-        self.module.extract_localized_segment(self.localized, 2.0, 5.0, out_path, fps=fps)
-        self.assertEqual(self._frame_count(out_path), round(3.0 * fps))
+        self.module.extract_localized_segment(self.localized, 2.0, out_path, frames=45, fps=fps)
+        self.assertEqual(self._frame_count(out_path), 45)
+
+    def test_localized_segment_refuses_when_the_source_runs_out(self) -> None:
+        # If a language's video is shorter than the reference at that point it cannot fill the slot;
+        # silently producing a short clip would desync it for the rest of the presentation.
+        fps = self.module.fps_as_float(self.module.probe_video(self.ref)["fps"])
+        with self.assertRaises(ValueError) as ctx:
+            self.module.extract_localized_segment(
+                self.localized, self.DURATION - 0.5, self.root / "too_short.mkv",
+                frames=round(5 * fps), fps=fps,
+            )
+        self.assertIn("could only supply", str(ctx.exception))
 
 
 @unittest.skipUnless(FFMPEG_AVAILABLE and FFPROBE_AVAILABLE, "ffmpeg/ffprobe not installed")
