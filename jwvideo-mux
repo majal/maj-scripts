@@ -38,6 +38,12 @@ KNOWN_LANGUAGES = {
     "CH": ("zho", "Chinese"),
 }
 
+# Extension for the double-clickable mpv launcher scripts written by write_mpv_command_launcher.
+# A custom extension (rather than reusing .command) lets these carry their own file-association setup
+# (register-jwplay-launcher.sh on macOS/duti, xdg-mime on Linux) distinct from generic shell scripts.
+LAUNCHER_EXTENSION = ".jwplay"
+
+
 def update_and_load_langs() -> dict:
     langs_dict = dict(KNOWN_LANGUAGES)
     script_dir = Path(__file__).parent
@@ -376,6 +382,32 @@ def candidate_intervals(
     return threshold, runs
 
 
+def resolution_only_mismatch(profile: dict, ref_profile: dict, *, aspect_tolerance: float = 0.01) -> bool:
+    """Whether profile differs from ref_profile ONLY in width/height, with everything else that matters
+    for comparison (pix_fmt, fps, aspect ratio) still matching -- e.g. a 960x540 encode of an otherwise
+    identical 1280x720 talk, which jw.org publishes for some languages when no full-resolution dub exists.
+
+    Deliberately narrow: aspect ratio must match within tolerance too, so a real letterboxed/pillarboxed
+    mismatch (different shape, not just different size) is excluded -- comparing that would require
+    guessing a crop offset, which belongs in the human-confirmed --manual-overrides + --normalize-
+    mismatched-aspect path (see build_adaptive_library), not silent automatic comparison. A pure
+    resolution difference has no such ambiguity: scaling to the reference's exact pixel grid is lossless
+    in the sense that it doesn't move or discard any content, only resamples it, so it's safe to do
+    automatically just to make comparison possible.
+    """
+    if not (profile["width"] and profile["height"] and ref_profile["width"] and ref_profile["height"]):
+        return False
+    if (profile["width"], profile["height"]) == (ref_profile["width"], ref_profile["height"]):
+        return False
+    if profile["pix_fmt"] != ref_profile["pix_fmt"]:
+        return False
+    if abs(fps_as_float(profile["fps"]) - fps_as_float(ref_profile["fps"])) > 0.1:
+        return False
+    lang_aspect = profile["width"] / profile["height"]
+    ref_aspect = ref_profile["width"] / ref_profile["height"]
+    return abs(lang_aspect - ref_aspect) <= aspect_tolerance
+
+
 def analyze_video_variants(
     video_paths: dict[str, Path], *, min_seconds: float = 1.5,
     scan_small_regions: bool = False, region_count: int = 8,
@@ -391,12 +423,21 @@ def analyze_video_variants(
     confidently-wrong output.
 
     Both streams are also resampled to the reference's frame rate before comparison (see
-    _ssim_psnr_filtergraph). Comparing raw decode-order frame pairs without this breaks down over a long
+    _comparison_filtergraph). Comparing raw decode-order frame pairs without this breaks down over a long
     clip whenever the two encodes don't share bit-identical frame timing (VFR, or fps that only agree to
     within the compatibility tolerance, e.g. 23.976 vs 24.000): the pairing drifts a little more every
     frame, and by the tail of the clip whole seconds of genuinely identical content compare as different.
     That drift-driven tail divergence is the leading suspect for the pilot's own recorded false positive
     (video streams reported as differing "after 180.180 seconds" with no real visual difference).
+
+    A language whose video is a different resolution than the reference, but otherwise comparable (see
+    resolution_only_mismatch), is NOT auto-rejected as incompatible: it's transparently upscaled/
+    downscaled onto the reference's pixel grid for comparison (record["resolution_normalized_for_comparison"]
+    notes when this happened), so real localized differences on a lower-bitrate encode still get found
+    automatically instead of requiring a human to already know the difference exists before writing a
+    --manual-overrides entry. This only decides whether/where a real difference exists; actually splicing
+    a resolution-mismatched localized clip into the built library still requires the separate, explicit
+    --normalize-mismatched-aspect flag, since that step re-encodes real media rather than just comparing it.
     """
     profiles = {lang: probe_video(path) for lang, path in video_paths.items()}
     hashes = {lang: elementary_video_hash(path) for lang, path in video_paths.items()}
@@ -423,10 +464,12 @@ def analyze_video_variants(
                     all(profile[key] == ref_profile[key] for key in ("width", "height", "pix_fmt"))
                     and abs(fps_as_float(profile["fps"]) - fps_as_float(ref_profile["fps"])) <= 0.1
                 )
-                compatible = duration_delta <= 0.25 and dims_match
+                resolution_normalized = not dims_match and resolution_only_mismatch(profile, ref_profile)
+                comparable = dims_match or resolution_normalized
+                compatible = duration_delta <= 0.25 and comparable
                 effective_duration = None
                 trailing_freeze_note = None
-                if not compatible and dims_match and profile["duration"] and ref_profile["duration"]:
+                if not compatible and comparable and profile["duration"] and ref_profile["duration"]:
                     # Duration alone disqualifies this pair, but that's often just a trailing static
                     # end-card/copyright screen held for a different length per language rather than a
                     # real difference. If both languages freeze on a final frame and never unfreeze
@@ -454,7 +497,12 @@ def analyze_video_variants(
                 if trailing_freeze_note:
                     record["trailing_freeze_note"] = trailing_freeze_note
                     record["effective_duration"] = effective_duration
-                if compatible and hashes[lang] == hashes[reference]:
+                if resolution_normalized and compatible:
+                    record["resolution_normalized_for_comparison"] = {
+                        "from": [profile["width"], profile["height"]],
+                        "to": [ref_profile["width"], ref_profile["height"]],
+                    }
+                if compatible and not resolution_normalized and hashes[lang] == hashes[reference]:
                     record["classification"] = "exactly_same"
                 elif compatible:
                     ssim_stats = Path(tmp) / f"{reference}-{lang}.ssim.log"
@@ -472,6 +520,7 @@ def analyze_video_variants(
                             region_specs=region_specs,
                             region_ssim_paths={index: Path(path.name) for index, path in region_ssim_paths.items()},
                             region_psnr_paths={index: Path(path.name) for index, path in region_psnr_paths.items()},
+                            lang_scale_to=(ref_profile["width"], ref_profile["height"]) if resolution_normalized else None,
                         ),
                     ]
                     if effective_duration is not None:
@@ -495,7 +544,14 @@ def analyze_video_variants(
                     # shouldn't cover it -- e.g. permanently different on-screen text/captions the interval
                     # search can't see because it's the pair's own baseline, not a deviation from it.
                     globally_uncertain = ssim_median < 0.92
-                    if corroborated:
+                    # A corroborated dip is only trustworthy relative to a baseline that's itself high and
+                    # stable -- when the pair is globally_uncertain, the whole comparison already sits in
+                    # noisy territory (real cause seen in practice: a resolution-normalized comparison
+                    # where lossy up/downscaling depresses similarity everywhere, not just in one place),
+                    # and candidate_intervals' median-relative threshold can still find a "sustained dip"
+                    # inside that noise floor that isn't a real, separate content difference. Cap at
+                    # review_recommended rather than confidently promoting it to localized_candidates.
+                    if corroborated and not globally_uncertain:
                         classification = "localized_candidates"
                     elif ssim_intervals or psnr_intervals or globally_uncertain:
                         classification = "review_recommended"
@@ -552,15 +608,23 @@ def _comparison_filtergraph(
     ref_fps: float, ssim_stats: Path, psnr_stats: Path, *,
     region_specs: list["_RegionSpec"] | None = None,
     region_ssim_paths: dict[int, Path] | None = None, region_psnr_paths: dict[int, Path] | None = None,
+    lang_scale_to: tuple[int, int] | None = None,
 ) -> str:
     """Resample both inputs onto the reference's frame-rate grid (fixing decode-order drift on VFR/
     rounding-mismatched sources), then compute whole-frame SSIM/PSNR -- and, if region_specs is given,
     per-band SSIM/PSNR for each horizontal strip -- in a single ffmpeg pass (one decode, many cheap
-    crop+compare branches)."""
+    crop+compare branches).
+
+    lang_scale_to, when given, upscales/downscales stream 1 (the non-reference language) to this
+    (width, height) before comparison -- see analyze_video_variants' resolution_only_mismatch handling:
+    a same-aspect-ratio resolution difference (e.g. a lower-bitrate 960x540 encode of an otherwise
+    1280x720 talk) is resampled onto the reference's pixel grid so SSIM/PSNR can still run, rather than
+    giving up and calling the pair outright incompatible before ever looking at the content."""
     region_specs = region_specs or []
     branch_count = 1 + len(region_specs)
     fps = f"fps={ref_fps:.6f}" if ref_fps > 0 else "null"
-    parts = [f"[0:v:0]{fps}[r0]", f"[1:v:0]{fps}[r1]"]
+    lang_prescale = f"scale={lang_scale_to[0]}:{lang_scale_to[1]}:flags=lanczos,setsar=1," if lang_scale_to else ""
+    parts = [f"[0:v:0]{fps}[r0]", f"[1:v:0]{lang_prescale}{fps}[r1]"]
     if branch_count > 1:
         parts.append(f"[r0]split={branch_count}" + "".join(f"[r0_{i}]" for i in range(branch_count)))
         parts.append(f"[r1]split={branch_count}" + "".join(f"[r1_{i}]" for i in range(branch_count)))
@@ -1025,38 +1089,61 @@ def write_mpv_edl(segment_files: list[Path], out_path: Path, edl_dir: Path):
 
 
 def sanitize_filename(name: str) -> str:
-    """Strip characters that are unsafe or misleading in a filename cross-platform. `:` is the common
-    offender here -- it's legal on POSIX filesystems, but Windows/NTFS/FAT32 forbid it outright, and
-    macOS Finder renders a literal `:` in a filename as `/` for legacy HFS reasons, which reads as an
-    actual path separator and is genuinely confusing.
+    """Strip or convert characters that are unsafe or misleading in a filename cross-platform. `:` is
+    the common offender here -- it's legal on POSIX filesystems, but Windows/NTFS/FAT32 forbid it
+    outright, and macOS Finder renders a literal `:` in a filename as `/` for legacy HFS reasons, which
+    reads as an actual path separator and is genuinely confusing.
 
     Separator-like characters collapse through a SPACE rather than being deleted: "Title: Sub" -> "Title
     Sub" reads the same either way, but a scripture-style reference like "Romans 3:2" would silently
     become the wrong-looking "Romans 32" under plain deletion.
 
-    The straight double quote is the exception and is deleted outright, because it wraps text rather
-    than separating it -- replacing it with a space stranded the padding inside the surrounding
-    punctuation and produced real, visibly odd folder names on this corpus:
-    `cew_E_r720P ("Completely Equipped for Every Good Work")` came out as `... ( Completely Equipped
-    for Every Good Work )`, and `(Develop the "Art of Teaching")` as `(Develop the Art of Teaching )`.
-    Nothing is lost by dropping it, since no two words are being run together. Curly quotes are
-    filesystem-safe and are deliberately left alone entirely (see the test); only the straight `"`,
-    which Windows forbids, has to go.
+    Straight quotes are converted to their curly Unicode equivalents rather than stripped. An apostrophe
+    (ASCII 0x27) always becomes the right single quotation mark U+2019 -- the correct character for a
+    possessive or contraction, by far the common case. A straight double quote (ASCII 0x22) alternates
+    between the left curly quote U+201C and the right curly quote U+201D by occurrence, so a quoted
+    title keeps its quotation marks instead of losing them outright, e.g. real SCE titles like
+    `cew_E_r720P ("Completely Equipped for Every Good Work")` and `tscv_E_07_r720P (Develop the "Art of
+    Teaching")` end up with actual curly quotes around the quoted phrase rather than none at all. Both
+    curly forms are filesystem-safe on every platform this function cares about -- only the straight
+    ASCII double quote, which Windows forbids, needed handling at all.
     """
-    name = name.replace('"', "")
+    name = name.replace("'", "’")
+    if '"' in name:
+        parts = name.split('"')
+        rebuilt = parts[0]
+        for i, part in enumerate(parts[1:]):
+            rebuilt += ("“" if i % 2 == 0 else "”") + part
+        name = rebuilt
     for char in '<>:/\\|?*':
         name = name.replace(char, " ")
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
 
+def build_docid_output_name(base_stem: str, lang_field: str, extension: str) -> str:
+    """Rebuild a jw.org-style docid filename (`{docid}_{lang}_{res} (Title)`) with a new language
+    field swapped in for the original one -- the same substitution the classic single-file muxer's own
+    naming does in main() (splits the reference file's stem on '_' and replaces the language token),
+    shared here so the adaptive-library launchers use the identical convention instead of the earlier
+    "Play <Language> - <Title>" style. Falls back to a `merged_{lang_field}_{base_stem}` prefix when
+    the stem doesn't look like a docid filename (fewer than 3 underscore-separated parts), matching the
+    classic muxer's own fallback for non-docid input.
+    """
+    parts = base_stem.split("_")
+    if len(parts) >= 3:
+        parts[1] = lang_field
+        return "_".join(parts) + extension
+    return f"merged_{lang_field}_{base_stem}{extension}"
+
+
 def write_mpv_command_launcher(
     out_path: Path, edl_name: str, audio_name: str | None, sub_name: str | None, iso: str, *,
     media_subdir: str | None = None,
 ) -> None:
-    """Write a double-clickable macOS launcher (same pattern as the earlier adaptive-mpv-library pilot's
-    "Play <Language>.command" files): Finder runs a .command file's shebang in Terminal on double-click,
-    no CLI knowledge required to play a language's presentation.
+    """Write a double-clickable launcher script for a language's presentation -- no CLI knowledge
+    required to play it. The caller decides the filename/extension (see LAUNCHER_EXTENSION); this
+    function only writes the executable shell body.
 
     media_subdir is the path from the launcher's own directory down to where the EDL/audio/subtitle
     files actually live -- "" (default) when the launcher sits alongside them inside the library folder,
@@ -1140,28 +1227,6 @@ def validate_edl_with_mpv(
     return {"ok": all(c["ok"] for c in results), "checkpoints": results}
 
 
-def friendly_video_label(name: str) -> str:
-    """Pull the human-readable title out of a library folder's own name for use in a disambiguated
-    launcher filename, e.g. "iut_E_r720P (Integrity Under Trial)_adaptive-library" -> "Integrity Under
-    Trial". Matches the OUTERMOST balanced parenthesis pair (tracking nesting depth) so a title that
-    itself contains "(...)" (e.g. a nested scripture reference like "(Mark Sanderson ... (Romans 13 1))")
-    still resolves to the full title, not just the innermost fragment. Falls back to the full name when
-    there's no parenthetical title to extract."""
-    name = name.removesuffix("_adaptive-library")
-    start = name.find("(")
-    if start == -1:
-        return name
-    depth = 0
-    for i in range(start, len(name)):
-        if name[i] == "(":
-            depth += 1
-        elif name[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return name[start + 1:i]
-    return name
-
-
 def build_adaptive_library(
     *, reference: str, video_paths: dict[str, Path], variant_analysis: dict,
     local_files: dict, library_dir: Path, min_seconds: float, launchers_at_unit_root: bool = False,
@@ -1237,14 +1302,16 @@ def build_adaptive_library(
     if mismatched_resolution and normalize_mismatched_aspect:
         manifest["warnings"].append(
             "These languages' localized segments were at a different resolution than the reference "
-            "(typically a --manual-overrides entry confirming real content on a technically-incompatible "
+            "(either auto-detected -- same aspect ratio, just a lower-bitrate encode -- or a "
+            "--manual-overrides entry confirming real content on a technically-incompatible "
             "pair, e.g. a pillarboxed remaster) -- center-cropped to the reference's aspect ratio and "
             f"re-encoded to its exact resolution so there's no mid-presentation resize: {', '.join(mismatched_resolution)}"
         )
     elif mismatched_resolution:
         manifest["warnings"].append(
             "These languages have localized segments at a different resolution than the reference "
-            "(typically a --manual-overrides entry confirming real content on a technically-incompatible "
+            "(either auto-detected -- same aspect ratio, just a lower-bitrate encode -- or a "
+            "--manual-overrides entry confirming real content on a technically-incompatible "
             "pair, e.g. a pillarboxed remaster) -- mpv plays straight through a mid-presentation "
             "resolution change without erroring, but the video window will visibly resize at each such "
             f"splice: {', '.join(mismatched_resolution)}. Pass --normalize-mismatched-aspect to "
@@ -1346,14 +1413,19 @@ def build_adaptive_library(
             playback_hint += f" --sub-file={sub_name}"
         playback_hint += f" --alang={iso} --slang={iso},eng"
 
+        # Same docid_LANG_res (Title) convention the source downloads and the classic muxer both use
+        # (see main()'s out_name) -- but unlike the classic muxer's one multi-track file (whose field
+        # lists every language actually muxed in), a single launcher only ever plays ONE language's
+        # audio/clip/subs together, so the field is just that language, not a compound.
+        launcher_name = sanitize_filename(
+            build_docid_output_name(video_paths[reference].stem, lang, LAUNCHER_EXTENSION)
+        )
         if launchers_at_unit_root:
             launcher_dir = library_dir.parent
-            launcher_name = f"Play {sanitize_filename(title)} - {sanitize_filename(friendly_video_label(library_dir.name))}.command"
             media_subdir = library_dir.name
             launcher_rel = f"../{launcher_name}"
         else:
             launcher_dir = library_dir
-            launcher_name = f"Play {sanitize_filename(title)}.command"
             media_subdir = None
             launcher_rel = launcher_name
         write_mpv_command_launcher(
@@ -1409,7 +1481,7 @@ def main():
     parser.add_argument("--dedupe-identical-video", action="store_true", help="When muxing, retain one video stream from each byte-identical video group")
     parser.add_argument("--dedupe-visually-same", action="store_true", help="When muxing, retain one reference video where SSIM+PSNR both verified comparisons are visually_same or exactly_same (asks for confirmation unless --force)")
     parser.add_argument("--adaptive-mpv-library", action="store_true", help="Export a space-saving mpv library (shared common video segments + per-language localized segments/audio/subs/EDL/manifest) instead of muxing; does not alter or delete source media. If analysis finds no real localized differences for any language, falls back to an ordinary single-file mux (one shared video track) written directly to the output directory instead of building an unnecessary EDL library.")
-    parser.add_argument("--launchers-in-video-folder", action="store_true", help="With --adaptive-mpv-library, write the Play <Language>.command launchers inside the per-video library folder (the old default) instead of the output directory (the unit root). Default is the unit root, one level up, so every video's launchers for a unit are visible without opening each video's own subfolder; launcher names there are disambiguated with the video's own title since multiple videos in one unit would otherwise collide on plain 'Play <Language>.command'.")
+    parser.add_argument("--launchers-in-video-folder", action="store_true", help=f"With --adaptive-mpv-library, write the {LAUNCHER_EXTENSION} launchers inside the per-video library folder (the old default) instead of the output directory (the unit root). Default is the unit root, one level up, so every video's launchers for a unit are visible without opening each video's own subfolder; launcher names there already carry the video's own docid/title (see build_docid_output_name), so multiple videos in one unit never collide.")
     parser.add_argument("--normalize-mismatched-aspect", action="store_true", help="With --adaptive-mpv-library, when a language's localized clips are a different resolution/aspect ratio than the reference (e.g. a 16:9 insert against a 4:3 reference), center-crop and re-encode just those short localized clips to the reference's exact aspect ratio and resolution so mpv never visibly resizes mid-presentation. The shared common/reference segments are never re-encoded -- only the mismatched language's own short localized clips are.")
 
     args = parser.parse_args()
