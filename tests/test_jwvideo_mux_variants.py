@@ -302,18 +302,23 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         for char in '<>:"/\\|?*':
             self.assertNotIn(char, self.module.sanitize_filename(f"x{char}y"))
 
-    def test_sanitize_filename_drops_straight_quotes_without_stranding_padding(self) -> None:
-        # Straight quotes wrap text rather than separating it, so unlike `:` they must be deleted, not
-        # collapsed through a space. Both of these are real SCE titles that produced visibly odd folder
-        # names ("... ( Completely Equipped ... )" / "(Develop the Art of Teaching )") under the old
-        # space-replacement.
+    def test_sanitize_filename_converts_straight_quotes_to_curly(self) -> None:
+        # Straight quotes wrap text rather than separating it, so unlike `:` they're converted, not
+        # collapsed through a space -- and converted rather than dropped outright, so the quotation
+        # isn't lost. Both of these are real SCE titles.
         self.assertEqual(
             self.module.sanitize_filename('cew_E_r720P ("Completely Equipped for Every Good Work")'),
-            "cew_E_r720P (Completely Equipped for Every Good Work)",
+            "cew_E_r720P (“Completely Equipped for Every Good Work”)",
         )
         self.assertEqual(
             self.module.sanitize_filename('tscv_E_07_r720P (Develop the "Art of Teaching")'),
-            "tscv_E_07_r720P (Develop the Art of Teaching)",
+            "tscv_E_07_r720P (Develop the “Art of Teaching”)",
+        )
+
+    def test_sanitize_filename_converts_apostrophe_to_right_single_quote(self) -> None:
+        self.assertEqual(
+            self.module.sanitize_filename("Franz Wohlfahrt's Poem"),
+            "Franz Wohlfahrt’s Poem",
         )
 
     def test_sanitize_filename_avoids_merging_a_scripture_style_reference(self) -> None:
@@ -330,9 +335,25 @@ class VideoVariantPureLogicTest(unittest.TestCase):
         self.assertNotIn(":", self.module.sanitize_filename(name))
         self.assertIn("“Be in Subjection”", self.module.sanitize_filename(name))
 
+    def test_build_docid_output_name_swaps_the_language_field(self) -> None:
+        # Same substitution the classic muxer's own out_name does in main(): split the reference
+        # stem on '_' and replace just the language token, leaving the docid/res/title intact.
+        self.assertEqual(
+            self.module.build_docid_output_name(
+                "scei_E_r720P (School for Congregation Elders Video Introduction)", "E-CV+CV+CV", ".jwplay",
+            ),
+            "scei_E-CV+CV+CV_r720P (School for Congregation Elders Video Introduction).jwplay",
+        )
+
+    def test_build_docid_output_name_falls_back_for_non_docid_stems(self) -> None:
+        self.assertEqual(
+            self.module.build_docid_output_name("random_video", "E+TG+TG", ".jwplay"),
+            "merged_E+TG+TG_random_video.jwplay",
+        )
+
     def test_write_mpv_command_launcher_is_executable_and_valid_shell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out_path = Path(tmp) / "Play Tagalog.command"
+            out_path = Path(tmp) / "Play Tagalog.jwplay"
             self.module.write_mpv_command_launcher(out_path, "presentation-tg.edl", "audio-tg.mka", "subtitles-tg.srt", "tgl")
             self.assertTrue(out_path.exists())
             self.assertTrue(out_path.stat().st_mode & 0o111, "launcher must be executable")
@@ -346,7 +367,7 @@ class VideoVariantPureLogicTest(unittest.TestCase):
 
     def test_write_mpv_command_launcher_omits_missing_audio_and_subs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out_path = Path(tmp) / "Play English.command"
+            out_path = Path(tmp) / "Play English.jwplay"
             self.module.write_mpv_command_launcher(out_path, "presentation-e.edl", None, None, "eng")
             content = out_path.read_text()
             self.assertNotIn("--audio-file=", content)
@@ -402,7 +423,23 @@ class _FfmpegFixtureCase(unittest.TestCase):
             cls.root / "localized.mkv", crf=20,
             extra_vf="drawbox=x=40:y=40:w=200:h=120:color=red@1.0:t=fill:enable='between(t,2.3,4.6)'",
         )
-        cls.incompatible = cls._encode(cls.root / "incompatible.mkv", crf=20, size="160x120")
+        # 16:9 vs ref's 4:3 -- a genuine aspect-ratio mismatch, not just a resolution difference, so it
+        # must stay incompatible without a --manual-overrides entry (see resolution_only_mismatch).
+        cls.incompatible = cls._encode(cls.root / "incompatible.mkv", crf=20, size="160x90")
+        # Same 4:3 aspect as ref, just downscaled -- a pure resolution difference (e.g. jw.org publishing
+        # a lower-bitrate encode for some languages) that resolution_only_mismatch should let through to
+        # full comparison instead of auto-rejecting. Built from a plain (low-detail) source rather than
+        # testsrc2: testsrc2's fine-grained test-card pattern genuinely doesn't survive a downscale/
+        # upscale round trip (real, measured SSIM ~0.65 even with identical content), which realistic SCE
+        # footage -- a person talking against a mostly-static background -- doesn't suffer nearly as
+        # badly. A plain source isolates "does resolution-only comparison work at all" from "how much
+        # detail does a lossy resample destroy," which is a separate, real but different concern.
+        cls.plain_ref = cls._encode_plain(cls.root / "plain_ref.mkv", crf=20)
+        cls.lower_res_same_content = cls._encode_plain(cls.root / "lower_res_same_content.mkv", crf=20, size="160x120")
+        cls.lower_res_localized = cls._encode_plain(
+            cls.root / "lower_res_localized.mkv", crf=20, size="160x120",
+            extra_vf="drawbox=x=20:y=20:w=100:h=60:color=red@1.0:t=fill:enable='between(t,2.3,4.6)'",
+        )
         cls.globally_dissimilar = cls._encode(
             cls.root / "globally_dissimilar.mkv", crf=20,
             extra_vf="drawbox=x=0:y=0:w=320:h=240:color=gray@0.35:t=fill",  # whole-clip, not windowed
@@ -438,6 +475,25 @@ class _FfmpegFixtureCase(unittest.TestCase):
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "lavfi", "-i", f"testsrc2=size={size or cls.SIZE}:rate={cls.RATE}:duration={cls.DURATION}",
+            "-f", "lavfi", "-i", f"sine=frequency=440:duration={cls.DURATION}",
+        ]
+        if extra_vf:
+            cmd += ["-vf", extra_vf]
+        cmd += [
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-g", str(cls.GOP), "-c:a", "aac", "-shortest", str(out_path),
+        ]
+        subprocess.run(cmd, check=True)
+        return out_path
+
+    @classmethod
+    def _encode_plain(cls, out_path: Path, *, crf: int, size: str | None = None, extra_vf: str | None = None) -> Path:
+        # Same shape as _encode, but a solid-color source instead of testsrc2 -- low-detail content that
+        # round-trips a downscale/upscale near-losslessly, for isolating resolution-only-mismatch
+        # comparison correctness from generic lossy-resample detail loss (see setUpClass's plain_ref).
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c=0x336699:size={size or cls.SIZE}:rate={cls.RATE}:duration={cls.DURATION}",
             "-f", "lavfi", "-i", f"sine=frequency=440:duration={cls.DURATION}",
         ]
         if extra_vf:
@@ -503,12 +559,48 @@ class AnalyzeVideoVariantsIntegrationTest(_FfmpegFixtureCase):
         self.assertTrue(record["globally_uncertain"])
         self.assertEqual(record["classification"], "review_recommended")
 
-    def test_incompatible_resolution_is_flagged_without_crashing(self) -> None:
+    def test_incompatible_aspect_ratio_is_flagged_without_crashing(self) -> None:
+        # 16:9 vs the reference's 4:3: a genuine shape mismatch, not just a size difference, so this
+        # must NOT be auto-normalized -- comparing it would require guessing a crop offset.
         result = self.module.analyze_video_variants({"E": self.ref, "SA": self.incompatible})
         record = result["comparisons"]["SA"]
         self.assertFalse(record["compatible"])
         self.assertEqual(record["classification"], "incompatible")
         self.assertEqual(record["intervals"], [])
+        self.assertNotIn("resolution_normalized_for_comparison", record)
+
+    def test_resolution_only_mismatch_true_for_same_aspect_different_size(self) -> None:
+        ref_profile = self.module.probe_video(self.ref)
+        same_content_profile = self.module.probe_video(self.lower_res_same_content)
+        self.assertTrue(self.module.resolution_only_mismatch(same_content_profile, ref_profile))
+
+    def test_resolution_only_mismatch_false_for_different_aspect(self) -> None:
+        ref_profile = self.module.probe_video(self.ref)
+        incompatible_profile = self.module.probe_video(self.incompatible)
+        self.assertFalse(self.module.resolution_only_mismatch(incompatible_profile, ref_profile))
+
+    def test_lower_res_same_content_is_auto_compared_not_rejected(self) -> None:
+        # The whole point: a same-aspect resolution-only difference with no real content divergence
+        # gets upscaled and compared automatically, landing on visually_same -- not incompatible, and
+        # not requiring a --manual-overrides entry to even attempt the comparison.
+        result = self.module.analyze_video_variants({"E": self.plain_ref, "HV": self.lower_res_same_content})
+        record = result["comparisons"]["HV"]
+        self.assertTrue(record["compatible"])
+        self.assertEqual(record["classification"], "visually_same")
+        self.assertIn("resolution_normalized_for_comparison", record)
+        self.assertEqual(record["resolution_normalized_for_comparison"]["to"], [320, 240])
+
+    def test_lower_res_localized_difference_is_auto_detected(self) -> None:
+        # Same idea, but this lower-resolution encode DOES have a real localized difference -- it should
+        # still be found via the normal SSIM/PSNR corroboration path after the automatic upscale, with
+        # no --manual-overrides entry needed to discover it in the first place.
+        result = self.module.analyze_video_variants({"E": self.plain_ref, "HV": self.lower_res_localized})
+        record = result["comparisons"]["HV"]
+        self.assertEqual(record["classification"], "localized_candidates")
+        self.assertEqual(len(record["intervals"]), 1)
+        start, end = record["intervals"][0]
+        self.assertLess(start, 2.6)
+        self.assertGreater(end, 4.3)
 
     def test_trailing_freeze_start_finds_the_held_frame(self) -> None:
         # 5s live + 1s frozen tail -> freeze should start right around t=5.
@@ -730,6 +822,30 @@ class AdaptiveLibraryIntegrationTest(_FfmpegFixtureCase):
             local_files=local_files, library_dir=self.root / "adaptive-library-3", min_seconds=1.5,
         )
         self.assertTrue(any("different resolution than the reference" in w for w in manifest["warnings"]))
+
+    def test_normalize_mismatched_aspect_handles_auto_detected_resolution_only_difference(self) -> None:
+        # No --manual-overrides entry at all here -- the real difference in a lower-resolution,
+        # same-aspect encode should be found by analyze_video_variants on its own (via
+        # resolution_only_mismatch's automatic upscale-then-compare), and --normalize-mismatched-aspect
+        # should still be able to splice it in at the reference's resolution.
+        video_paths = {"E": self.plain_ref, "HV": self.lower_res_localized}
+        variant_analysis = self.module.analyze_video_variants(video_paths)
+        self.assertEqual(variant_analysis["comparisons"]["HV"]["classification"], "localized_candidates")
+        local_files = {
+            "E": {"video": self.plain_ref, "audio": self.audio, "sub": self.subtitle},
+            "HV": {"video": self.lower_res_localized, "audio": self.audio},
+        }
+        manifest = self.module.build_adaptive_library(
+            reference="E", video_paths=video_paths, variant_analysis=variant_analysis,
+            local_files=local_files, library_dir=self.root / "adaptive-library-auto-resnorm", min_seconds=1.5,
+            normalize_mismatched_aspect=True,
+        )
+        self.assertTrue(any("center-cropped to the reference's aspect ratio" in w for w in manifest["warnings"]))
+        localized_files = [s["file"] for s in manifest["segments"] if s["source_language"] == "HV"]
+        self.assertTrue(localized_files, "expected at least one HV localized segment")
+        for name in localized_files:
+            profile = self.module.probe_video(self.root / "adaptive-library-auto-resnorm" / name)
+            self.assertEqual((profile["width"], profile["height"]), self.ref_profile_dims())
 
     def test_normalize_mismatched_aspect_crops_and_matches_reference_resolution(self) -> None:
         # Real-world case this models: an old 4:3 reference talk with a 16:9 localized title-card

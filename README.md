@@ -19,8 +19,10 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Overview](#overview)
 - [Scripts](#scripts)
   - [`gmail-cleanup`](#gmail-cleanup)
+  - [`jwdl`](#jwdl)
   - [`jwsl`](#jwsl)
   - [`jwvideo-mux`](#jwvideo-mux)
+  - [`jwvideo-mux-shortcuts.sh`](#jwvideo-mux-shortcuts.sh)
   - [`printing-mode`](#printing-mode)
   - [`ubuntu-hibernate`](#ubuntu-hibernate)
   - [`wh`](#wh)
@@ -33,6 +35,84 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
+
+### [`jwdl`](./jwdl)
+
+`jwdl` downloads official JW music (MP3) publications from jw.org into a local library, one folder per collection.
+
+#### What It Does
+
+- Downloads JW music collections (Original Songs, "Sing Out Joyfully", soundtracks, International Music, etc.) via jw.org's public `pub-media` API.
+- Skips audio-description ("for the blind") narrated variants by default — those add spoken narration meant for listeners who can't see, which most people don't want mixed into a regular playlist. Pass `--include-audio-descriptions` to fetch them instead.
+- Verifies every download against the checksum the API provides and retries transient failures with backoff.
+- Skips tracks already on disk at the expected size, so re-running is fast and safe — designed to run unattended on a schedule (e.g. a weekly timer) to pick up newly released songs automatically.
+- Downloads a handful of tracks in parallel per collection to keep runs quick without hammering the CDN.
+
+#### Supported Platforms
+
+- macOS
+- Linux
+- Windows
+
+#### Dependencies
+
+- [Python](#python) 3.8+ (standard library only — nothing extra to install)
+
+#### Install / First Run Summary
+
+Make the script executable if your checkout did not preserve executable bits:
+
+```bash
+chmod +x jwdl
+```
+
+See what's available, then try a dry run before downloading anything:
+
+```bash
+./jwdl list
+./jwdl osg --dry-run
+```
+
+#### Common Usage Examples
+
+Download one collection:
+
+```bash
+./jwdl osg
+```
+
+Download everything (safe to re-run — already-downloaded tracks are skipped):
+
+```bash
+./jwdl all
+```
+
+Download a non-English language:
+
+```bash
+./jwdl osg S
+```
+
+Preview what a run would fetch without downloading:
+
+```bash
+./jwdl all --dry-run
+```
+
+#### Important Behavior / Defaults
+
+- Default destination is `~/Music/Watchtower Music/<collection>`; override it for every collection with `--base-dir`, or for a single pub with `--dir`.
+- Default language is `E` (English); pass a language code as the second positional argument (e.g. `./jwdl osg S`).
+- Audio-description tracks are excluded by default; use `--include-audio-descriptions` when you specifically want them.
+- A config file at `~/.config/maj-scripts/jwdl/config.json` can add pub codes jw.org releases later without touching the script (`{"pubs": {"newcode": "Folder Name"}}`) and can override `base_dir` or `workers`.
+- Downloads are written to a `.part` file and only renamed into place once the checksum matches, so an interrupted run never leaves a broken track sitting in the library.
+
+#### Notes / Caveats
+
+- Relies on jw.org's public, unauthenticated `pub-media` API; if a pub code stops responding, jw.org has likely renamed or retired it — check `https://www.jw.org/en/library/music-songs/` for the current code and add it via the config file above.
+- Filenames intentionally reproduce the naming used by years of prior downloads (curly quotes, `_` in place of `:`, etc.) so an existing library never ends up with a second, differently-named copy of a track it already has.
+
+[↑ TOC](#table-of-contents)
 
 ### [`jwsl`](./jwsl)
 
@@ -252,7 +332,16 @@ Use a pre-downloaded local file:
   something `localized_candidates` is a deliberate trade of a little recall
   for a lot less confidently-wrong output — a single metric (plain SSIM) was
   previously enough to misclassify same-content-different-encode video as
-  different.
+  different. A language whose video is only a different *resolution* than
+  the reference (same aspect ratio — e.g. a lower-bitrate 960x540 encode of
+  an otherwise 1280x720 talk, which jw.org publishes for some languages) is
+  no longer skipped as incompatible: it's transparently scaled onto the
+  reference's pixel grid for comparison, so real localized differences on a
+  lower-res encode still get found automatically. It's a same-content-safe
+  operation only because it's aspect-ratio-preserving; a real shape mismatch
+  (letterboxed/pillarboxed) still requires the human-confirmed
+  `--manual-overrides` + `--normalize-mismatched-aspect` path below, since
+  that requires guessing a crop offset.
 - `--variant-min-seconds` (default `1.5`) sets how long a similarity drop must
   hold before it counts as a candidate. Sub-second dips are almost always
   ordinary encoding jitter (a fast pan, a busy texture), not real localized
@@ -279,12 +368,14 @@ Use a pre-downloaded local file:
   directly to the output directory instead of building an unnecessary EDL
   library folder. Play a language with e.g. `mpv presentation-tg.edl
   --audio-file=audio-tg.mka --sub-file=subtitles-tg.srt`, or just
-  double-click the generated `Play <Language>.command` file — no terminal
-  needed. That launcher lands in the *output directory* (the unit root, one
-  level up from the library folder) by default, named
-  `Play <Language> - <video title>.command` so multiple videos in the same
-  unit don't collide; pass `--launchers-in-video-folder` to put it back
-  inside the library folder instead (the old default). The library folder
+  double-click the generated `.jwplay` launcher file — no terminal needed.
+  That launcher lands in the *output directory* (the unit root, one level up
+  from the library folder) by default, named after the same
+  `{docid}_{lang}_{res} (Title)` convention the source downloads and the
+  classic single-file mux use (just the reference file's own name with the
+  language field swapped for that launcher's language), so multiple videos
+  in the same unit never collide; pass `--launchers-in-video-folder` to put
+  it back inside the library folder instead (the old default). The library folder
   itself is just the video's own sanitized name — no `_adaptive-library`
   suffix. It, and every file in it, has any `:` (and other characters
   Windows/NTFS forbids) stripped from its name even if the source video's own
@@ -380,6 +471,83 @@ Use a pre-downloaded local file:
 
 - JW Library currently plays all audio tracks simultaneously when given a multi-audio MP4 file. To avoid this when using JW Library, use the `--single-streams` flag.
 - Trashing functionality using `--cleanup` simply unlinks (deletes) the downloaded files.
+
+[↑ TOC](#table-of-contents)
+
+### [`jwvideo-mux-shortcuts.sh`](./jwvideo-mux-shortcuts.sh)
+
+`jwvideo-mux-shortcuts.sh` is a set of short shell functions that wrap `jwvideo-mux`'s most common commands for a local SCE-style video library, so you don't have to retype the same flags for every video.
+
+#### What It Does
+
+- Adds `jwvm-plan`, `jwvm-build`, `jwvm-mux`, `jwvm-relang`, and `jwvm-help` shell functions to your interactive shell.
+- `jwvm-plan` runs `jwvideo-mux --analyze-video-variants` read-only, so you can see what a build would do before writing anything.
+- `jwvm-build` builds (or force-rebuilds) the adaptive mpv library for a video, falling back to a plain single-file mux automatically when there's nothing to adapt.
+- `jwvm-mux` runs the classic single-file multi-track mux directly.
+- `jwvm-relang` changes the language set on an already-built library: it finds the existing library folder, asks for confirmation, deletes it, and rebuilds from scratch (`jwvideo-mux` has no incremental update mode, since changing languages can shift every segment boundary).
+- All of the above automatically apply a corpus-wide `--manual-overrides` ground-truth file when one exists at the path in `JWVM_GROUND_TRUTH`, so a plain build can't accidentally skip a known correction.
+
+#### Supported Platforms
+
+- macOS
+- Linux
+
+#### Dependencies
+
+- [`jwvideo-mux`](#jwvideo-mux) (and everything it depends on)
+- `bash`
+
+#### Install / First Run Summary
+
+Source it from your shell rc:
+
+```bash
+source ~/dig/maj-scripts-vibe/jwvideo-mux-shortcuts.sh
+```
+
+Then, from inside a unit's base-language folder (usually `E/`), see what's available:
+
+```bash
+jwvm-help
+```
+
+#### Common Usage Examples
+
+See what a build would do without writing anything:
+
+```bash
+jwvm-plan some-video.mp4
+```
+
+Build the adaptive library with the default language set (`E,TG,CV,HV,SA`):
+
+```bash
+jwvm-build some-video.mp4
+```
+
+Build with a custom language set and an extra `jwvideo-mux` flag:
+
+```bash
+jwvm-build some-video.mp4 "E,TG,HV" --normalize-mismatched-aspect
+```
+
+Change the language set on a library you already built:
+
+```bash
+jwvm-relang some-video.mp4 "E,TG,CV,HV,SA,F"
+```
+
+#### Important Behavior / Defaults
+
+- Every function must be run with your shell's working directory set to the base-language folder (usually `E/`), and takes the video filename — not the full path — as its first argument.
+- `langs` defaults to `E,TG,CV,HV,SA` for every function; pass it as the second argument to override.
+- Assumes the "SCE Instructor/SCE Media/\<unit\>/" layout: `E/`, `TG/`, `HV/`, `CV/`, `SA/` sibling folders under a unit root, with the adaptive-library output and launchers written as siblings of those folders, not inside them.
+- `JWVIDEOMUX` resolves to the `jwvideo-mux` script sitting next to this file, so the two stay paired wherever you check this repo out.
+
+#### Notes / Caveats
+
+- `JWVM_GROUND_TRUTH` points at a human-audited overrides file outside this repo (private, corpus-specific data — not something a public script repo should ship). It's applied automatically when present and silently skipped when it isn't, so sourcing this file elsewhere, without that corpus, is safe — you just won't get the correction layer.
+- `jwvm-relang` deletes the existing library folder before rebuilding; it asks for confirmation first, but there's no undo once you answer yes.
 
 [↑ TOC](#table-of-contents)
 
