@@ -1,0 +1,657 @@
+#!/usr/bin/env bash
+# https://www.majlovesreg.one/tag/code/
+# Build 2025-05-15_13:40. Known issues: complex verse range won't work correctly.
+
+# Exit on errors
+set -e
+
+# ------------------------------------------------------------------------------
+# Cleanup function for temporary files
+# ------------------------------------------------------------------------------
+cleanup() {
+  for file in "${temp_files[@]}"; do
+    [ -f "${file}" ] && rm -f "${file}"
+  done
+}
+trap cleanup EXIT
+
+# ------------------------------------------------------------------------------
+# Source external script for custom functions (echo-g, echo-r, errx, etc.)
+# ------------------------------------------------------------------------------
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ -r "${HOME}/bin/maj-source" ]; then
+  source "${HOME}/bin/maj-source"
+elif [ -r "${script_dir}/../maj-source" ]; then
+  source "${script_dir}/../maj-source"
+else
+  echo "maj-source not found" >&2
+  exit 2
+fi
+
+################################################################################
+# Requirements
+# ------------------------------------------------------------------------------
+# Ensure all required dependencies are installed before proceeding
+# ------------------------------------------------------------------------------
+check_requirements() {
+  local deps=("jq" "getopt" "ffmpeg" "ffplay" "ffprobe" "magick" "identify" "mpv")
+  for dep in "${deps[@]}"; do
+    command -v "${dep}" >/dev/null 2>&1 || errx "Required program not found: ${dep}" 2
+  done
+}
+check_requirements
+
+# Prefer ffmpeg-full/ffplay-full (Homebrew tap build with drawtext/frei0r/etc.,
+# needed for this script's -vf filters) when available; fall back to plain
+# ffmpeg/ffplay on hosts (e.g. Linux) that don't have the -full build but
+# ship a distro ffmpeg with those filters already enabled.
+command -v ffmpeg-full >/dev/null 2>&1 && ffbin=ffmpeg-full || ffbin=ffmpeg
+command -v ffplay-full >/dev/null 2>&1 && ffplaybin=ffplay-full || ffplaybin=ffplay
+
+################################################################################
+# Functions
+################################################################################
+
+# ------------------------------------------------------------------------------
+# Find video file for given language, book, chapter, and official abbreviation
+# Tries several naming conventions and resolutions
+# ------------------------------------------------------------------------------
+find_video_file() {
+  local ll=$1 bb=$2 cc=$3 officialAbbreviation=$4
+  local video_file
+
+  # Try 720P mp4
+  video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_${cc}_r720P.mp4" 2>/dev/null || true)
+  [ -z "${video_file}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+    video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_0${cc}_r720P.mp4" 2>/dev/null || true)
+
+  # Try 720P m4v (old format)
+  [ -z "${video_file}" ] && \
+    video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_${cc}_r720P.m4v" 2>/dev/null || true)
+  [ -z "${video_file}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+    video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_0${cc}_r720P.m4v" 2>/dev/null || true)
+
+  # Try 480P m4v (old format)
+  [ -z "${video_file}" ] && \
+    video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_${cc}_r480P.m4v" 2>/dev/null || true)
+  [ -z "${video_file}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+    video_file=$(ls "${dir_videos}/nwt_${ll}-60fps/nwt_${bb}_${officialAbbreviation}_${ll}_0${cc}_r480P.m4v" 2>/dev/null || true)
+
+  echo "${video_file}"
+}
+
+# ------------------------------------------------------------------------------
+# Play video with ffplay or mpv, applying filters if needed
+# ------------------------------------------------------------------------------
+play_video() {
+  local video_file=$1 start_time=$2 duration=$3 filter=$4
+
+  if [ "${mpv}" = true ]; then
+    if [ -n "${filter}" ]; then
+      # If filter is set, create a temporary filtered file for mpv playback
+      temp_output=$(mktemp -t "${tmpfile_prefix}-mpv-XXXXXX").mkv
+      temp_files+=("${temp_output}")
+      $ffbin -hide_banner -loglevel error -ss "${start_time}" -t "${duration}" -i "${video_file}" -vf "${filter}" -c:v libx264 -preset ultrafast -crf 23 -c:a copy -f matroska "${temp_output}" || {
+        echo-r "Error: Failed to apply filters for mpv playback"
+        rm -f "${temp_output}"
+        return 1
+      }
+      mpv ${mpv_opts} --start=0 --length="${duration}" "${temp_output}"
+    else
+      mpv ${mpv_opts} --start="${start_time}" --length="${duration}" "${video_file}"
+    fi
+  else
+    $ffplaybin ${ffplay_opts} -ss "${start_time}" -t "${duration}" -i "${video_file}" ${filter:+-vf "${filter}"}
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Encode video with ffmpeg and optionally play it
+# ------------------------------------------------------------------------------
+encode_video() {
+  local video_file=$1 start_time=$2 end_time=$3 filter=$4 filename_output=$5
+  $ffbin ${ffmpeg_opts} -i "${video_file}" -ss "${start_time}" -to "${end_time}" ${filter:+-vf "${filter}"} ${ff_opts_post} "${filename_output}" || {
+    echo-r "Warning: Failed to encode '${filename_output}'"
+    return 0
+  }
+  echo
+  echo-g "Saved video to: '${filename_output}'"
+  echo
+  [ "${mpv}" = true ] && mpv ${mpv_opts} "${filename_output}"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Merge individual video files into a single file using ffmpeg concat protocol
+# ------------------------------------------------------------------------------
+merge_videos() {
+  local merged_file=$1
+  shift
+  local output_files=("${@}")
+  local intermediates=()
+  local concat
+  local ts_file
+
+  # Convert each input to .ts with robust error handling
+  for file in "${output_files[@]}"; do
+    ts_file=$(mktemp -t "${tmpfile_prefix}-ts-XXXXXX").ts || {
+      echo-r "Error: Failed to create temporary .ts file for '${file}'"
+      continue
+    }
+    intermediates+=("${ts_file}")
+    temp_files+=("${ts_file}")
+    echo "Converting to TS: '${file}' -> '${ts_file}'"
+    $ffbin -y -i "${file}" -c copy -f mpegts "${ts_file}" || {
+      echo-r "Warning: Failed to convert '${file}' to TS"
+      rm -f "${ts_file}"
+      intermediates=("${intermediates[@]/${ts_file}}")
+      continue
+    }
+  done
+
+  # Check if any .ts files were created
+  if [ ${#intermediates[@]} -eq 0 ]; then
+    echo-r "Error: No .ts files created, cannot merge videos"
+    return 1
+  fi
+
+  # Build concat protocol string
+  concat=$(IFS='|'; echo "${intermediates[*]}")
+  echo "Concat protocol: concat:${concat}"
+
+  # Merge videos using concat protocol
+  if [ -f "${merged_file}" ]; then
+    echo-r "Warning: Merged file '${merged_file}' already exists. Skipping."
+    return 0
+  fi
+  $ffbin ${ffmpeg_opts} -i "concat:${concat}" -c copy "${merged_file}" || {
+    echo-r "Warning: Failed to merge videos into '${merged_file}'"
+    return 1
+  }
+  echo
+  echo-g "Saved merged video to: '${merged_file}'"
+  echo
+  [ "${mpv}" = true ] && mpv ${mpv_opts} "${merged_file}"
+  return 0
+}
+
+# ------------------------------------------------------------------------------
+# Generate delogo and drawtext filters for a verse or verse range
+# ------------------------------------------------------------------------------
+generate_filters() {
+  local textfile_base=$1 overlay_book=$2 overlay_book_estimator=$3 v=$4 is_range=$5 x_adj=$6 y_adj=$7 s_adj=$8
+  shift 8
+  local start_time end_time
+  local delogo delogo_show drawtext filter_end w h imagefile_tr imagefile_est h_tr
+
+  # Prepare start/end time arrays for single verse or range
+  if [ "${is_range}" = "false" ]; then
+    start_time=("${@:1:1}")
+    end_time=("${@:2:1}")
+  else
+    start_time=("${@:1:$v_end-$v_start+1}")
+    end_time=("${@:$v_end-$v_start+2}")
+  fi
+
+  # Generate overlay images for translation and estimator
+  imagefile_tr="${textfile_base}_tr.png"
+  magick -background none -fill black -font "${fontfile}" -pointsize "${s_adj}" label:"${overlay_book} ${c}:${v}" "${imagefile_tr}"
+  h_tr=$(identify -format "%h" "${imagefile_tr}")
+  drawtext_ll="drawtext=text='${ll}':fontfile='${fontfile}':fontcolor=white:fontsize=${s_adj}:x=${x_adj}:y=$((y_adj + h_tr + drawtext_ll_y_offset)):alpha=${a_ll}"
+
+  if [ "${is_range}" = "false" ]; then
+    # Single verse: create text and overlay images, build filters
+    echo "${overlay_book} ${c}:${v}" > "${textfile_base}"
+    temp_files+=("${textfile_base}")
+    imagefile_est="${textfile_base}.png"
+    magick -background none -fill black -font "${fontfile_estimator}" -pointsize "${s_adj}" label:"${overlay_book_estimator} ${c}:${v}" "${imagefile_est}"
+    temp_files+=("${imagefile_est}" "${imagefile_tr}")
+    w=$(identify -format "%w" "${imagefile_est}")
+    h=$(identify -format "%h" "${imagefile_est}")
+    delogo="delogo=x=$((x_adj-5)):y=$((y_adj-5 + offset_top)):w=$((w + 10 + offset_overlay)):h=$((h+5)):show=0"
+    delogo_show="delogo=x=$((x_adj-5)):y=$((y_adj-5 + offset_top)):w=$((w + 10 + offset_overlay)):h=$((h+5)):show=0"
+    drawtext="drawtext=textfile='${textfile_base}':fontfile='${fontfile}':fontcolor=white:fontsize=${s_adj}:x=${x_adj}:y=${y_adj}:alpha=${a}"
+    filter_play="${delogo_show},${drawtext},${drawtext_ll}"
+    filter_encode="${delogo},${drawtext},${drawtext_ll}"
+  else
+    # Verse range: generate overlays and filters for each verse in range
+    delogo=""
+    delogo_show=""
+    drawtext=""
+    for vv in $(seq "${v_start}" "${v_end}"); do
+      textfile="${textfile_base}-${vv}"
+      echo "${overlay_book} ${c}:${vv}" > "${textfile}"
+      temp_files+=("${textfile}")
+      imagefile_est="${textfile}.png"
+      magick -background none -fill black -font "${fontfile_estimator}" -pointsize "${s_adj}" label:"${overlay_book_estimator} ${c}:${vv}" "${imagefile_est}"
+      temp_files+=("${imagefile_est}")
+      w=$(identify -format "%w" "${imagefile_est}")
+      h=$(identify -format "%h" "${imagefile_est}")
+      # Adjust times for speed
+      start_time_adj="${start_time[$((vv-v_start))]}"
+      filter_end=$( [ "${vv}" -eq "${v_end}" ] && echo "${end_time[$((vv-v_start))]} + 0.02" | bc || echo "${end_time[$((vv-v_start))]}" )
+      if [ "${mpv}" = true ]; then
+        start_time_adj=$(echo "${start_time[$((vv-v_start))]} - ${start_time[0]}" | bc -l)
+        filter_end=$( [ "${vv}" -eq "${v_end}" ] && echo "${end_time[$((vv-v_start))]} - ${start_time[0]} + 0.02" | bc -l || echo "${end_time[$((vv-v_start))]} - ${start_time[0]}" )
+      fi
+      delogo+="delogo=x=$((x_adj-5)):y=$((y_adj-5 + offset_top)):w=$((w + 10 + offset_overlay)):h=$((h+5)):show=0:enable='between(t,${start_time_adj},${filter_end})',"
+      delogo_show+="delogo=x=$((x_adj-5)):y=$((y_adj-5 + offset_top)):w=$((w + 10 + offset_overlay)):h=$((h+5)):show=0:enable='between(t,${start_time_adj},${filter_end})',"
+      drawtext+="drawtext=textfile='${textfile}':fontfile='${fontfile}':fontcolor=white:fontsize=${s_adj}:x=${x_adj}:y=${y_adj}:alpha=${a}:enable='between(t,${start_time_adj},${filter_end})',"
+    done
+    temp_files+=("${imagefile_tr}")
+    filter_play="${delogo_show}${drawtext}${drawtext_ll}"
+    filter_encode="${delogo}${drawtext}${drawtext_ll}"
+  fi
+
+  echo "${filter_play}|${filter_encode}"
+}
+
+# ------------------------------------------------------------------------------
+# Process verses for a given language: cut, overlay, encode, and merge as needed
+# ------------------------------------------------------------------------------
+process_verses() {
+  local ll=$1 video_file=$2 vss=("${@:3}")
+  local lang_iso overlay_book overlay_book_estimator filename_output merged_file output_files
+  local start_time end_time filter_play filter_encode duration
+  local x_adj="${x}" y_adj="${y}" s_adj="${s}"
+  local mpv_original="${mpv}"  # Store original mpv state
+  temp_files=()
+  output_files=()
+
+  # Special case: if both -f and -m are set, disable mpv during encoding
+  if [ "${encode}" = true ] && [ "${mpv}" = true ]; then
+    mpv=false
+  fi
+
+  lang_iso=$(echo "${langs}" | jq -r ".${ll}")
+  [ -r "${dir_videos}/nwtsty_${lang_tr_iso}.json" ] || errx "Translation info not found: ${dir_videos}/nwtsty_${lang_tr_iso}.json" 7
+  overlay_book=$(jq -r ".books.\"${b}\".standardSingularBookName" "${dir_videos}/nwtsty_${lang_tr_iso}.json")
+  overlay_book_estimator=$(jq -r ".books.\"${b}\".standardSingularBookName" "${dir_videos}/nwtsty_${lang_iso}.json")
+
+  # Adjust coordinates for 480P videos
+  echo "${video_file}" | grep -q "_r480P\." && {
+    x_adj=$(echo "${x} * 480 / 720" | bc)
+    y_adj=$(echo "${y} * 480 / 720" | bc)
+    s_adj=$(echo "${s} * 480 / 720" | bc)
+  }
+
+  # Generate merged filename for output
+  merged_file="${dir_pwd}/$(echo "$(jq -r ".books.\"${b}\".standardSingularBookName" "${dir_videos}/nwtsty_${lang_iso_default}.json") ${c}_${vss[*]}" | sed 's/ / - /g; s#[<>:"/\|?*]#_#g') - ${ll} - VI60.mp4"
+
+  for vvv in "${vss[@]}"; do
+    start_time=()
+    end_time=()
+    filename_output="${dir_pwd}/$(echo "$(jq -r ".books.\"${b}\".standardSingularBookName" "${dir_videos}/nwtsty_${lang_iso_default}.json") ${c}:${vvv} - ${ll} - VI60.mp4" | sed 's#[<>:"/\|?*]#_#g')"
+    output_files+=("${filename_output}")
+
+    # Single verse
+    if [[ "${vvv}" =~ ^[0-9]+$ ]]; then
+      v="${vvv}"
+      # Get start/end time for the verse from ffprobe
+      if [ "$single_chapter" ]; then
+        start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+          jq -r '.chapters[] | select( .tags.title | test(" '${v}'($|\r$)") ) | { start_time, end_time }')
+      else
+        start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \ 
+          jq -r '.chapters[] | select( .tags.title | test(" '${c}':'${v}'($|\r$)") ) | { start_time, end_time }')
+      fi      
+      [ -z "${start_end}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+        start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+          jq -r ".chapters[] | select(.tags.title | test(\" 0${c}:${v}($|\\r$)\") ) | { start_time, end_time }")
+      [ -z "${start_end}" ] && errx "Verse ${c}:${v} not available in ${ll}." 6
+
+      start_time[0]=$(echo "${start_end}" | jq -r '.start_time')
+      end_time[0]=$(echo "${start_end}" | jq -r '.end_time')
+      [ -n "${offset_start}" ] && start_time[0]=$(echo "${start_time[0]} + ${offset_start}" | bc)
+      [ -n "${offset_end}" ] && end_time[0]=$(echo "${end_time[0]} + ${offset_end}" | bc)
+
+    # Verse range
+    else
+      [[ "${vvv}" =~ - ]] || continue
+      v_start="${vvv%-*}"
+      v_end="${vvv#*-}"
+      # Get start/end time for each verse in the range
+      for v in $(seq "${v_start}" "${v_end}"); do
+        if [ "$single_chapter" ]; then
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+            jq -r '.chapters[] | select( .tags.title | test(" '${v}'($|\r$)") ) | { start_time, end_time }')
+        else
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \ 
+            jq -r '.chapters[] | select( .tags.title | test(" '${c}':'${v}'($|\r$)") ) | { start_time, end_time }')
+        fi
+        [ -z "${start_end}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+            jq -r ".chapters[] | select(.tags.title | test(\" 0${c}:${v}($|\\r$)\") ) | { start_time, end_time }")
+        [ -z "${start_end}" ] && continue
+        start_time[$((v-v_start))]=$(echo "${start_end}" | jq -r '.start_time')
+        end_time[$((v-v_start))]=$(echo "${start_end}" | jq -r '.end_time')
+      done
+      [ -n "${offset_start}" ] && start_time[0]=$(echo "${start_time[0]} + ${offset_start}" | bc)
+      [ -n "${offset_end}" ] && end_time[$((v_end-v_start))]=$(echo "${end_time[$((v_end-v_start))]} + ${offset_end}" | bc)
+    fi
+
+    # If translation language matches input language, just cut the video
+    if [ "${ll}" = "${lang_tr}" ]; then
+      start_time_scalar="${start_time[0]}"
+      end_time_scalar="${end_time[$((v_end-v_start))]}"
+      duration=$(echo "${end_time_scalar} - ${start_time_scalar}" | bc)
+      if [ "${encode}" != true ]; then
+        play_video "${video_file}" "${start_time_scalar}" "${duration}" ""
+      else
+        encode_video "${video_file}" "${start_time_scalar}" "${end_time_scalar}" "" "${filename_output}"
+      fi
+    else
+      # Translation overlay: generate filters and encode/play
+      textfile_base=$(mktemp --tmpdir "${tmpfile_prefix}-XXXXXXXXXX")
+      if [[ "${vvv}" =~ ^[0-9]+$ ]]; then
+        filters=$(generate_filters "${textfile_base}" "${overlay_book}" "${overlay_book_estimator}" "${v}" "false" "${x_adj}" "${y_adj}" "${s_adj}" "${start_time[0]}" "${end_time[0]}")
+      else
+        [ -z "${start_time[0]}" ] || [ -z "${end_time[$((v_end-v_start))]}" ] && continue
+        filters=$(generate_filters "${textfile_base}" "${overlay_book}" "${overlay_book_estimator}" "${v_start}" "true" "${x_adj}" "${y_adj}" "${s_adj}" "${start_time[@]}" "${end_time[@]}")
+      fi
+      filter_play=$(echo "${filters}" | cut -d'|' -f1)
+      filter_encode=$(echo "${filters}" | cut -d'|' -f2)
+
+      start_time_scalar="${start_time[0]}"
+      end_time_scalar="${end_time[$((v_end-v_start))]}"
+      duration=$(echo "${end_time_scalar} - ${start_time_scalar}" | bc)
+      if [ "${encode}" != true ]; then
+        play_video "${video_file}" "${start_time_scalar}" "${duration}" "${filter_play}"
+      else
+        encode_video "${video_file}" "${start_time_scalar}" "${end_time_scalar}" "${filter_encode}" "${filename_output}"
+      fi
+    fi
+  done
+
+  # Merge videos if encoding and multiple files exist
+  if [ "${encode}" = true ] && [ ${#output_files[@]} -gt 1 ]; then
+    merge_videos "${merged_file}" "${output_files[@]}"
+  fi
+
+  # Special case: if both -f and -m were originally set, play the final output
+  if [ "${encode}" = true ] && [ "${mpv_original}" = true ]; then
+    mpv=true  # Restore mpv for playback
+    if [ ${#output_files[@]} -gt 1 ]; then
+      [ -f "${merged_file}" ] && mpv ${mpv_opts} "${merged_file}"
+    elif [ ${#output_files[@]} -eq 1 ]; then
+      [ -f "${output_files[0]}" ] && mpv ${mpv_opts} "${output_files[0]}"
+    fi
+  fi
+}
+
+# ------------------------------------------------------------------------------
+# Process 'any' mode by checking priority languages for available videos
+# ------------------------------------------------------------------------------
+process_any_mode() {
+  local vss=("${@}")
+  local priority_langs=("SLV" "BVL" "SPE" "INI" "ASL")
+  local checked_langs=()
+  local found=false
+
+  for ll in "${priority_langs[@]}"; do
+    [[ " ${langs_available[*]} " =~ " ${ll} " ]] || continue
+    checked_langs+=("${ll}")
+    video_file=$(find_video_file "${ll}" "${bb}" "${cc}" "${officialAbbreviation}")
+    [ -z "${video_file}" ] && continue
+
+    all_verses_available=true
+    for vvv in "${vss[@]}"; do
+      if [[ "${vvv}" =~ ^[0-9]+$ ]]; then
+        v="${vvv}"
+        if [ "$single_chapter" ]; then
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+            jq -r '.chapters[] | select( .tags.title | test(" '${v}'($|\r$)") ) | { start_time, end_time }')
+        else
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \ 
+            jq -r '.chapters[] | select( .tags.title | test(" '${c}':'${v}'($|\r$)") ) | { start_time, end_time }')
+        fi
+        [ -z "${start_end}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+            jq -r ".chapters[] | select(.tags.title | test(\" 0${c}:${v}($|\\r$)\") ) | { start_time, end_time }")
+        [ -z "${start_end}" ] && { all_verses_available=false; break; }
+      else
+        [[ "${vvv}" =~ - ]] || continue
+        for v in $(seq "${vvv%-*}" "${vvv#*-}"); do
+          if [ "$single_chapter" ]; then
+            start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+              jq -r '.chapters[] | select( .tags.title | test(" '${v}'($|\r$)") ) | { start_time, end_time }')
+          else
+            start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \ 
+              jq -r '.chapters[] | select( .tags.title | test(" '${c}':'${v}'($|\r$)") ) | { start_time, end_time }')
+          fi
+          [ -z "${start_end}" ] && [ "${b}" -eq 19 ] && [ "${c}" -lt 100 ] && \
+            start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+              jq -r ".chapters[] | select(.tags.title | test(\" 0${c}:${v}($|\\r$)\") ) | { start_time, end_time }")
+          [ -z "${start_end}" ] && { all_verses_available=false; break; }
+        done
+        [ "${all_verses_available}" = false ] && break
+      fi
+    done
+
+    if [ "${all_verses_available}" = true ]; then
+      found=true
+      echo-g "Found ${b_name} ${c}:${vss[*]} in ${ll}, processing..."
+      process_verses "${ll}" "${video_file}" "${vss[@]}"
+      break
+    fi
+  done
+
+  if [ "${found}" = false ]; then
+    echo-r "No videos found for ${b_name} ${c}:${vss[*]} in any language."
+    echo "Checked languages in priority order: ${checked_langs[*]}"
+    exit 1
+  fi
+}
+
+################################################################################
+# Variables and Defaults
+################################################################################
+
+debug=
+dir_pwd="${PWD}"
+
+# ------------------------------------------------------------------------------
+# Set video directory and getopt path based on OS
+# ------------------------------------------------------------------------------
+case "$(uname)" in
+  Linux)
+    dir_videos="${HOME}/Videos/SL/Publications/nwt/nwt_sl_60fps"
+    getopt="$(which getopt)"
+    ;;
+  Darwin)
+    luksdrive_mount="${LUKSDRIVE_MOUNT:-/Users/maj/mnt/maj-01-black}"
+    dir_videos="${luksdrive_mount}/SL/SL Videos/Publications/nwt_sl"
+    getopt="$(brew --prefix gnu-getopt)/bin/getopt"
+    ;;
+  *)
+    dir_videos="${HOME}/Videos/SL/Publications/nwt/nwt_sl_60fps"
+    ;;
+esac
+
+[ -d "${dir_videos}" ] || errx "Video directory '${dir_videos}' not found. Please double-check the path." 8
+
+priority="SLV,BVL,SPE,INI,ASL"
+lang_tr='SLV'
+lang_tr_iso='vi'
+lang_iso_default='en'
+fontfile="${HOME}/.fonts/Sans/Noto_Sans_Display/static/NotoSansDisplay-SemiBold.ttf"
+fontfile_estimator="${HOME}/.fonts/Sans/Noto_Sans_Display/static/NotoSansDisplay-Regular.ttf"
+ffplay_opts='-fs -noborder -autoexit -hide_banner -loglevel error -stats'
+ffmpeg_opts='-hide_banner -loglevel error -stats'
+ff_opts_post="-y -c:a copy -c:v libx264 -c:s mov_text -crf 20 -preset slow"
+mpv_opts='--no-config --fullscreen=yes  --no-keep-open --resume-playback=no --save-position-on-quit=no --hwdec=auto' # --speed=1.4 --screen=1 needed to play on TV in extended mode when interpreting
+langs='{
+  "ASL": "en",
+  "BVL": "es",
+  "SPE": "es",
+  "SLV": "vi",
+  "INI": "id"
+}'
+
+# FFmpeg variables
+x=93                      # Draw text translation x-axis from top left
+y=54                      # Draw text translation y-axis from top left
+s=34                      # Font size
+a=0.66                    # Transparency of overlay text
+a_ll=0                    # Transparency of source language, set to 0 to hide
+drawtext_ll_y_offset=-5   # Offset pixels between reference and source language
+offset_end_default=-0.02  # Default cut at end of scripture
+tmpfile_prefix='ff-vi60-verse'
+temp_files=()
+
+################################################################################
+# Usage and Options
+################################################################################
+
+usage() {
+  echo "
+Usage: $(basename "${0}") <SL language code> <Bible reference (Book Chapter:Verses)> [Additional options]
+
+Required parameters:
+  SL language code     Three-letter language code used by jw.org (e.g., ASL, SLV).
+                       If 'ALL' is supplied, search available languages for verses.
+                       If 'ANY' is supplied, process the first available language based on priority: ${priority}.
+  Bible reference      Single-chapter reference in quotation marks (e.g., '1 Sa-mu-ên 2:12-17, 22-25, 27-30').
+
+Optional options:
+  -f, --ffmpeg         Encode using ffmpeg, producing individual files for each verse range and a merged file
+  -m, --mpv            Play output videos using mpv (with -f, plays only the merged file; without -f, plays each segment)
+  -s, --offset-start   ([+]/-)seconds at start of video
+  -e, --offset-end     ([+]/-)seconds at end of video
+  -w, --offset-width   ([+]/-)pixels for delogo filter text width
+  -t, --offset-top     ([+]/-)pixels for delogo filter text y-axis
+  -h, --help           Show this help text
+
+Examples:
+  Search available languages: $(basename "${0}") all '1 Sa-mu-ên 2:12-17, 22-25, 27-30'
+  Process first available language: $(basename "${0}") any '1 Sa-mu-ên 2:12-17, 22-25, 27-30' -m
+  Encode individual and merged files: $(basename "${0}") any '1 Sa-mu-ên 2:12-17, 22-25, 27-30' -f
+  Encode and play merged file with mpv: $(basename "${0}") ASL '1 Sa-mu-ên 2:12-17, 22-25, 27-30' -fm
+"
+  exit 1
+}
+
+# ------------------------------------------------------------------------------
+# Parse command-line options using getopt
+# ------------------------------------------------------------------------------
+options=$("${getopt}" -o f,m,s:,e:,w:,t:,h -l ffmpeg,mpv,offset-start:,offset-end:,offset-width:,offset-top:,help -n "$(basename "${0}")" -- "$@")
+[ $? -eq 0 ] || usage
+eval set -- "${options}"
+
+encode=false
+mpv=false
+offset_start=""
+offset_end=""
+offset_overlay=""
+offset_top=""
+while :; do
+  case "${1}" in
+    -f|--ffmpeg) encode=true ;;
+    -m|--mpv) mpv=true ;;
+    -s|--offset-start) shift; offset_start="${1}" ;;
+    -e|--offset-end) shift; offset_end="${1}" ;;
+    -w|--offset-width) shift; offset_overlay="${1}" ;;
+    -t|--offset-top) shift; offset_top="${1}" ;;
+    -h|--help) usage ;;
+    --) shift; break ;;
+  esac
+  shift
+done
+[ -z "${2}" ] && usage
+[ -z "${offset_end}" ] && offset_end="${offset_end_default}"
+
+################################################################################
+# Main Logic
+################################################################################
+
+# ------------------------------------------------------------------------------
+# Prepare language list and sort by priority
+# ------------------------------------------------------------------------------
+cd "${dir_videos}"
+langs_available=($(ls -1d */ | grep -o '[A-Z]\{3\}' | sort -u))
+priority_langs=("SLV" "BVL" "SPE" "INI" "ASL")
+sorted_langs=()
+for lang in "${priority_langs[@]}"; do
+  [[ " ${langs_available[*]} " =~ " ${lang} " ]] && sorted_langs+=("${lang}")
+done
+for lang in "${langs_available[@]}"; do
+  [[ " ${priority_langs[*]} " =~ " ${lang} " ]] || sorted_langs+=("${lang}")
+done
+langs_available=("${sorted_langs[@]}")
+
+# ------------------------------------------------------------------------------
+# Parse input arguments: language, book, chapter, verses
+# ------------------------------------------------------------------------------
+l="${1}"
+ll=${l^^}
+b=$(echo "${2}" | grep -o '^\([0-9]\)\?[^0-9]*' | tr -s ' ' | sed 's/^[ \t]*//;s/[ \t]*$//')
+b_name="${b^}"
+[ "${b}" -eq "${b}" ] 2>/dev/null || b=$(jq -r ".books | to_entries | map(select(.value[] == \"${b_name}\") | .key)[0]" "${dir_videos}/nwtsty_${lang_iso_default}.json")
+[ "${b}" -eq "${b}" ] 2>/dev/null || {
+  for lll in "${langs_available[@]}"; do
+    lang_iso_lll=$(echo "${langs}" | jq -r ".${lll}")
+    b=$(jq -r ".books | to_entries | map(select(.value[] == \"${b_name}\") | .key)[0]" "${dir_videos}/nwtsty_${lang_iso_lll}.json")
+    [ "${b}" -eq "${b}" ] 2>/dev/null && break
+  done
+}
+[ "${b}" -eq "${b}" ] 2>/dev/null || errx "Book name not found in ${langs_available[*]}: ${b_name}" 3
+bb=$(printf "%02d" "${b}")
+echo "${2}" | grep -q ":" && c=$(echo "${2}" | grep -o '^[^:]*' | grep -o '[0-9]*$' | tr -d ' ') || { c=1; single_chapter=true; }
+cc=$(printf "%02d" "${c}")
+officialAbbreviation=$(jq -r ".books.\"${b}\".officialAbbreviation" "${dir_videos}/nwtsty_${lang_iso_default}.json")
+
+# ------------------------------------------------------------------------------
+# Parse and consolidate verses (combine consecutive numbers into ranges)
+# ------------------------------------------------------------------------------
+vss=($(echo "${2}" | grep -o '[0-9 ,-]*$' | sed 's/,/ /g' | tr -s ' '))
+n=0
+while [ ${n} -lt ${#vss[@]} ]; do
+  if [ $((n + 1)) -lt ${#vss[@]} ] && [ "$((vss[n] + 1))" -eq "${vss[$((n+1))]}" ] 2>/dev/null; then
+    vss[n]="${vss[n]}-${vss[$((n+1))]}"
+    unset "vss[$((n+1))]"
+    vss=("${vss[@]}")
+  else
+    n=$((n + 1))
+  fi
+done
+
+# ------------------------------------------------------------------------------
+# Main processing: ALL, ANY, or specific language
+# ------------------------------------------------------------------------------
+if [ "${ll}" = "ALL" ]; then
+  for ll in "${langs_available[@]}"; do
+    video_file=$(find_video_file "${ll}" "${bb}" "${cc}" "${officialAbbreviation}")
+    [ -z "${video_file}" ] && continue
+    for vvv in "${vss[@]}"; do
+      if [[ "${vvv}" =~ ^[0-9]+$ ]]; then
+        v="${vvv}"
+        start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+          jq -r ".chapters[] | select(.tags.title | test(\" (${c}:)?${v}($|\\r$)\") ) | { start_time, end_time }")
+        [ -z "${start_end}" ] && echo-r "❌ ${ll} ${b_name} ${c}:${v}" || echo-g "✅ ${ll} ${b_name} ${c}:${v}"
+      else
+        [[ "${vvv}" =~ - ]] || continue
+        for v in $(seq "${vvv%-*}" "${vvv#*-}"); do
+          start_end=$(ffprobe -hide_banner -loglevel quiet -show_chapters -print_format json "${video_file}" | \
+            jq -r ".chapters[] | select(.tags.title | test(\" (${c}:)?${v}($|\\r$)\") ) | { start_time, end_time }")
+          [ -z "${start_end}" ] && echo-r "❌ ${ll} ${b_name} ${c}:${v}" || echo-g "✅ ${ll} ${b_name} ${c}:${v}"
+        done
+      fi
+    done
+    echo
+  done
+elif [ "${ll}" = "ANY" ]; then
+  cd "${dir_pwd}"
+  process_any_mode "${vss[@]}"
+else
+  cd "${dir_pwd}"
+  [ -d "${dir_videos}/nwt_${ll}-60fps" ] || errx "Language ${ll} not found! Use scripts sl_dl_nwt_info and sl_dl_nwt?" 4
+  video_file=$(find_video_file "${ll}" "${bb}" "${cc}" "${officialAbbreviation}")
+  [ -z "${video_file}" ] && errx "${b_name} chapter ${c} not available in ${ll}" 5
+  echo-b "Source video file: '${video_file}'"
+  echo
+  process_verses "${ll}" "${video_file}" "${vss[@]}"
+fi
+
+################################################################################
+# Cleanup handled by trap
+exit 0

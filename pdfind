@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Find search terms inside PDFs. Regex supported.
+# May be used with nautilus-actions.
+# Needed programs: zenity, pdfgrep. Optional: evince.
+
+lastsavefile="`dirname $0`/pdfind.last"
+
+if [ -r $lastsavefile ]; then lastsavetext="`cat $lastsavefile`"; fi
+
+search=`zenity --entry --text="Type the string to search for..." --title="Search within PDFs in this directory" --width=350 --entry-text="$lastsavetext"`
+
+if [ -n "$search" ]; then
+	echo ""$search"" > $lastsavefile
+	out=`find -name "*.pdf" -type f -exec pdfgrep -niHC60 "$search" {} \; | sed s/"$search"/"\*$search\*"/ | sed s/:/\\\n/ | sed s/:/\\\n/ | sed 's/^[[:space:]]*\(.*\)[[:space:]]*$/\1/' | sed s/\\\.\\\/// | tee >(zenity --progress --text="Searching within PDF files..." --auto-close --auto-kill --pulsate) | zenity --list --width=850 --height=300 --title "PDF Search Results" --text "Choose which PDF file to open ..." --column "Filename:" --column "Page:" --column "Search string:" --print-column=All --separator=^`
+	filename="`echo ""$out"" | sed s/\\\^.*// | sed s/\\\*// | sed s/\\\*// | sed s/\\\*// | sed s/\\\*//`"
+	page=`echo ""$out"" |  sed s/.*f^// | sed s/\\\^.*//`
+# elif [ $search -eq 1  ]; then exit 0
+else
+	zenity --warning --text="No search string was typed or search was cancelled." --title="Error"
+fi
+# zenity --warning --text="$out --- $page --- $filename" --title="Error"
+if [ -n "$filename" ]; then
+   evince -i ""$page"" -l ""$search"" "$filename" &
+fi
