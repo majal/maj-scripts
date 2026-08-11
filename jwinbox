@@ -1,0 +1,135 @@
+#!/bin/bash
+# Automatically check jw.org inbox for new messages
+# In popular Linux distros (e.g. Ubuntu) all of the programs here come pre-installed. (Except maybe your favorite browser.) 
+# These may include: wget, notify-send, gpg, mplayer|aplay, firefox|google-chrome|...
+# You may check stderr if one of those programs aren't installed
+# v3.6 November 2016 - https://www.jw.org/apps moved to https://apps.jw.org, site-wide use of HSTS
+# v3.5 October 2016 - reformat for use of test [] functions, online checker, tabs
+# v3 July 2016 edit, Emeth3, CO, human readable links in jw.org, new docs and letters format, Doc titles shown
+
+### INITIALIZATION LINES (NO NEED TO EDIT THIS SECTION) ###
+# Check for multiple sessions of script
+[ $(pgrep -c "`basename $0`") -gt 1 ] && { echo; echo -e "\e[1m\e[93m`basename $0`: \e[0mMultiple script instances found! \e[91mExiting..."; echo; exit 1; }
+
+# Online checker
+maj-online () {
+  ipaddr='8.8.8.8'
+  [ -z `ping -c1 $ipaddr |& grep -o 'Network is unreachable'` ] || exit 1
+  [ -z `ping -c3 $ipaddr |& grep -o '100% packet loss'` ] && exit 0 || exit 2
+}
+
+# Change to current directory of the script (optional)
+cd "`dirname $0`"
+
+### ***************************************************************************** ###
+### ***** PREFERENCES (MAKE EDITS AND FILL OUT VALUES IN THIS SECTION ONLY) ***** ###
+### ***************************************************************************** ###
+
+# jw.org account details
+# (Option 1 - plaintext passwords)
+username=''
+password=''
+
+# Authentication (modification optional, see below)
+auth="txtUserName=$username&txtPassword=$password"
+
+# (Option 2 - encrypted username and password)
+# If you prefer a password in an encrypted file, encrypt username and password in this format:
+# txtUserName=$username&txtPassword=$password
+# i.e. `echo "txtUserName=$username&txtPassword=$password" | gpg -c - > .encrypted-file`
+# You may wish to store this file separated from the script directory and do a `chmod 600`
+# Store auth as below:
+
+# auth=`gpg --batch -q --passphrase-file /path/to/passphrase -d ./encrypted-file`
+
+# Optional. Domain code - only for those with multiple domains. Leave blank for those with single domains.
+# This is the unique numeric/alphanumeric code for your domain.
+# First login to your account in a browser and see the URL in the format: https://www.jw.org/apps/<LANG>_<txtAcct>_<PAGE>
+# For example, you may see in the address bar immediately after you logged in: https://www.jw.org/apps/E_1234567890_ADMIN
+# Then your txtAcct would be: 1234567890
+txtAcct=''
+
+# Time interval when checking jw.org account, could be: second, minute, hour, day: s m h d
+checkevery=4h
+
+# For sound notifications
+# I personally use "aplay -q" since my sound is wav, i.e. "/usr/share/sounds/Feather Sound Set/incoming_call.wav"
+player="mplayer -quiet"
+# sound="/path/to/sound"
+sound="/usr/share/sounds/freedesktop/stereo/service-login.oga"
+
+# Browser to use, e.g. firefox
+browser="google-chrome"
+
+### ****************************************************************** ###
+### ***** END OF PREFERENCES (NO NEED TO EDIT LINES THAT FOLLOW) ***** ###
+### ****************************************************************** ###
+
+
+# Add an underscore to txtAcct if present
+[ ! -z "$txtAcct" ] && txtAcct="_${txtAcct}"
+
+# URL transforms
+login="https://apps.jw.org/E_LOGIN1"
+post="https://apps.jw.org/E_LOGIN2"
+logout="https://apps.jw.org/E${txtAcct}_LOGOUT"
+
+inbox="https://apps.jw.org/E${txtAcct}_INBOX"
+changed="https://apps.jw.org/E${txtAcct}_NOTIFICATIONS?txtAction=CHANGEDWIKIDOCS"
+letters="https://apps.jw.org/E${txtAcct}_VIEWLETTER"
+forms="https://apps.jw.org/E${txtAcct}_VIEWFORM"
+media="https://apps.jw.org/E${txtAcct}_VIEWEVENTMEDIA"
+
+
+### Main script ###
+
+while true; do
+
+  while ! maj-online; do sleep 15m; done
+
+  wget --post-data """$auth""" --keep-session-cookies --save-cookies .a -qO /dev/null "$post"
+  wget --load-cookies ./.a -qO .i "$inbox"
+  wget --load-cookies ./.a -qO .c "$changed"
+  wget --load-cookies ./.a -qO .l "$letters"
+  wget --load-cookies ./.a -qO .f "$forms"
+  wget --load-cookies ./.a -qO .m "$media"
+  wget --load-cookies ./.a -qO /dev/null "$logout" &
+
+  unread=`cat ./.i | grep -o "Inbox ([0-9]*)" | sed 's/[^0-9]*//g'`
+
+  lettersCount=`cat ./.c | grep -o 'Letters[^}]*' | sed 's/[^0-9]*//g'`
+  mediaCount=`cat ./.c | grep -o 'Event Media[^}]*' | sed 's/[^0-9]*//g'`
+  formsCount=`cat ./.c | grep -o 'Forms[^}]*' | sed 's/[^0-9]*//g'`
+  newsl=`cat ./.c | grep -o 'Sign Language[^}]*' | sed 's/[^0-9]*//g'`
+
+  [ -z $lettersCount ] && lettersCount=0
+  [ $lettersCount -gt 0 ] && lettersContent="`cat ./.l | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
+  [ -z $formsCount ] && formsCount=0
+  [ $formsCount -gt 0 ] && formsContent="`cat ./.f | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
+  [ -z $mediaCount ] && mediaCount=0
+  [ $mediaCount -gt 0 ] && mediaContent="`cat ./.m | tr -s ' ' | tr -d '\n' | sed -e 's/docHangIndent/\n/g' | grep -oP "imgToggleDocAbstract.*?<" | grep -o ">.*<" | tr -d '<>' | sed 's/^ //'`"
+
+  shred -fuz .a .i .c .l .f .m
+
+  [ -z $unread ] && unread=0
+  [ $unread -eq 1 ] && notify-send -u normal "You have a new message in your jw.org inbox."
+  [ $unread -gt 1 ] && notify-send -u normal "You have ($unread) new messages in your jw.org inbox."
+  [ $unread -gt 0 ] && for a in 1 2 3; do $player "$sound"; done &
+  [ $unread -gt 0 ] && $browser $login &>/dev/null &
+
+  [ $lettersCount -gt 0 ] && notify-send -u normal "New letters ($lettersCount):" "$lettersContent"
+  [ $lettersCount -gt 0 ] && for a in 1 2; do $player "$sound"; done &
+
+  [ $mediaCount -gt 0 ] && notify-send -u normal "New media ($mediaCount):" "$mediaContent"
+  [ $mediaCount -gt 0 ] && for a in 1; do $player "$sound"; done &
+
+  [ $formsCount -gt 0 ] && notify-send -u normal "New forms ($formsCount):" "$formsContent"
+  [ $formsCount -gt 0 ] && for a in 1; do $player "$sound"; done &
+
+  [ -z $newsl ] && newsl=0
+  [ $newsl -eq 1 ] && notify-send -u low "There is a new Sign Language document in jw.org."
+  [ $newsl -gt 1 ] && notify-send -u low "There are ($newsl) new Sign Language documents in jw.org."
+  [ $newsl -gt 0 ] && $player "$sound" &
+
+  sleep "$checkevery"
+done

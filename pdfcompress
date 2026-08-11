@@ -1,0 +1,27 @@
+#!/bin/bash
+
+[[ -z "$1" ]] && echo "Please enter a filename. Exiting..."
+[[ -z "$1" ]] && exit 1
+
+echo
+echo -e "\e[1mThis will compress the following PDFs:\e[0m"
+echo
+for p in "$@"; do echo "$p"; c=$((c+1)); done
+echo
+echo -e "\e[1mCount: $c\e[0m"
+echo
+echo -e "\e[1m\e[32mPress [Enter] to continue... \e[31m[Ctrl+C to cancel]\e[0m"
+read
+printf "Compressing... "
+
+for a in "$@"; do mv "$a" "$a".uncompressed; done
+
+for b in *.pdf.uncompressed; do cc=$((cc+1)); printf "\rCompressing... $cc of $c"; qpdf --linearize "$b" - | pdftk - output "${b%.uncompressed}" compress; done
+
+[[ -d ./orig ]] || mkdir orig
+mv *.uncompressed orig/
+
+echo ". Done."
+echo
+echo "Originals moved to orig folder"
+echo
