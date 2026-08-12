@@ -116,7 +116,7 @@ Preview what a run would fetch without downloading:
 
 ### [`jwsl`](./jwsl)
 
-`jwsl` is a unified tool for downloading, extracting, overlaying, and interpolating Sign Language Bible videos.
+`jwsl` is a unified tool for downloading, extracting, overlaying, and interpolating Sign Language Bible videos. It's not techie-only: `jwsl setup` walks through the choices below with plain-language prompts and sane defaults.
 
 Quick links inside this script section:
 
@@ -132,11 +132,15 @@ Quick links inside this script section:
 
 #### What It Does
 
-- Fetches JW.org API metadata to track and download Sign Language Bible videos (NWT) on demand.
-- Extracts specific verses using embedded chapter timestamps.
+- Fetches JW.org API metadata to track available Sign Language Bible videos (NWT) — including the per-verse timestamps JW.org already publishes, so it doesn't need to download a video just to find out where a verse starts.
+- Extracts specific verses by streaming just the needed seconds directly from the source URL by default, so a one-verse pull doesn't cost a whole chapter's worth of disk space. Use `--cache` when you'd rather download the full chapter once and reuse it for more verses from the same chapter.
 - Optionally applies translated text overlays for book names and chapter/verse numbers.
 - Interpolates the extracted clip to 60fps for smoother sign language playback using `ffmpeg` (minterpolate or framerate) or `rife-ncnn-vulkan` (GPU-accelerated AI).
-- Maintains a local cache of downloaded full-chapter videos to save bandwidth.
+- Syncs and extracts across your whole language list in parallel (`jwsl sync all`, `jwsl extract all "Rev 13:1, 2"`), instead of one language at a time.
+- Maintains a local cache of downloaded full-chapter videos, capped by size with oldest-used chapters evicted first, so it can't quietly fill your disk.
+- `jwsl find <book> <chapter> <verse>` searches every language you've already synced for who has a given verse, without downloading anything.
+- `jwsl bulk <lang>` precomputes whole chapters ahead of time (optionally interpolated to 60fps), for when you'd rather batch-process a language than extract on demand.
+- Auto-detects a drawtext-capable `ffmpeg` build (looks for a `-full` variant before falling back to the stock formula), so overlays work without hand-picking a binary.
 
 <a id="jwsl-supported-platforms"></a>
 
@@ -151,8 +155,9 @@ Quick links inside this script section:
 #### Dependencies
 
 - [Python](#python)
-- `ffmpeg` (requires `freetype` and `fontconfig` support for text overlays)
+- `ffmpeg` (requires `freetype` and `fontconfig` support for text overlays — the stock Homebrew `ffmpeg` formula does not include these; `jwsl setup` installs a build that does, and `jwsl` auto-detects an existing `ffmpeg-full`-style build if you already have one)
 - `rife-ncnn-vulkan` (optional, for ultra-fast GPU interpolation)
+- `mpv` (optional, only for `jwsl find --play`)
 
 <a id="jwsl-install--first-run-summary"></a>
 
@@ -164,55 +169,100 @@ Make the script executable:
 chmod +x jwsl
 ```
 
-Run the built-in dependency setup to install FFmpeg (macOS/Linux):
+Run the interactive setup — it installs `ffmpeg`, asks which sign languages you watch, how much disk space to cache, which 60fps engine to use, and offers to add `jwsl` to your `PATH`:
 
 ```bash
 ./jwsl setup
 ```
 
-Configure your defaults if desired:
+Run it again on every machine you use `jwsl` on — settings are per-machine, not synced.
+
+Prefer to skip the questions and just install dependencies:
 
 ```bash
-./jwsl config set cache_policy max_gb=10
+./jwsl setup --non-interactive
+```
+
+You can also set individual options by hand at any time:
+
+```bash
+./jwsl config set cache_max_gb 5
 ./jwsl config set interpolation_engine rife
+./jwsl config set languages ASL,FSL,BVL,INI,SPE
 ```
 
 <a id="jwsl-common-usage-examples"></a>
 
 #### Common Usage Examples
 
-Extract specific verses (e.g., Revelation 13:1, 2 in FSL) and interpolate to 60fps:
+Extract a specific verse (Revelation 13:1, 2 in FSL) and interpolate to 60fps:
 
 ```bash
 ./jwsl extract FSL "Rev 13:1, 2" --interpolate
 ```
 
-Bulk sync metadata to track available updates on the API:
+Do the same for every language in your configured list, in parallel:
 
 ```bash
-./jwsl sync FSL
+./jwsl extract all "Rev 13:1, 2" --interpolate
 ```
 
-Clear the local video cache:
+Pull a single verse without ever storing the full chapter on disk (this is the default, `--onthefly` is shown for clarity):
 
 ```bash
+./jwsl extract FSL "Rev 13:1" --onthefly
+```
+
+Download and keep the full chapter instead, so more verses from it are free to extract afterward:
+
+```bash
+./jwsl extract FSL "Rev 13:1" --cache
+```
+
+Sync metadata (and verse timestamps) for your whole language list:
+
+```bash
+./jwsl sync all
+```
+
+See who has already-synced coverage of a verse:
+
+```bash
+./jwsl find Revelation 13 1
+```
+
+Check cache usage and clear it:
+
+```bash
+./jwsl cache list
 ./jwsl cache clean
+```
+
+Precompute a whole book range ahead of time, interpolated to 60fps:
+
+```bash
+./jwsl bulk FSL --books 40-66 --interpolate
 ```
 
 <a id="jwsl-important-behavior--defaults"></a>
 
 #### Important Behavior / Defaults
 
-- Global configuration and state are saved in `~/.config/maj-scripts/jwsl/`.
-- Downloaded video chapters are temporarily stashed in `~/.cache/jwsl/`.
-- The tool uses lazy loading: it only downloads chapters when a specific verse extraction is requested, avoiding massive bulk downloads.
-- When applying overlays, the tool expects standard English abbreviations or full names (e.g., "Rev" or "Revelation") by default.
+- Global configuration is saved in `~/.config/maj-scripts/jwsl/config.toml`. Sync state is split into a small `state.json` (sync timestamps, cached book-name lookups) plus one index file per synced language under `~/.config/maj-scripts/jwsl/index/`, so it stays fast to load as you sync more languages.
+- Extraction streams directly from the source URL by default (`extract_mode = onthefly`) and never touches the cache; pass `--cache` (or set `extract_mode = cache`) to download the full chapter instead. Cached chapters live in `~/.cache/jwsl/`, capped at `cache_max_gb` (default 5 GB) with least-recently-used chapters removed first once the cap is hit.
+- The tool uses lazy loading: it only downloads or streams a chapter when a specific verse extraction is requested, and only syncs metadata for the languages you've configured (default `ASL,FSL,BVL,INI,SPE`) unless you name others.
+- Verse start/end times come from JW.org's own API metadata (backfilled into the local index on first use), not from probing a downloaded video file. Book-name lookups are cached per `api_language` too, instead of hitting jw.org on every extract.
+- Encoding quality is configurable (`video_codec`, `video_crf`, `video_preset`) and defaults to `libx264 -crf 20 -preset slow`. This is intentionally *higher* quality than JW.org's own source encode (~1.07 Mbps H.264 Main@3.1 720p30, per a direct `ffprobe` of a sample video) rather than matching it bitrate-for-bitrate: overlays force a re-encode of an already-lossy source, and re-encoding a second generation at the source's own bitrate would compound visible compression loss. Since clips are short, the absolute file size stays small either way.
+- Picks a drawtext-capable `ffmpeg` automatically: it prefers an `ffmpeg-full`-style build (or whatever `ffmpeg_binary`/`ffprobe_binary` you set explicitly) over the stock Homebrew `ffmpeg`, which doesn't include `freetype`/`fontconfig`.
+- When applying overlays, the tool expects standard English abbreviations or full names (e.g., "Rev" or "Revelation") by default, or a plain book number.
 
 <a id="jwsl-notes--caveats"></a>
 
 #### Notes / Caveats
 
-- `minterpolate` through `ffmpeg` is CPU-bound and very slow. Using `rife-ncnn-vulkan` is highly recommended for users with a dedicated GPU.
+- `minterpolate` through `ffmpeg` is CPU-bound and very slow. Using `rife-ncnn-vulkan` is highly recommended for users with a dedicated GPU; `jwsl setup` tells you exactly what to download for your OS.
+- The default `--onthefly` mode seeks directly against the CDN URL, which is a byte-approximate seek over the network rather than a local frame-accurate one — fine for casual viewing, but use `--cache` if you need frame-exact boundaries or plan to pull several verses from the same chapter.
+- `jwsl` replaces the legacy `SL/ffv`, `SL/ffvdl`, `SL/sldl`, `SL/sldl_nwt`, `SL/sldl_nwt_info`, and `SL/sl_findlang` scripts, kept for reference only in git history and a local archive, not part of this public repo's working tree.
 
 [↑ TOC](#table-of-contents)
 

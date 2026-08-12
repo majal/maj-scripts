@@ -55,10 +55,3 @@ if [[ ! -e "${marker}" ]]; then
   echo "explicit opt-in should still allow workstation beep helper" >&2
   exit 1
 fi
-
-for script in "${repo_root}/SL/sldl" "${repo_root}/SL/sldl_nwt" "${repo_root}/SL/sldl_nwt_info"; do
-  if grep -nE '^[[:space:]]*beep([[:space:]]*(#.*)?)?$' "${script}"; then
-    echo "${script} still has an unconditional beep call" >&2
-    exit 1
-  fi
-done
