@@ -21,3 +21,9 @@ ENV/
 .idea/
 *.swp
 *.swo
+
+# Local cross-agent memory (continuity notes for this checkout). This repo
+# is public on GitHub; internal working notes don't belong in its history,
+# so this stays local-only (and can still sync privately machine-to-machine
+# outside of git, e.g. Resilio) rather than being committed/pushed.
+memory/
