@@ -62,6 +62,8 @@ DEFAULT_CONFIG = {
     "languages": "ASL,FSL,BVL,INI,SPE",
     "sync_workers": "4",
     "extract_workers": "3",
+    "auto_sync": "true",  # once-a-day background refresh on extract/find/bulk, so non-techies stay current without running 'sync' themselves
+    "auto_sync_interval_hours": "24",
     "default_target_lang": "FSL",
     "rife_binary_path": "",
     "font_path": "",
@@ -701,12 +703,14 @@ def sync_one_lang(lang):
     print(f"  {lang}: indexed {len(entries)} chapter(s) worth of tracks.       ")
     return lang, entries
 
-def cmd_sync(args, config):
-    langs = get_lang_list(config, args.lang)
-    state = get_state()
+def sync_languages(langs, config, state, quiet=False):
+    """Core of 'jwsl sync', factored out so the auto-sync path (see
+    maybe_auto_sync) can reuse it without going through argparse. Mutates
+    `state` in place; caller owns save_state()."""
     workers = int(config.get("sync_workers", DEFAULT_CONFIG["sync_workers"]) or 1)
+    printer = (lambda *a, **k: None) if quiet else print
 
-    print(f"Syncing metadata for: {', '.join(langs)}")
+    printer(f"Syncing metadata for: {', '.join(langs)}")
     results = {}
     if len(langs) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -731,8 +735,61 @@ def cmd_sync(args, config):
                 prior["markers"] = entry["markers"]
         save_index(lang, existing)
         state.setdefault("_meta", {}).setdefault(lang, {})["last_synced"] = now
-        print(f"{lang}: {new_count} new/updated track(s).")
+        printer(f"{lang}: {new_count} new/updated track(s).")
 
+def cmd_sync(args, config):
+    langs = get_lang_list(config, args.lang)
+    state = get_state()
+    sync_languages(langs, config, state)
+    save_state(state)
+
+def internet_available():
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request("https://b.jw-cdn.org", method="HEAD", headers={"User-Agent": "Mozilla/5.0"}),
+            timeout=3,
+        )
+        return True
+    except urllib.error.HTTPError:
+        # A real HTTP response (even an error status, e.g. this CDN 403s a
+        # bare root request) still proves the network path is up. Only
+        # connection-level failures (DNS, timeout, refused) mean "offline".
+        return True
+    except Exception:
+        return False
+
+def maybe_auto_sync(args, config):
+    """Once-a-day, best-effort background-ish refresh so non-technical users
+    get updated verse availability without ever running 'jwsl sync'
+    themselves. Gated on a plain elapsed-time check (no network) on every
+    call, so the common case (already synced today) costs nothing."""
+    if getattr(args, "no_auto_sync", False):
+        return
+    if config.get("auto_sync", "true").strip().lower() not in ("true", "1", "yes"):
+        return
+
+    try:
+        interval_hours = float(config.get("auto_sync_interval_hours", DEFAULT_CONFIG["auto_sync_interval_hours"]))
+    except ValueError:
+        interval_hours = 24.0
+
+    state = get_state()
+    last_attempt = state.get("_auto_sync", {}).get("last_attempt", 0)
+    if time.time() - last_attempt < interval_hours * 3600:
+        return
+
+    # Mark the attempt regardless of outcome, so a flaky/offline connection
+    # doesn't retry (and pause) on every single command for the rest of the day.
+    state.setdefault("_auto_sync", {})["last_attempt"] = time.time()
+    save_state(state)
+
+    if not internet_available():
+        return
+
+    print("Checking for updated sign language availability (runs about once a day)...")
+    langs = get_lang_list(config)
+    state = get_state()  # re-read: sync_languages below expects the latest on-disk state
+    sync_languages(langs, config, state, quiet=True)
     save_state(state)
 
 def resolve_verse_window(lang, book_num, chapter, verses, config):
@@ -1016,12 +1073,14 @@ def main():
     p_extract.add_argument("--interpolate", action="store_true", help="Force interpolation on output")
     p_extract.add_argument("--onthefly", action="store_true", help="Stream-extract from the source URL; never store the full chapter on disk (default)")
     p_extract.add_argument("--cache", action="store_true", help="Download and keep the full chapter in the local cache instead of streaming on the fly")
+    p_extract.add_argument("--no-auto-sync", action="store_true", help="Skip the once-a-day automatic background metadata refresh for this run")
 
     p_find = subparsers.add_parser("find", help="Search already-synced languages for who has a given verse")
     p_find.add_argument("book", help="Book name or number")
     p_find.add_argument("chapter", type=int)
     p_find.add_argument("verse", type=int)
     p_find.add_argument("--play", action="store_true", help="Also stream-preview each match with mpv")
+    p_find.add_argument("--no-auto-sync", action="store_true", help="Skip the once-a-day automatic background metadata refresh for this run")
 
     p_cache = subparsers.add_parser("cache", help="Manage cache")
     p_cache.add_argument("action", choices=["clean", "list", "trim"])
@@ -1033,6 +1092,7 @@ def main():
     p_bulk.add_argument("--interpolate", action="store_true", help="Interpolate each chapter to 60fps using the configured engine")
     p_bulk.add_argument("--out", help="Output directory (default: <cache_dir>/bulk/<lang>)")
     p_bulk.add_argument("--overwrite", action="store_true", help="Reprocess chapters even if the output file already exists")
+    p_bulk.add_argument("--no-auto-sync", action="store_true", help="Skip the once-a-day automatic background metadata refresh for this run")
 
     args = parser.parse_args()
     config = load_config()
@@ -1055,14 +1115,17 @@ def main():
     elif args.command == "sync":
         cmd_sync(args, config)
     elif args.command == "extract":
+        maybe_auto_sync(args, config)
         if args.interpolate and config.get("interpolation_engine") == "none":
             config["interpolation_engine"] = "minterpolate"
         cmd_extract(args, config)
     elif args.command == "find":
+        maybe_auto_sync(args, config)
         cmd_find(args, config)
     elif args.command == "cache":
         cmd_cache(args, config)
     elif args.command == "bulk":
+        maybe_auto_sync(args, config)
         cmd_bulk(args, config)
     else:
         parser.print_help()

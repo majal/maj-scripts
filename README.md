@@ -137,6 +137,7 @@ Quick links inside this script section:
 - Optionally applies translated text overlays for book names and chapter/verse numbers.
 - Interpolates the extracted clip to 60fps for smoother sign language playback using `ffmpeg` (minterpolate or framerate) or `rife-ncnn-vulkan` (GPU-accelerated AI).
 - Syncs and extracts across your whole language list in parallel (`jwsl sync all`, `jwsl extract all "Rev 13:1, 2"`), instead of one language at a time.
+- Refreshes your language index automatically, about once a day, whenever you run `extract`/`find`/`bulk` — no need to remember to run `sync` yourself. Skips silently if there's no internet, and never runs more than once a day even if the previous attempt failed or got interrupted.
 - Maintains a local cache of downloaded full-chapter videos, capped by size with oldest-used chapters evicted first, so it can't quietly fill your disk.
 - `jwsl find <book> <chapter> <verse>` searches every language you've already synced for who has a given verse, without downloading anything.
 - `jwsl bulk <lang>` precomputes whole chapters ahead of time (optionally interpolated to 60fps), for when you'd rather batch-process a language than extract on demand.
@@ -255,6 +256,7 @@ Precompute a whole book range ahead of time, interpolated to 60fps:
 - Encoding quality is configurable (`video_codec`, `video_crf`, `video_preset`) and defaults to `libx264 -crf 20 -preset slow`. This is intentionally *higher* quality than JW.org's own source encode (~1.07 Mbps H.264 Main@3.1 720p30, per a direct `ffprobe` of a sample video) rather than matching it bitrate-for-bitrate: overlays force a re-encode of an already-lossy source, and re-encoding a second generation at the source's own bitrate would compound visible compression loss. Since clips are short, the absolute file size stays small either way.
 - Picks a drawtext-capable `ffmpeg` automatically: it prefers an `ffmpeg-full`-style build (or whatever `ffmpeg_binary`/`ffprobe_binary` you set explicitly) over the stock Homebrew `ffmpeg`, which doesn't include `freetype`/`fontconfig`.
 - When applying overlays, the tool expects standard English abbreviations or full names (e.g., "Rev" or "Revelation") by default, or a plain book number.
+- `extract`/`find`/`bulk` trigger a background-ish metadata refresh at most once every `auto_sync_interval_hours` (default 24), so verse availability stays current without ever running `jwsl sync` by hand. Disable per-run with `--no-auto-sync`, or permanently with `./jwsl config set auto_sync false`. A failed or offline attempt still resets the timer, so a bad connection doesn't retry (and pause) on every command for the rest of the day.
 
 <a id="jwsl-notes--caveats"></a>
 
