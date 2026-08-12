@@ -504,12 +504,10 @@ def extract_verse(source, output_file, start_time, end_time, book_name, chapter,
         else:
             shutil.copy(tmp_out, output_file)
 
-def parse_reference(ref_str):
-    match = re.match(r"(.+?)\s+(\d+):(.+)", ref_str)
-    if not match:
-        return None, None, []
-    book, chapter, verses_str = match.groups()
-
+def expand_verses(verses_str):
+    """'1, 2' / '1-3' / '1-3,5' -> sorted unique ints. Shared by parse_reference
+    (extract's free-form reference string) and cmd_find's verse argument
+    (which also accepts a single verse or a range/list, not just one int)."""
     verses = []
     for part in verses_str.replace(" ", "").split(","):
         if "-" in part:
@@ -517,7 +515,14 @@ def parse_reference(ref_str):
             verses.extend(list(range(int(start), int(end) + 1)))
         else:
             verses.append(int(part))
-    return book.strip(), int(chapter), sorted(list(set(verses)))
+    return sorted(set(verses))
+
+def parse_reference(ref_str):
+    match = re.match(r"(.+?)\s+(\d+):(.+)", ref_str)
+    if not match:
+        return None, None, []
+    book, chapter, verses_str = match.groups()
+    return book.strip(), int(chapter), expand_verses(verses_str)
 
 def parse_hms(ts):
     """'HH:MM:SS.mmm' -> float seconds, as returned by GETPUBMEDIALINKS markers."""
@@ -786,7 +791,7 @@ def maybe_auto_sync(args, config):
     if not internet_available():
         return
 
-    print("Checking for updated sign language availability (runs about once a day)...")
+    print("Checking for updated sign language availability (runs about once a day)...", file=sys.stderr)
     langs = get_lang_list(config)
     state = get_state()  # re-read: sync_languages below expects the latest on-disk state
     sync_languages(langs, config, state, quiet=True)
@@ -913,6 +918,12 @@ def cmd_extract(args, config):
             print(f"[{lang}] Successfully created: {filename}")
 
 def cmd_find(args, config):
+    """Default output is a compact checkmark table grouped by language -
+    easiest to scan at a glance, and the format non-technical users actually
+    want. --verbose brings back the full URL/mpv-command block per match;
+    --json is for scripts (always the full lang x verse array, found or
+    not). 'verse' takes a single verse, a range (25-27), or a comma list,
+    the same syntax extract's reference string uses."""
     state = get_state()
     jwlangs = load_jwlangs()
     book_num = resolve_book_number(args.book, config.get("api_language", "E"), state=state)
@@ -921,31 +932,79 @@ def cmd_find(args, config):
         print(f"Could not resolve book: {args.book}")
         return
 
+    try:
+        verses = expand_verses(args.verse)
+    except ValueError:
+        print(f"Could not parse verse(s): {args.verse}")
+        return
+
     key = f"{book_num}_{args.chapter}"
-    found = []
+    results = []
     for lang in synced_languages():
         entry = load_index(lang).get(key)
-        if not entry:
-            continue
-        times = markers_to_verse_times(entry.get("markers"))
-        if args.verse in times:
-            found.append((lang, entry, times[args.verse]))
+        times = markers_to_verse_times(entry.get("markers")) if entry else {}
+        jwentry = jwlangs.get(lang.upper())
+        for verse in verses:
+            marker = times.get(verse)
+            results.append({
+                "lang": lang,
+                "lang_name": jwentry[1] if jwentry else None,
+                "book": args.book,
+                "chapter": args.chapter,
+                "verse": verse,
+                "found": marker is not None,
+                "url": entry["url"] if (entry and marker) else None,
+                "start": marker["start"] if marker else None,
+                "end": marker["end"] if marker else None,
+                "label": marker.get("label") if marker else None,
+            })
 
-    if not found:
-        print(f"No synced language has book {book_num} chapter {args.chapter} verse {args.verse} yet.")
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+
+    if not results:
+        print("No languages synced yet. Try 'jwsl sync all' first.")
+        return
+    if not any(r["found"] for r in results):
+        verse_label = str(verses[0]) if len(verses) == 1 else f"{verses[0]}-{verses[-1]}"
+        print(f"No synced language has {args.book} {args.chapter}:{verse_label} yet.")
         print("Try 'jwsl sync all' first, or sync a specific language.")
         return
 
-    for lang, entry, marker in found:
-        print(f"\n{lang_display(lang, jwlangs)}")
-        print(f"  {marker.get('label', '')}")
-        print(f"  {entry['url']}")
-        start_str = f"{int(marker['start']//3600):02d}:{int(marker['start']%3600//60):02d}:{marker['start']%60:06.3f}"
-        dur = marker['end'] - marker['start']
-        print(f"  mpv --start={start_str} --length={dur:.3f} '{entry['url']}'")
+    by_lang = {}
+    for r in results:
+        by_lang.setdefault(r["lang"], []).append(r)
 
-        if args.play and command_exists("mpv"):
-            subprocess.Popen(["mpv", f"--start={start_str}", f"--length={dur:.3f}", entry["url"]])
+    if args.verbose:
+        for lang, rows in by_lang.items():
+            found_rows = [r for r in rows if r["found"]]
+            if not found_rows:
+                continue
+            print(f"\n{lang_display(lang, jwlangs)}")
+            for r in found_rows:
+                print(f"  {r['label'] or ''}")
+                print(f"  {r['url']}")
+                start_str = f"{int(r['start']//3600):02d}:{int(r['start']%3600//60):02d}:{r['start']%60:06.3f}"
+                dur = r["end"] - r["start"]
+                print(f"  mpv --start={start_str} --length={dur:.3f} '{r['url']}'")
+    else:
+        for lang, rows in by_lang.items():
+            for r in rows:
+                mark = "✅" if r["found"] else "❌"
+                print(f"{mark} {lang_display(lang, jwlangs)} {r['book']} {r['chapter']}:{r['verse']}")
+            print()
+
+    if args.play:
+        if not command_exists("mpv"):
+            print("(--play needs mpv, which isn't installed)")
+        else:
+            for r in results:
+                if not r["found"]:
+                    continue
+                start_str = f"{int(r['start']//3600):02d}:{int(r['start']%3600//60):02d}:{r['start']%60:06.3f}"
+                dur = r["end"] - r["start"]
+                subprocess.Popen(["mpv", f"--start={start_str}", f"--length={dur:.3f}", r["url"]])
 
 def cmd_cache(args, config):
     state = get_state()
@@ -1078,8 +1137,10 @@ def main():
     p_find = subparsers.add_parser("find", help="Search already-synced languages for who has a given verse")
     p_find.add_argument("book", help="Book name or number")
     p_find.add_argument("chapter", type=int)
-    p_find.add_argument("verse", type=int)
+    p_find.add_argument("verse", help="Single verse, a range (25-27), or a comma list (1,3,5)")
     p_find.add_argument("--play", action="store_true", help="Also stream-preview each match with mpv")
+    p_find.add_argument("-v", "--verbose", action="store_true", help="Show full match details (URL, mpv command) instead of the compact checkmark list")
+    p_find.add_argument("--json", action="store_true", help="Machine-readable JSON instead of the checkmark list (always includes every synced language, found or not)")
     p_find.add_argument("--no-auto-sync", action="store_true", help="Skip the once-a-day automatic background metadata refresh for this run")
 
     p_cache = subparsers.add_parser("cache", help="Manage cache")

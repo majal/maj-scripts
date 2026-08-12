@@ -139,7 +139,7 @@ Quick links inside this script section:
 - Syncs and extracts across your whole language list in parallel (`jwsl sync all`, `jwsl extract all "Rev 13:1, 2"`), instead of one language at a time.
 - Refreshes your language index automatically, about once a day, whenever you run `extract`/`find`/`bulk` — no need to remember to run `sync` yourself. Skips silently if there's no internet, and never runs more than once a day even if the previous attempt failed or got interrupted.
 - Maintains a local cache of downloaded full-chapter videos, capped by size with oldest-used chapters evicted first, so it can't quietly fill your disk.
-- `jwsl find <book> <chapter> <verse>` searches every language you've already synced for who has a given verse, without downloading anything.
+- `jwsl find <book> <chapter> <verse>` searches every language you've already synced for who has a given verse, without downloading anything. `<verse>` also accepts a range (`25-27`) or comma list (`1,3,5`). Default output is a compact ✅/❌ table grouped by language; `--verbose` shows the full URL + mpv command per match, and `--json` gives scripts a machine-readable array.
 - `jwsl bulk <lang>` precomputes whole chapters ahead of time (optionally interpolated to 60fps), for when you'd rather batch-process a language than extract on demand.
 - Auto-detects a drawtext-capable `ffmpeg` build (looks for a `-full` variant before falling back to the stock formula), so overlays work without hand-picking a binary.
 
