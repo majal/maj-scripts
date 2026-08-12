@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import argparse
+import io
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from tests.support import load_script_module
 
@@ -152,6 +156,101 @@ class JwslCacheBudgetTest(unittest.TestCase):
                 self.jwsl.STATE_FILE = original_state_file
 
             self.assertFalse(fake_state_file.exists(), "enforce_cache_budget must not call save_state() itself")
+
+
+class JwslInternetAvailableTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.jwsl = load_script_module("jwsl")
+
+    def test_http_error_still_counts_as_online(self) -> None:
+        # Regression guard: b.jw-cdn.org 403s a bare root HEAD request, but
+        # that's a real HTTP response — proof the network path works, not
+        # evidence of being offline. Previously any exception (including
+        # HTTPError) was treated as "offline", so the daily check silently
+        # never ran despite a working connection.
+        def raise_http_error(*args, **kwargs):
+            raise urllib.error.HTTPError("https://b.jw-cdn.org", 403, "Forbidden", {}, io.BytesIO(b""))
+
+        with mock.patch.object(self.jwsl.urllib.request, "urlopen", raise_http_error):
+            self.assertTrue(self.jwsl.internet_available())
+
+    def test_connection_failure_counts_as_offline(self) -> None:
+        def raise_url_error(*args, **kwargs):
+            raise urllib.error.URLError("no route to host")
+
+        with mock.patch.object(self.jwsl.urllib.request, "urlopen", raise_url_error):
+            self.assertFalse(self.jwsl.internet_available())
+
+    def test_success_counts_as_online(self) -> None:
+        with mock.patch.object(self.jwsl.urllib.request, "urlopen", mock.MagicMock()):
+            self.assertTrue(self.jwsl.internet_available())
+
+
+class JwslAutoSyncTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # Fresh module + isolated state/config paths per test, so this never
+        # touches the real ~/.config/maj-scripts/jwsl — same lesson as
+        # test_never_writes_the_real_state_file_itself above.
+        self.jwsl = load_script_module("jwsl")
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp_dir = Path(self._tmp.name)
+        self.jwsl.CONFIG_DIR = tmp_dir
+        self.jwsl.STATE_FILE = tmp_dir / "state.json"
+        self.jwsl.INDEX_DIR = tmp_dir / "index"
+        self.sync_calls: list = []
+        self.jwsl.sync_languages = lambda langs, config, state, quiet=False: self.sync_calls.append(langs)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def base_config(self, **overrides):
+        config = {"languages": "ASL,FSL", "auto_sync": "true", "auto_sync_interval_hours": "24"}
+        config.update(overrides)
+        return config
+
+    def test_skips_when_disabled_via_flag(self) -> None:
+        args = argparse.Namespace(no_auto_sync=True)
+        self.jwsl.maybe_auto_sync(args, self.base_config())
+        self.assertFalse(self.jwsl.STATE_FILE.exists())
+        self.assertEqual(self.sync_calls, [])
+
+    def test_skips_when_disabled_via_config(self) -> None:
+        args = argparse.Namespace(no_auto_sync=False)
+        self.jwsl.maybe_auto_sync(args, self.base_config(auto_sync="false"))
+        self.assertFalse(self.jwsl.STATE_FILE.exists())
+        self.assertEqual(self.sync_calls, [])
+
+    def test_skips_within_interval_no_network_check(self) -> None:
+        args = argparse.Namespace(no_auto_sync=False)
+        recent = time.time() - 3600  # 1 hour ago, well under the 24h default
+        self.jwsl.save_state({"_auto_sync": {"last_attempt": recent}})
+        self.jwsl.internet_available = lambda: (_ for _ in ()).throw(AssertionError("should not check connectivity when not due"))
+
+        self.jwsl.maybe_auto_sync(args, self.base_config())
+
+        self.assertEqual(self.jwsl.get_state()["_auto_sync"]["last_attempt"], recent)
+        self.assertEqual(self.sync_calls, [])
+
+    def test_marks_attempt_even_when_offline(self) -> None:
+        args = argparse.Namespace(no_auto_sync=False)
+        self.jwsl.save_state({"_auto_sync": {"last_attempt": 0}})
+        self.jwsl.internet_available = lambda: False
+
+        self.jwsl.maybe_auto_sync(args, self.base_config())
+
+        self.assertGreater(self.jwsl.get_state()["_auto_sync"]["last_attempt"], time.time() - 10)
+        self.assertEqual(self.sync_calls, [])
+
+    def test_syncs_configured_languages_when_due_and_online(self) -> None:
+        args = argparse.Namespace(no_auto_sync=False)
+        self.jwsl.save_state({"_auto_sync": {"last_attempt": 0}})
+        self.jwsl.internet_available = lambda: True
+
+        self.jwsl.maybe_auto_sync(args, self.base_config(languages="ASL,FSL,BVL"))
+
+        self.assertEqual(self.sync_calls, [["ASL", "FSL", "BVL"]])
+        self.assertGreater(self.jwsl.get_state()["_auto_sync"]["last_attempt"], time.time() - 10)
 
 
 if __name__ == "__main__":
