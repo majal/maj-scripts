@@ -15,11 +15,13 @@ known, not a bug to fix by documenting the bash versions.
 `generate_html_colors_video` and `maj-online` are in the same
 undocumented/legacy bucket, not yet triaged into a specific follow-up.
 
-`jwget` and `jwinbox` used to be in this bucket too — `jwget` moved to
-[`majal/jwkit`](https://github.com/majal/jwkit) (documented there) along
-with the rest of the jw.org content tools, and `jwinbox` was retired to
-`bin-archive-2026` (legacy pre-2018 jw.org account watcher, plaintext
-password by default — see 2026-08-13's commit history for details).
+`jwget` and `jwinbox` used to be in this bucket too — `jwget`'s periodicals
+were absorbed into [`majal/jwkit`](https://github.com/majal/jwkit)'s `jwdl`
+(as `jwdl periodicals`, via jw.org's modern checksummed API instead of the
+old unauthenticated scrape) and the standalone script retired to
+`bin-archive-2026/jwget/`, and `jwinbox` was retired there too (legacy
+pre-2018 jw.org account watcher, plaintext password by default) — see
+2026-08-13's commit history for details.
 
 ## Other repo-hygiene follow-ups
 

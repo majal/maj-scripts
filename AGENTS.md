@@ -16,10 +16,11 @@ Boundary rules:
 
 - jw.org content tools (downloading/extracting/muxing jw.org videos, music,
   periodicals, or sign-language clips) belong in `jwkit`
-  (https://github.com/majal/jwkit), not here — `ffrife`, `jwdl`, `jwget`,
-  `jwsl` (renamed `slverse`), and `jwvideo-mux`(-shortcuts.sh) moved there
-  on 2026-08-13. Note `jwdl` has a live systemd caller on `emeth4`; see
-  `jwkit`'s own `AGENTS.md` Operational Notes before touching its CLI surface.
+  (https://github.com/majal/jwkit), not here — `ffrife`, `jwdl` (which also
+  absorbed `jwget`'s periodicals as `jwdl periodicals`), `jwsl` (renamed
+  `slverse`), and `jwvideo-mux`(-shortcuts.sh) moved there on 2026-08-13.
+  Note `jwdl` has a live systemd caller on `emeth4`; see `jwkit`'s own
+  `AGENTS.md` Operational Notes before touching its CLI surface.
 - Private `~/bin` migrations, local ops helpers, systemd timer installers, and
   fleet maintenance scripts belong in `bin`.
 - emeth4 workstation overlay files and reinstall policy belong in

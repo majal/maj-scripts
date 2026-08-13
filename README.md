@@ -13,7 +13,7 @@ If you're just here to use a script, start here. This README is the friendly map
 - Each script section tells you what the script does, what it needs, and the safest first commands to try.
 - Use [Your Local Setup](#your-local-setup) when Python, Git, `ffmpeg`, or package managers need a little help.
 - Use [Friendly Launchers](#friendly-launchers) if you prefer double-clicks, drag-and-drop, file pickers, or right-click actions.
-- Looking for the jw.org content tools (`slverse`/formerly `jwsl`, `ffrife`, `jwdl`, `jwget`, `jwvideo-mux`)? They moved to their own repo: [`majal/jwkit`](https://github.com/majal/jwkit).
+- Looking for the jw.org content tools (`slverse`/formerly `jwsl`, `ffrife`, `jwdl`, `jwvideo-mux`)? They moved to their own repo: [`majal/jwkit`](https://github.com/majal/jwkit).
 
 ## Table of Contents
 
