@@ -6,11 +6,20 @@ Tracked follow-ups that are intentionally deferred, not forgotten.
 
 `minterpolate`, `pdfcompress`, `pdfind`, and `pdflat`/`pdflat-auto`/`pdflat-single`
 are legacy bash scripts migrated as-is from the pre-rename repo (`2afe1d5`).
-They should eventually be upgraded to the same style as `jwsl`/`jwdl`/`wh`:
-cross-platform (macOS/Linux/Windows), with a proper README section following
-the standard template in `AGENTS.md`. Until then they're undocumented in
+They should eventually be upgraded to the same style as `wh`/`whisper`:
+cross-platform (macOS/Linux/Windows), with a proper `docs/<script>.md` page
+following the template in `AGENTS.md`. Until then they're undocumented in
 `README.md` and `test_readme.py` correctly flags them as such — this is
 known, not a bug to fix by documenting the bash versions.
+
+`generate_html_colors_video` and `maj-online` are in the same
+undocumented/legacy bucket, not yet triaged into a specific follow-up.
+
+`jwget` and `jwinbox` used to be in this bucket too — `jwget` moved to
+[`majal/jwkit`](https://github.com/majal/jwkit) (documented there) along
+with the rest of the jw.org content tools, and `jwinbox` was retired to
+`bin-archive-2026` (legacy pre-2018 jw.org account watcher, plaintext
+password by default — see 2026-08-13's commit history for details).
 
 ## Other repo-hygiene follow-ups
 

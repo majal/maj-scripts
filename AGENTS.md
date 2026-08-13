@@ -14,6 +14,12 @@ documented as standalone tools. It is not the replacement home for private
 
 Boundary rules:
 
+- jw.org content tools (downloading/extracting/muxing jw.org videos, music,
+  periodicals, or sign-language clips) belong in `jwkit`
+  (https://github.com/majal/jwkit), not here — `ffrife`, `jwdl`, `jwget`,
+  `jwsl` (renamed `slverse`), and `jwvideo-mux`(-shortcuts.sh) moved there
+  on 2026-08-13. Note `jwdl` has a live systemd caller on `emeth4`; see
+  `jwkit`'s own `AGENTS.md` Operational Notes before touching its CLI surface.
 - Private `~/bin` migrations, local ops helpers, systemd timer installers, and
   fleet maintenance scripts belong in `bin`.
 - emeth4 workstation overlay files and reinstall policy belong in
@@ -88,18 +94,28 @@ Do not push when there are unresolved errors, relevant verification has not pass
 
 ## Script Section Template
 
-Each script subsection under `## Scripts` in `README.md` should include:
+The full per-script template (see below) now lives in `docs/<script>.md`, not in `README.md` directly — see the Growth Rule. Each script subsection under `## Scripts` in `README.md` should instead include just:
 
 1. Script name
    The subsection heading itself should link directly to the script file when the script lives in the repo root.
-2. `#### What It Does`
-3. `#### Supported Platforms`
-4. `#### Dependencies`
-5. `#### Install / first-run summary`
-6. `#### Common usage examples`
-7. `#### Important behavior / defaults`
-8. `#### Notes / caveats`
-9. `↑ TOC`
+2. A short (1-3 sentence) description — what the script does and why it exists.
+3. A `Full docs: [docs/<script>.md](docs/<script>.md)` link.
+4. `↑ TOC`
+
+The full template that used to live inline in `README.md` now lives in `docs/<script>.md`:
+
+1. `# <script>` title, immediately followed by a `[← Back to README](../README.md#table-of-contents)` link.
+2. The same short description as the README blurb (may repeat it verbatim).
+3. `## What It Does`
+4. `## Supported Platforms`
+5. `## Dependencies`
+6. `## Install / First Run Summary`
+7. `## Common Usage Examples`
+8. `## Important Behavior / Defaults`
+9. `## Notes / Caveats`
+10. `[↑ Back to README TOC](../README.md#table-of-contents)` at the end.
+
+Doc filename: `docs/<script-name>.md`, stripping a trailing `.sh` if the script has one. Links from inside a doc file back into README anchors (e.g. `#python`, `#friendly-launchers`) should use `../README.md#anchor`, not a bare `#anchor`.
 
 Keep examples short, practical, and copy-pasteable.
 
@@ -163,7 +179,7 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 - Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
 - Prefer `## Your Local Setup` over separate top-level setup and launcher sections.
 - In the main README TOC, prefer top-level setup topics like `Friendly Launchers`, `Python`, `Git`, and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.
-- For long script sections, a local mini TOC may be placed immediately after the script description. Keep those links inside the script section and do not add them to the main README TOC.
+- Script sections in `README.md` are short (blurb + doc link) now that the full template lives in `docs/<script>.md`, so a local mini TOC inside `README.md` is no longer needed there. Within a `docs/<script>.md` file itself, a short "Jump to" list is optional but not required — the file's own heading outline (rendered by GitHub) usually covers it.
 - The `## Scripts` section should appear before Your Local Setup.
 - Use `↑ TOC` for major sections and primary subsections, not every nested platform subsection.
 - When a primary subsection contains nested subsections, place its `↑ TOC` at the end of the last nested subsection, not before the nested content starts.
@@ -171,25 +187,23 @@ Assume these are intentionally human-authored voice and branding choices. AI sho
 
 ## Growth Rule
 
-The repo should stay README-first for now.
+This rule has now fired: the repo outgrew a single-file README (10 scripts, ~2000 lines), so detailed per-script docs live in `docs/<script>.md` per the Script Section Template above, and `README.md` keeps only short blurbs plus links.
 
-If the repo grows large later:
-
-- detailed docs may move into `docs/`
-- the root `README.md` must still remain the canonical entry point and navigation page
-- script entries in the README should link to any split-out detailed docs
+- `README.md` remains the canonical entry point and navigation page — it must always list every root script in the Table of Contents and `## Scripts`, even though the detail lives elsewhere.
+- New scripts follow the split from the start: add the short blurb to `README.md` and the full template to `docs/<script>.md` in the same change, not as a later migration.
+- Keep this rule's text in sync with what's actually true — do not let the README quietly grow back into one giant file.
 
 ## When Adding A Script Checklist
 
 - add the script file
 - update the README table of contents
-- add the script subsection under `## Scripts`
+- add the short script subsection (name, blurb, `Full docs:` link) under `## Scripts`
 - link the script subsection heading to the actual script file when possible
-- use the standard script template inside that subsection
+- create `docs/<script>.md` with the full template (see Script Section Template) and a back-link to the README TOC
 - keep `## Scripts` above Your Local Setup
 - keep the Overview above the table of contents
 - add/update shared setup docs only if there is a new shared prerequisite
-- keep Your Local Setup generic; move script-specific notes into the script subsection
-- use `↑ TOC` consistently
+- keep Your Local Setup generic; move script-specific notes into the script's `docs/<script>.md`
+- use `↑ TOC` consistently in README, and the back-link in `docs/<script>.md`
 - keep examples concise and copy-pasteable
 - keep links and headings stable

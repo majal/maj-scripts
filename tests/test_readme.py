@@ -7,6 +7,7 @@ from tests.support import REPO_ROOT
 
 
 README_PATH = REPO_ROOT / "README.md"
+DOCS_DIR = REPO_ROOT / "docs"
 SCRIPT_TEMPLATE_HEADINGS = (
     "What It Does",
     "Supported Platforms",
@@ -16,6 +17,14 @@ SCRIPT_TEMPLATE_HEADINGS = (
     "Important Behavior / Defaults",
     "Notes / Caveats",
 )
+
+
+def doc_filename(script_name: str) -> str:
+    """Full per-script docs now live in docs/<script>.md - see AGENTS.md's
+    Growth Rule. A trailing .sh is stripped so e.g. jwvideo-mux-shortcuts.sh
+    maps to docs/jwvideo-mux-shortcuts.md."""
+    base = script_name[:-3] if script_name.endswith(".sh") else script_name
+    return f"{base}.md"
 
 
 def root_scripts() -> list[str]:
@@ -89,17 +98,34 @@ class ReadmeConsistencyTest(unittest.TestCase):
 
         self.assertEqual(sorted(script_name for script_name, _ in documented), self.scripts)
 
-    def test_script_sections_keep_standard_template(self) -> None:
+    def test_script_sections_stay_short_and_link_to_docs(self) -> None:
         for script_name in self.scripts:
             with self.subTest(script=script_name):
                 body = script_section_body(self.readme, script_name)
-                previous_index = -1
+                doc_name = doc_filename(script_name)
 
-                for heading in SCRIPT_TEMPLATE_HEADINGS:
-                    marker = f"#### {heading}"
-                    index = body.find(marker)
-                    self.assertNotEqual(index, -1, f"{script_name} missing {marker}")
-                    self.assertGreater(index, previous_index, f"{marker} is out of order for {script_name}")
-                    previous_index = index
-
+                self.assertIn(
+                    f"docs/{doc_name}", body,
+                    f"{script_name}'s README section should link to docs/{doc_name}",
+                )
                 self.assertIn("[↑ TOC](#table-of-contents)", body)
+                # The full template lives in docs/<script>.md now, not inline.
+                for heading in SCRIPT_TEMPLATE_HEADINGS:
+                    self.assertNotIn(f"#### {heading}", body, f"{script_name} should not inline {heading} in README")
+
+    def test_doc_files_keep_standard_template(self) -> None:
+        for script_name in self.scripts:
+            with self.subTest(script=script_name):
+                doc_path = DOCS_DIR / doc_filename(script_name)
+                self.assertTrue(doc_path.is_file(), f"Missing {doc_path.relative_to(REPO_ROOT)}")
+
+                text = doc_path.read_text(encoding="utf-8")
+                self.assertIn("../README.md", text, f"{doc_path.name} should link back to the README")
+
+                previous_index = -1
+                for heading in SCRIPT_TEMPLATE_HEADINGS:
+                    marker = f"## {heading}"
+                    index = text.find(marker)
+                    self.assertNotEqual(index, -1, f"{doc_path.name} missing {marker}")
+                    self.assertGreater(index, previous_index, f"{marker} is out of order in {doc_path.name}")
+                    previous_index = index
