@@ -1,5 +1,10 @@
 # AGENTS.md
 
+Template compliance: repo-template-standard.md v1.0.0, checked 2026-08-26.
+Check `~/dig/bin/new-agent-repo.d/repo-template-standard.md` for the
+current version and re-review this repo against its changelog when they
+diverge.
+
 Guidance for future contributors and AI agents working in this repo.
 
 Repo name: `maj-scripts-vibe`
@@ -42,6 +47,18 @@ The documentation model is:
 
 - `README.md` is the user-facing index and navigation hub
 - `AGENTS.md` defines how scripts and docs should be added in the future
+
+## Agent Working Rules
+
+- **CLI tools before GUI tools.** Default to CLI/API tools when doing repo
+  or system work — more context density per token, and composable in ways
+  GUI/browser automation isn't. Reach for GUI or browser automation only
+  when a task genuinely has no CLI/API path.
+- **Artifacts stay local by default.** This repo is public on GitHub; any
+  work product touching real operational or personal detail goes in a
+  local file — `docs/reports/private/` if it needs to stay untracked (see
+  `.gitignore`) — never a hosted `claude.ai` artifact, gist, or pastebin,
+  unless the operator explicitly asks for a shareable link.
 
 ## Public Repo And Secrets
 
