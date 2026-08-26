@@ -19,9 +19,18 @@ If you're just here to use a script, start here. This README is the friendly map
 
 - [Overview](#overview)
 - [Scripts](#scripts)
+  - [`generate_html_colors_video`](#generate_html_colors_video)
   - [`gmail-cleanup`](#gmail-cleanup)
+  - [`maj-online`](#maj-online)
+  - [`minterpolate`](#minterpolate)
+  - [`pdfcompress`](#pdfcompress)
+  - [`pdfind`](#pdfind)
+  - [`pdflat`](#pdflat)
+  - [`pdflat-auto`](#pdflat-auto)
+  - [`pdflat-single`](#pdflat-single)
   - [`printing-mode`](#printing-mode)
   - [`ubuntu-hibernate`](#ubuntu-hibernate)
+  - [`vboxsign`](#vboxsign)
   - [`wh`](#wh)
   - [`whisper`](#whisper)
 - [Your Local Setup](#your-local-setup)
@@ -33,11 +42,75 @@ If you're just here to use a script, start here. This README is the friendly map
 
 ## Scripts
 
+### [`generate_html_colors_video`](./generate_html_colors_video)
+
+`generate_html_colors_video` renders a 12-hour 4K solid-color video for every named HTML/CSS color.
+
+Full docs: [docs/generate_html_colors_video.md](docs/generate_html_colors_video.md)
+
+[↑ TOC](#table-of-contents)
+
 ### [`gmail-cleanup`](./gmail-cleanup)
 
 `gmail-cleanup` is a local-first Gmail attachment cleanup CLI.
 
 Full docs: [docs/gmail-cleanup.md](docs/gmail-cleanup.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`maj-online`](./maj-online)
+
+`maj-online` is a quick internet-connectivity check for scripts to call before doing anything network-dependent.
+
+Full docs: [docs/maj-online.md](docs/maj-online.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`minterpolate`](./minterpolate)
+
+`minterpolate` runs FFmpeg's motion-interpolation filter across multiple CPU cores by slicing, processing, and re-concatenating a video.
+
+Full docs: [docs/minterpolate.md](docs/minterpolate.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`pdfcompress`](./pdfcompress)
+
+`pdfcompress` batch-compresses PDF files and keeps the originals.
+
+Full docs: [docs/pdfcompress.md](docs/pdfcompress.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`pdfind`](./pdfind)
+
+`pdfind` is a graphical (Zenity) tool to search for text inside every PDF in the current directory and jump straight to the matching page.
+
+Full docs: [docs/pdfind.md](docs/pdfind.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`pdflat`](./pdflat)
+
+`pdflat` flattens one or more named PDFs and lets you choose whether to keep the originals.
+
+Full docs: [docs/pdflat.md](docs/pdflat.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`pdflat-auto`](./pdflat-auto)
+
+`pdflat-auto` flattens every PDF in the current directory with no prompts.
+
+Full docs: [docs/pdflat-auto.md](docs/pdflat-auto.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`pdflat-single`](./pdflat-single)
+
+`pdflat-single` flattens exactly one named PDF in place, keeping a copy of the original.
+
+Full docs: [docs/pdflat-single.md](docs/pdflat-single.md)
 
 [↑ TOC](#table-of-contents)
 
@@ -54,6 +127,14 @@ Full docs: [docs/printing-mode.md](docs/printing-mode.md)
 `ubuntu-hibernate` is a guided hibernate doctor and setup helper for Ubuntu 26.04.
 
 Full docs: [docs/ubuntu-hibernate.md](docs/ubuntu-hibernate.md)
+
+[↑ TOC](#table-of-contents)
+
+### [`vboxsign`](./vboxsign)
+
+`vboxsign` signs and loads the VirtualBox kernel modules on a Linux host with Secure Boot enabled.
+
+Full docs: [docs/vboxsign.md](docs/vboxsign.md)
 
 [↑ TOC](#table-of-contents)
 
