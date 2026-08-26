@@ -27,3 +27,7 @@ ENV/
 # so this stays local-only (and can still sync privately machine-to-machine
 # outside of git, e.g. Resilio) rather than being committed/pushed.
 memory/
+
+# Same reasoning: private operational/personal notes (e.g. Gmail cleanup
+# session detail) that must never land in this public repo's history.
+docs/reports/private/
