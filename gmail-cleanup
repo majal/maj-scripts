@@ -27,7 +27,6 @@ import tempfile
 import time
 import unicodedata
 import zipfile
-from collections import Counter, defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from email import policy
@@ -3816,286 +3815,29 @@ def message_has_only_ignored_sidecars(message: EmailMessage) -> bool:
     return bool(attachment_parts) and all(is_ignored_sidecar_part(part) for part in attachment_parts)
 
 
-# The local SQLite index subsystem (GmailIndex, IndexedGmailClient,
-# IndexOnlyGmailClient, and the `index build`/`index stats` command
-# implementations) lives in gmail_cleanup/gmail_index.py -- extracted as
-# part of the UNIX-philosophy/modularity split (repo-template-standard.md
-# item 10).
+# The local SQLite index subsystem -- GmailIndex, IndexedGmailClient,
+# IndexOnlyGmailClient, the `index build`/`index stats` command
+# implementations, and the `index analyze` command implementation with its
+# supporting helpers (message classification, counter/byte-summary
+# formatting, cleanup-command suggestions) -- lives in
+# gmail_cleanup/gmail_index.py -- extracted as part of the
+# UNIX-philosophy/modularity split (repo-template-standard.md item 10).
 from gmail_cleanup.gmail_index import (
     GmailIndex,
     IndexOnlyGmailClient,
     IndexedGmailClient,
+    counter_items,
+    indexed_cleanup_suggestions,
+    is_analyzable_attachment_part,
+    message_sender_domain,
+    message_year,
+    render_index_analyze,
     render_index_build,
     render_index_stats,
+    run_index_analyze,
     run_index_build,
+    top_bytes_items,
 )
-
-
-def message_sender_domain(message: EmailMessage) -> str:
-    address = parseaddr(header_value(message, "From"))[1].strip().lower()
-    if "@" not in address:
-        return "unknown"
-    return address.rsplit("@", 1)[1]
-
-
-def message_year(message: EmailMessage) -> int | None:
-    try:
-        return parsedate_to_datetime(header_value(message, "Date")).year
-    except (TypeError, ValueError, IndexError, OverflowError):
-        return None
-
-
-def is_analyzable_attachment_part(part: EmailMessage) -> bool:
-    if part.is_multipart():
-        return False
-    disposition = (part.get_content_disposition() or "").lower()
-    if part.get_filename() or disposition in {"attachment", "inline"}:
-        return True
-    if part.get("Content-ID") and part.get_content_maintype().lower() in {"image", "video"}:
-        return True
-    return False
-
-
-def counter_items(counter: Counter, *, top: int, include_bytes: Counter | None = None) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for key, count in counter.most_common(top):
-        row: dict[str, object] = {"key": key, "count": count}
-        if include_bytes is not None:
-            size = int(include_bytes[key])
-            row["bytes"] = size
-            row["human"] = human_size(size)
-        rows.append(row)
-    return rows
-
-
-def top_bytes_items(counter: Counter, *, top: int) -> list[dict[str, object]]:
-    return [
-        {
-            "key": key,
-            "bytes": int(size),
-            "human": human_size(int(size)),
-        }
-        for key, size in counter.most_common(top)
-    ]
-
-
-def indexed_cleanup_suggestions(query: str | None) -> list[dict[str, str]]:
-    base_query = query or "has:attachment -in:trash -in:spam"
-    base = f"gmail-cleanup report --query {json.dumps(base_query)} --max-results 50000 --use-index"
-    return [
-        {
-            "name": "large-media",
-            "command": f"{base} --types image,video --min-message-bytes 1000000",
-        },
-        {
-            "name": "office",
-            "command": f"{base} --types office",
-        },
-        {
-            "name": "archive",
-            "command": f"{base} --types archive",
-        },
-        {
-            "name": "audio",
-            "command": f"{base} --types audio",
-        },
-        {
-            "name": "older-than-2018-media",
-            "command": f"{base} --types image,video --before-year 2018",
-        },
-    ]
-
-
-def run_index_analyze(index_db: Path, *, query: str | None = None, max_results: int | None = None, top: int = 20) -> dict[str, object]:
-    if max_results is not None and max_results < 1:
-        raise ValueError("--max-results must be 1 or greater")
-    if top < 1:
-        raise ValueError("--top must be 1 or greater")
-    gmail_index = GmailIndex(index_db)
-    try:
-        records = gmail_index.message_records(query=query, max_results=max_results)
-    finally:
-        gmail_index.close()
-    if query is not None and not records:
-        raise ValueError(f"No cached messages found for query: {query}")
-
-    category_parts: Counter = Counter()
-    category_bytes: Counter = Counter()
-    category_messages: dict[str, set[str]] = defaultdict(set)
-    disposition_counts: Counter = Counter()
-    duplicate_payloads: dict[str, list[dict[str, object]]] = defaultdict(list)
-    extension_counts: Counter = Counter()
-    extension_bytes: Counter = Counter()
-    mime_counts: Counter = Counter()
-    mime_bytes: Counter = Counter()
-    sender_counts: Counter = Counter()
-    sender_bytes: Counter = Counter()
-    year_counts: Counter = Counter()
-    year_bytes: Counter = Counter()
-    largest_messages: list[dict[str, object]] = []
-    attachment_parts = 0
-    attachment_bytes = 0
-
-    for record in records:
-        message = parse_email_message(record.raw_bytes)
-        domain = message_sender_domain(message)
-        year = message_year(message)
-        if year is not None:
-            year_counts[str(year)] += 1
-        sender_counts[domain] += 1
-        message_attachment_bytes = 0
-        message_parts = 0
-        biggest_part: dict[str, object] | None = None
-        for part in message.walk():
-            if not is_analyzable_attachment_part(part):
-                continue
-            payload = part.get_payload(decode=True) or b""
-            size = len(payload)
-            filename = derive_attachment_filename(part, message_parts + 1)
-            mime_type = infer_attachment_mime_type(part)
-            extension = attachment_extension(filename) or "(none)"
-            categories = attachment_categories_for_part(part)
-            if "media" in categories and size >= LARGE_MEDIA_MIN_PART_BYTES:
-                categories.add("large-media")
-            attachment_parts += 1
-            attachment_bytes += size
-            message_parts += 1
-            message_attachment_bytes += size
-            disposition = (part.get_content_disposition() or "(none)").lower()
-            disposition_counts[disposition] += 1
-            extension_counts[extension] += 1
-            extension_bytes[extension] += size
-            mime_counts[mime_type] += 1
-            mime_bytes[mime_type] += size
-            for category in categories:
-                category_parts[category] += 1
-                category_bytes[category] += size
-                category_messages[category].add(record.message_id)
-            if payload:
-                duplicate_payloads[hashlib.sha256(payload).hexdigest()].append(
-                    {
-                        "message_id": record.message_id,
-                        "filename": filename,
-                        "mime_type": mime_type,
-                        "size_bytes": size,
-                        "sender_domain": domain,
-                    }
-                )
-            if biggest_part is None or size > int(biggest_part["size_bytes"]):
-                biggest_part = {
-                    "filename": filename,
-                    "mime_type": mime_type,
-                    "size_bytes": size,
-                    "human": human_size(size),
-                }
-        sender_bytes[domain] += message_attachment_bytes
-        if year is not None:
-            year_bytes[str(year)] += message_attachment_bytes
-        if message_parts:
-            largest_messages.append(
-                {
-                    "attachment_bytes": message_attachment_bytes,
-                    "attachment_human": human_size(message_attachment_bytes),
-                    "biggest_part": biggest_part,
-                    "message_id": record.message_id,
-                    "sender_domain": domain,
-                    "subject": header_value(message, "Subject"),
-                }
-            )
-
-    duplicate_groups = [items for items in duplicate_payloads.values() if len(items) > 1]
-    duplicate_groups.sort(key=lambda items: (len(items) - 1) * int(items[0]["size_bytes"]), reverse=True)
-    duplicate_reclaimable = sum((len(items) - 1) * int(items[0]["size_bytes"]) for items in duplicate_groups)
-    categories = [
-        {
-            "bytes": int(category_bytes[name]),
-            "human": human_size(int(category_bytes[name])),
-            "messages": len(category_messages[name]),
-            "name": name,
-            "parts": int(category_parts[name]),
-        }
-        for name in sorted(category_parts, key=lambda item: (-category_bytes[item], item))
-    ]
-    return {
-        "attachment_bytes": attachment_bytes,
-        "attachment_human": human_size(attachment_bytes),
-        "attachment_parts": attachment_parts,
-        "categories": categories,
-        "dispositions": counter_items(disposition_counts, top=top),
-        "duplicates": {
-            "groups": len(duplicate_groups),
-            "instances": sum(len(items) for items in duplicate_groups),
-            "reclaimable_bytes": duplicate_reclaimable,
-            "reclaimable_human": human_size(duplicate_reclaimable),
-            "top_groups": [
-                {
-                    "each_bytes": int(items[0]["size_bytes"]),
-                    "each_human": human_size(int(items[0]["size_bytes"])),
-                    "filename": items[0]["filename"],
-                    "instances": len(items),
-                    "mime_type": items[0]["mime_type"],
-                    "reclaimable_bytes": (len(items) - 1) * int(items[0]["size_bytes"]),
-                    "reclaimable_human": human_size((len(items) - 1) * int(items[0]["size_bytes"])),
-                    "sample_sender_domains": sorted({str(item["sender_domain"]) for item in items})[:5],
-                }
-                for items in duplicate_groups[:top]
-            ],
-        },
-        "extensions_by_bytes": top_bytes_items(extension_bytes, top=top),
-        "extensions_by_count": counter_items(extension_counts, top=top, include_bytes=extension_bytes),
-        "index_db": str(index_db),
-        "largest_messages": sorted(largest_messages, key=lambda item: int(item["attachment_bytes"]), reverse=True)[:top],
-        "messages_analyzed": len(records),
-        "mimes_by_bytes": top_bytes_items(mime_bytes, top=top),
-        "mimes_by_count": counter_items(mime_counts, top=top, include_bytes=mime_bytes),
-        "mode": "index-analyze",
-        "query": query,
-        "sender_domains_by_bytes": top_bytes_items(sender_bytes, top=top),
-        "sender_domains_by_count": counter_items(sender_counts, top=top, include_bytes=sender_bytes),
-        "suggested_reports": indexed_cleanup_suggestions(query),
-        "years": [
-            {
-                "bytes": int(year_bytes[year]),
-                "count": int(year_counts[year]),
-                "human": human_size(int(year_bytes[year])),
-                "year": year,
-            }
-            for year in sorted(year_counts)
-        ],
-    }
-
-
-def render_index_analyze(summary: dict[str, object]) -> str:
-    lines = [
-        f"Mode: {summary['mode']}",
-        f"Index DB: {summary['index_db']}",
-        f"Query: {summary['query'] or '(all indexed messages)'}",
-        f"Messages analyzed: {summary['messages_analyzed']}",
-        f"Attachment parts: {summary['attachment_parts']}",
-        f"Attachment bytes: {summary['attachment_human']}",
-        "Selectors by bytes:",
-    ]
-    for category in summary["categories"]:
-        lines.append(
-            f"- {category['name']}: {category['messages']} message(s), "
-            f"{category['parts']} part(s), {category['human']}"
-        )
-    duplicates = summary["duplicates"]
-    lines.extend(
-        [
-            "Duplicates:",
-            f"- groups: {duplicates['groups']}",
-            f"- instances: {duplicates['instances']}",
-            f"- reclaimable estimate: {duplicates['reclaimable_human']}",
-            "Top extensions by bytes:",
-        ]
-    )
-    for item in summary["extensions_by_bytes"]:
-        lines.append(f"- {item['key']}: {item['human']}")
-    lines.append("Suggested report commands:")
-    for suggestion in summary["suggested_reports"]:
-        lines.append(f"- {suggestion['name']}: {suggestion['command']}")
-    return "\n".join(lines)
 
 
 def run_report(
