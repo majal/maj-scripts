@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import gmail_cleanup.config as gmail_cleanup_config
+import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
 
 
@@ -2261,12 +2262,17 @@ class GmailCleanupTest(unittest.TestCase):
     def test_linux_trash_uses_xdg_trash_directly(self) -> None:
         path = Path("/tmp/example.pdf")
 
+        # send_path_to_trash and move_path_to_xdg_trash both live in
+        # gmail_cleanup/trash.py, and send_path_to_trash calls detect_os and
+        # move_path_to_xdg_trash as bare names resolved from that module's own
+        # globals -- so those two must be patched on gmail_cleanup.trash
+        # directly, not on the dynamically-loaded top-level script module.
         with mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_trash,
             "detect_os",
             return_value="linux",
         ), mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_trash,
             "move_path_to_xdg_trash",
         ) as fallback, mock.patch.object(
             self.gmail_cleanup.subprocess,
