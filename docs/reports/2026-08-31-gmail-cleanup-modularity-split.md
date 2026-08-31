@@ -1,7 +1,56 @@
 # gmail-cleanup UNIX-philosophy/modularity split
 
-**Date:** 2026-08-31 (session continued into 2026-09-01)
-**Status:** Partial — 9 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
+**Date:** 2026-08-31 (session continued into 2026-09-01; GmailIndex follow-up
+pass done 2026-09-01)
+**Status:** Partial — 12 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
+
+## 2026-09-01 follow-up: GmailIndex subsystem extraction
+
+The "best next candidate" flagged at the bottom of this report — the
+`GmailIndex`/`IndexedGmailClient`/`IndexOnlyGmailClient` + index
+build/analyze subsystem — was extracted in a dedicated follow-up pass,
+using the exact same method (verbatim move, one coherent piece per commit,
+`python3 -m tests` green before each push) documented below. Three commits:
+
+| # | Module | Lines | Contents | Depends on |
+|---|--------|------:|----------|------------|
+| 10 | `gmail_cleanup/message_utils.py` | 179 | `parse_email_message`, `header_value`, `attachment_extension`, `sanitize_filename`, `is_ignored_sidecar_part`, `infer_attachment_mime_type`, `attachment_categories_for_part`, `derive_attachment_filename`, `human_size`, `message_filename_records` | constants |
+| 11 | `gmail_cleanup/gmail_index.py` (part 1) | — | `GmailIndex`, `IndexedGmailClient`, `IndexOnlyGmailClient`, `run_index_build`, `render_index_build`, `render_index_stats`, plus the three tiny helpers only `GmailIndex` used (`iso_now`, `private_parent`, `all_header_records`) | constants, models, message_utils |
+| 12 | `gmail_cleanup/gmail_index.py` (part 2, appended) | 834 total | `message_sender_domain`, `message_year`, `is_analyzable_attachment_part`, `counter_items`, `top_bytes_items`, `indexed_cleanup_suggestions`, `run_index_analyze`, `render_index_analyze` | constants, models, message_utils, (same module as part 1) |
+
+The unplanned but necessary addition was module #10: this report's own
+method rule 1 says a cluster must depend "only on the standard library plus
+modules already extracted, never on code still living only in the
+top-level script." `GmailIndex.upsert_message` and the index-analyze path
+call straight into `parse_email_message`, `header_value`,
+`derive_attachment_filename`, `infer_attachment_mime_type`,
+`attachment_extension`, `attachment_categories_for_part`, `human_size`, and
+`message_filename_records` — all still living in the "genuinely tangled"
+email-parsing region this report explicitly declined to touch. Tracing each
+one's own call graph showed they're actually pure leaves (stdlib +
+constants only, never calling back into the tangled bidirectional cluster
+around `collect_media_parts`/`plan_message`/etc.) — the tangle warning
+applied to the region's *location* in the file, not to these particular
+functions. They were pulled into their own `message_utils.py` module as a
+prerequisite commit, with the main script importing them back for its many
+other call sites (extract-media, PDF handling, reporting), exactly like the
+existing `message_filename_records`-in-`run_report` pattern.
+
+`gmail-cleanup` itself: **5,541 → 4,657 lines** this pass (another 884
+lines moved out); **7,201 → 4,657 lines total** since the split began (35%
+moved out). All three commits individually verified: `python3 -m unittest
+tests.test_gmail_cleanup -v` — 75/75 passed every time; `python3 -m tests`
+— 152/152 (full repo suite) every time; `./gmail-cleanup --help` / `index
+--help` / `report --help` run clean; no PII (`majal`, `/Users/maj`) in
+either new module. Commits, in order:
+
+```
+d8c648c Extract gmail-cleanup message/attachment leaf helpers into gmail_cleanup/message_utils.py
+7e8f553 Extract gmail-cleanup SQLite index storage/client layer into gmail_cleanup/gmail_index.py
+6e93ed1 Extract gmail-cleanup index-analyze command into gmail_cleanup/gmail_index.py
+```
+
+Everything below this point is the original 2026-08-31 report, unedited.
 
 ## Why
 
