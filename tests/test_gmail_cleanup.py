@@ -14,6 +14,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
+import gmail_cleanup.config as gmail_cleanup_config
 from tests.support import load_script_module
 
 
@@ -2391,8 +2392,12 @@ class GmailCleanupTest(unittest.TestCase):
             legacy.parent.mkdir(parents=True, exist_ok=True)
             legacy.write_text('backup_dir = "backup"\n', encoding="utf-8")
 
-            with mock.patch.object(self.gmail_cleanup, "DEFAULT_CONFIG_PATH", preferred), mock.patch.object(
-                self.gmail_cleanup, "LEGACY_CONFIG_PATH", legacy
+            # resolve_config_path lives in gmail_cleanup/config.py (imported into
+            # the top-level script's namespace), so its DEFAULT_CONFIG_PATH /
+            # LEGACY_CONFIG_PATH globals must be patched on that submodule, not
+            # on the dynamically-loaded top-level script module.
+            with mock.patch.object(gmail_cleanup_config, "DEFAULT_CONFIG_PATH", preferred), mock.patch.object(
+                gmail_cleanup_config, "LEGACY_CONFIG_PATH", legacy
             ):
                 self.assertEqual(self.gmail_cleanup.resolve_config_path(None), legacy)
 
