@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import gmail_cleanup.config as gmail_cleanup_config
+import gmail_cleanup.password_stores as gmail_cleanup_password_stores
 import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
 
@@ -1435,7 +1436,10 @@ class GmailCleanupTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             recipe_store = Path(tmpdir) / "recipes.json"
-            with mock.patch.object(self.gmail_cleanup, "PASSWORD_RECIPE_STORE_PATH", recipe_store):
+            # load/save_password_recipe_store live in gmail_cleanup/password_stores.py
+            # and read PASSWORD_RECIPE_STORE_PATH from that module's own globals, so
+            # it must be patched there rather than on the top-level script module.
+            with mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_RECIPE_STORE_PATH", recipe_store):
                 self.gmail_cleanup.learn_password_recipe(plan, buffered, "last4")
 
             recipe_text = recipe_store.read_text(encoding="utf-8")
@@ -1453,7 +1457,7 @@ class GmailCleanupTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             secret_store = Path(tmpdir) / "secrets.json"
-            with mock.patch.object(self.gmail_cleanup, "PASSWORD_SECRET_STORE_PATH", secret_store):
+            with mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_SECRET_STORE_PATH", secret_store):
                 self.gmail_cleanup.learn_password_secret(plan, buffered, "654321")
                 cached = self.gmail_cleanup.cached_password_candidates(plan, buffered)
 
@@ -1477,11 +1481,11 @@ class GmailCleanupTest(unittest.TestCase):
             recipe_store = Path(tmpdir) / "recipes.json"
             secret_store = Path(tmpdir) / "secrets.json"
             failure_store = Path(tmpdir) / "failures.json"
-            with mock.patch.object(self.gmail_cleanup, "PASSWORD_RECIPE_STORE_PATH", recipe_store), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_RECIPE_STORE_PATH", recipe_store), mock.patch.object(
+                gmail_cleanup_password_stores,
                 "PASSWORD_SECRET_STORE_PATH",
                 secret_store,
-            ), mock.patch.object(self.gmail_cleanup, "PASSWORD_FAILURE_STORE_PATH", failure_store), mock.patch.object(
+            ), mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_FAILURE_STORE_PATH", failure_store), mock.patch.object(
                 self.gmail_cleanup,
                 "select_pdf_password_backend",
                 return_value="john",
@@ -1526,8 +1530,8 @@ class GmailCleanupTest(unittest.TestCase):
             staged_pdf.write_bytes(b"%PDF-1.7")
             secret_store = Path(tmpdir) / "secrets.json"
             failure_store = Path(tmpdir) / "failures.json"
-            with mock.patch.object(self.gmail_cleanup, "PASSWORD_SECRET_STORE_PATH", secret_store), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_SECRET_STORE_PATH", secret_store), mock.patch.object(
+                gmail_cleanup_password_stores,
                 "PASSWORD_FAILURE_STORE_PATH",
                 failure_store,
             ), mock.patch.object(

@@ -2582,60 +2582,17 @@ def password_recipe_fingerprint(plan: PlannedMessage, media_part: BufferedMediaP
     return f"{sender_domain(plan)}|{filename_recipe_pattern(media_part.filename)}"
 
 
-def load_password_recipe_store() -> dict[str, object]:
-    if not PASSWORD_RECIPE_STORE_PATH.exists():
-        return {}
-    try:
-        return json.loads(PASSWORD_RECIPE_STORE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_password_recipe_store(store: dict[str, object]) -> None:
-    PASSWORD_RECIPE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = PASSWORD_RECIPE_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(store, sort_keys=True, indent=2), encoding="utf-8")
-    temp_path.replace(PASSWORD_RECIPE_STORE_PATH)
-
-
-def load_password_secret_store() -> dict[str, object]:
-    if not PASSWORD_SECRET_STORE_PATH.exists():
-        return {}
-    try:
-        return json.loads(PASSWORD_SECRET_STORE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_password_secret_store(store: dict[str, object]) -> None:
-    PASSWORD_SECRET_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = PASSWORD_SECRET_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(store, sort_keys=True, indent=2), encoding="utf-8")
-    if not sys.platform.startswith("win"):
-        os.chmod(temp_path, 0o600)
-    temp_path.replace(PASSWORD_SECRET_STORE_PATH)
-    if not sys.platform.startswith("win"):
-        os.chmod(PASSWORD_SECRET_STORE_PATH, 0o600)
-
-
-def load_password_failure_store() -> dict[str, object]:
-    if not PASSWORD_FAILURE_STORE_PATH.exists():
-        return {}
-    try:
-        return json.loads(PASSWORD_FAILURE_STORE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_password_failure_store(store: dict[str, object]) -> None:
-    PASSWORD_FAILURE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = PASSWORD_FAILURE_STORE_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(store, sort_keys=True, indent=2), encoding="utf-8")
-    if not sys.platform.startswith("win"):
-        os.chmod(temp_path, 0o600)
-    temp_path.replace(PASSWORD_FAILURE_STORE_PATH)
-    if not sys.platform.startswith("win"):
-        os.chmod(PASSWORD_FAILURE_STORE_PATH, 0o600)
+# JSON-file-backed PDF password learning stores (recipe/secret/failure)
+# live in gmail_cleanup/password_stores.py -- extracted as part of the
+# UNIX-philosophy/modularity split (repo-template-standard.md item 10).
+from gmail_cleanup.password_stores import (
+    load_password_failure_store,
+    load_password_recipe_store,
+    load_password_secret_store,
+    save_password_failure_store,
+    save_password_recipe_store,
+    save_password_secret_store,
+)
 
 
 def learned_password_secrets(plan: PlannedMessage, media_part: BufferedMediaPart) -> tuple[str, ...]:
