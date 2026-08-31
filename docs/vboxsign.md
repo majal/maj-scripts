@@ -22,13 +22,19 @@
 
 ## Install / First Run Summary
 
-**Edit the script first** — `dir=/home/directory/of/keys` is a placeholder and must be changed to wherever your `MOK.priv`/`MOK.der` actually live before running this. Then:
+Point the script at your key directory one of three ways (CLI flag beats env var beats the in-script default):
+
+- **Edit the script** — change the `dir=` default placeholder (`/home/directory/of/keys`) to wherever your `MOK.priv`/`MOK.der` actually live.
+- **Set `VBOXSIGN_KEYS_DIR`** in your environment.
+- **Pass `-k`/`--keys-dir DIR`** for a one-run override.
+
+Then:
 
 ```bash
 sudo vboxsign
 ```
 
-(or just `vboxsign` — it re-execs itself under `sudo` if needed)
+(or just `vboxsign` — it re-execs itself under `sudo -E` if needed, preserving `VBOXSIGN_KEYS_DIR`)
 
 ## Common Usage Examples
 
@@ -36,6 +42,12 @@ Run after a kernel update, when Secure Boot is rejecting the unsigned VirtualBox
 
 ```bash
 vboxsign
+```
+
+Point at a non-default key directory for this run only, without editing the script:
+
+```bash
+vboxsign --keys-dir /mnt/keys/vbox-mok
 ```
 
 ## Important Behavior / Defaults
@@ -47,7 +59,7 @@ vboxsign
 
 ## Notes / Caveats
 
-- The hardcoded key directory (`/home/directory/of/keys`) is a placeholder by design (this repo is public) — you must point it at your own key location before use.
+- The hardcoded key directory (`/home/directory/of/keys`) is a placeholder by design (this repo is public) — point it at your own key location by editing the script, setting `VBOXSIGN_KEYS_DIR`, or passing `--keys-dir`.
 - Designed to be re-run safely after every kernel update, since new kernel builds need the modules re-signed against the running kernel's headers.
 
 [↑ Back to README TOC](../README.md#table-of-contents)
