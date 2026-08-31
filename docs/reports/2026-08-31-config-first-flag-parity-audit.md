@@ -44,12 +44,20 @@ that's noted per-file below.
 
 ## Not yet fixed — real gaps left, with reason
 
-None beyond the `s76/`/`dup/` repo-boundary finding above, which is tracked
-as a separate spawned task rather than fixed here (it's a dead-code/repo-
-hygiene question, not a config/flag gap — see AGENTS.md's own scope notes
-for what belongs in this repo vs. `maj-newemeth`/`maj-newserver`).
+None. The `s76/`/`dup/` repo-boundary finding was resolved as a follow-up
+the same day — see Applied.
 
 ## Applied
+
+- `s76/`, `dup/` — **deleted outright** (follow-up pass, same day).
+  Confirmed via `git log -- s76/ dup/`: both directories' only commit is
+  the 2026-08-11 "Migrate legacy scripts from majal/maj-scripts" import
+  itself, never touched since; zero references anywhere in this repo's
+  own docs or in the rest of `~/dig`. `s76-power-autoprofile` and the
+  `dup1-*` cron scripts already live in more current form in
+  `maj-newemeth`/`maj-newserver` respectively (the former given full CLI
+  flag parity earlier this same audit pass) — these were pure stale
+  duplicates in the wrong repo, not unique content worth migrating.
 
 - `generate_html_colors_video` — added `--resolution`/`--duration`/`--outdir` flags (short aliases `-r`/`-d`/`-o`), `mkdir -p` for a custom outdir, description metadata now reflects the actual resolution/duration used. `docs/generate_html_colors_video.md` updated to match.
 - `vboxsign` — added `--keys-dir`/`VBOXSIGN_KEYS_DIR` override with documented precedence, `sudo -E` re-exec so the env var survives privilege escalation. `docs/vboxsign.md` updated to match.
