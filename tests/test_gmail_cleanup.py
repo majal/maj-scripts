@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import gmail_cleanup.config as gmail_cleanup_config
+import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
 import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
@@ -411,8 +412,12 @@ class GmailCleanupTest(unittest.TestCase):
             credentials_path.write_text("{}", encoding="utf-8")
             token_path.write_text("{}", encoding="utf-8")
 
+            # load_google_modules and build_gmail_client both live in
+            # gmail_cleanup/gmail_client.py, and build_gmail_client calls
+            # load_google_modules as a bare name resolved from that module's own
+            # globals -- so it must be patched there, not on the top-level script.
             with mock.patch.object(
-                module,
+                gmail_cleanup_gmail_client,
                 "load_google_modules",
                 return_value=(object, FakeCredentials, FakeInstalledAppFlow, fake_build, FakeAuthorizedHttp, FakeHttplib2, RuntimeError),
             ):
