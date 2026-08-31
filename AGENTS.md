@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Template compliance: repo-template-standard.md v1.0.0, checked 2026-08-26.
+Template compliance: repo-template-standard.md v1.2.0, reviewed 2026-08-31 (previously v1.0.0). Config-first/flag-parity retrofit, Unix-style config comments, and UNIX-philosophy/modularity refactor for existing code are tracked in `ags/docs/reports/2026-08-31-cross-repo-standards-rollout-handoff.md` -- not yet applied here.
 Check `~/dig/bin/new-agent-repo.d/repo-template-standard.md` for the
 current version and re-review this repo against its changelog when they
 diverge.
@@ -106,7 +106,9 @@ Run `python3 -m tests` before pushing changes that affect scripts, tests, or REA
 
 ## Commit And Push Rules
 
-When an agent completes requested repo changes and is confident the work is ready, commit and push them unless the user explicitly asks not to.
+This is `repo-template-standard.md`'s named "smart batched deploy"
+pattern (no separate deploy step here — push is the deploy step, same as
+`bin`/`jwkit`): when an agent completes requested repo changes and is confident the work is ready, commit and push them unless the user explicitly asks not to.
 
 Do not push when there are unresolved errors, relevant verification has not passed, or the agent believes the change should wait for more work or be bundled with related follow-up changes. In those cases, leave a clear status note with the next step.
 
