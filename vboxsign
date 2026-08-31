@@ -5,12 +5,38 @@
 # https://www.majlovesreg.one/thoughts/sign-virtualbox-on-ubuntu-16-04-with-secure-boot-enabled/
 # https://github.com/majal/maj-scripts/blob/master/vboxsign
 
-# Run as root
-[ $EUID -ne 0 ] && { echo; exec sudo "$0" "$@"; }
+# Run as root. -E preserves VBOXSIGN_KEYS_DIR (if set) across the re-exec.
+[ $EUID -ne 0 ] && { echo; exec sudo -E "$0" "$@"; }
 
-# Set working directory
-dir=/home/directory/of/keys
-cd $dir
+# Directory holding MOK.priv/MOK.der. Placeholder by design (this repo is
+# public) - edit the default below, set VBOXSIGN_KEYS_DIR, or pass
+# -k/--keys-dir DIR for a one-run override.
+dir="${VBOXSIGN_KEYS_DIR:-/home/directory/of/keys}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -k|--keys-dir)
+      dir="$2"
+      shift 2
+      ;;
+    --keys-dir=*)
+      dir="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [-k|--keys-dir DIR]"
+      echo "  DIR must hold MOK.priv and MOK.der. Default: ${dir}"
+      echo "  Env override: VBOXSIGN_KEYS_DIR"
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+cd "$dir" || { echo "vboxsign: keys dir not found: $dir" >&2; exit 1; }
 
 # (Optional) Setting env KBUILD_SIGN_PIN for encrypted keys
 #printf "Please enter key passphrase (leave blank if not needed): "; read -s
