@@ -34,7 +34,6 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.message import EmailMessage
-from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -47,11 +46,7 @@ from gmail_cleanup.constants import (
     APPLY_PLAN_QUEUE_DEPTH,
     APPLY_QUEUE_VERSION,
     APPLY_SCOPES,
-    ARCHIVE_ATTACHMENT_EXTENSIONS,
     ATTACHMENT_CLEANUP_PRESET_DEFAULTS,
-    AUDIO_ATTACHMENT_EXTENSIONS,
-    CALENDAR_ATTACHMENT_EXTENSIONS,
-    CODE_ATTACHMENT_EXTENSIONS,
     DEFAULT_AUDIO_MODE_ENV,
     DEFAULT_BACKUP_DIR_ENV,
     DEFAULT_BEFORE_YEAR_ENV,
@@ -93,7 +88,6 @@ from gmail_cleanup.constants import (
     DEFAULT_TYPES_ENV,
     EMBEDDED_IMAGE_EXTENSIONS,
     EXTENSION_OVERRIDES,
-    GENERIC_ATTACHMENT_MIME_TYPES,
     GMAIL_HTTP_TIMEOUT_SECONDS,
     GMAIL_PUBLISHED_USER_QUOTA_UNITS_PER_SECOND,
     GMAIL_QUOTA_LABELS_CREATE,
@@ -107,11 +101,8 @@ from gmail_cleanup.constants import (
     GMAIL_WRITE_MAX_ATTEMPTS,
     GMAIL_WRITE_RETRY_BASE_SECONDS,
     HTML_TAG_PATTERN,
-    IGNORED_SIDECAR_EXTENSIONS,
-    IGNORED_SIDECAR_MIME_TYPES,
     JOHN_SHOW_PASSWORD_PATTERN,
     LARGE_MEDIA_MIN_PART_BYTES,
-    LEGACY_ATTACHMENT_EXTENSIONS,
     LEGACY_CONFIG_PATH,
     LEGACY_TOKEN_PATH,
     NUMERIC_TOKEN_PATTERN,
@@ -687,8 +678,23 @@ from gmail_cleanup.gmail_client import (
 )
 
 
-def parse_email_message(raw_bytes: bytes) -> EmailMessage:
-    return BytesParser(policy=policy.default).parsebytes(raw_bytes)
+# Shared email/attachment parsing leaf helpers (raw-bytes parsing, header
+# lookup, filename sanitization/derivation, MIME-type inference, attachment
+# category classification, byte-count formatting) live in
+# gmail_cleanup/message_utils.py -- extracted as part of the
+# UNIX-philosophy/modularity split (repo-template-standard.md item 10).
+from gmail_cleanup.message_utils import (
+    attachment_categories_for_part,
+    attachment_extension,
+    derive_attachment_filename,
+    header_value,
+    human_size,
+    infer_attachment_mime_type,
+    is_ignored_sidecar_part,
+    message_filename_records,
+    parse_email_message,
+    sanitize_filename,
+)
 
 
 def detect_unsupported_message(message: EmailMessage) -> str | None:
@@ -718,11 +724,6 @@ def plan_message(record: GmailMessageRecord, settings: ExtractionSettings | None
         media_parts=media_parts,
         skip_reason=skip_reason,
     )
-
-
-def header_value(message: EmailMessage, name: str) -> str:
-    value = message.get(name, "")
-    return str(value).strip()
 
 
 def gmail_thread_url(thread_id: str, account: str = DEFAULT_GMAIL_WEB_ACCOUNT) -> str:
@@ -773,76 +774,6 @@ def message_matches_before_year(message: EmailMessage, before_year: int | None) 
     return parsed.year < before_year
 
 
-def attachment_extension(filename: str | None) -> str:
-    if not filename:
-        return ""
-    suffix = Path(filename).suffix.lower()
-    return suffix if len(suffix) <= 24 else ""
-
-
-def is_ignored_sidecar_part(part: EmailMessage) -> bool:
-    return (
-        attachment_extension(part.get_filename()) in IGNORED_SIDECAR_EXTENSIONS
-        or part.get_content_type().lower() in IGNORED_SIDECAR_MIME_TYPES
-    )
-
-
-def attachment_categories_for_part(part: EmailMessage) -> set[str]:
-    content_type = infer_attachment_mime_type(part)
-    maintype = content_type.split("/", 1)[0]
-    extension = attachment_extension(part.get_filename())
-    categories: set[str] = set()
-    if is_ignored_sidecar_part(part):
-        categories.add("ignored-sidecar")
-        return categories
-    if maintype == "image":
-        categories.update(("image", "media"))
-    if maintype == "video":
-        categories.update(("video", "media"))
-    if maintype == "audio" or extension in AUDIO_ATTACHMENT_EXTENSIONS:
-        categories.add("audio")
-    if content_type == PDF_MIME_TYPE or extension == ".pdf":
-        categories.add("pdf")
-    if extension in OFFICE_ATTACHMENT_EXTENSIONS or content_type in {
-        "application/msword",
-        "application/vnd.ms-excel",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.oasis.opendocument.presentation",
-        "application/vnd.oasis.opendocument.spreadsheet",
-        "application/vnd.oasis.opendocument.text",
-        "application/rtf",
-    }:
-        categories.add("office")
-    if extension in ARCHIVE_ATTACHMENT_EXTENSIONS or content_type in {
-        "application/rar",
-        "application/x-7z-compressed",
-        "application/x-rar-compressed",
-        "application/x-tar",
-        "application/x-zip-compressed",
-        "application/zip",
-    }:
-        categories.add("archive")
-    if extension in LEGACY_ATTACHMENT_EXTENSIONS:
-        categories.add("legacy")
-    if extension in CODE_ATTACHMENT_EXTENSIONS or content_type in {
-        "application/javascript",
-        "application/java-archive",
-        "application/vnd.android.package-archive",
-        "application/x-executable",
-        "application/x-javascript",
-        "text/javascript",
-    }:
-        categories.add("code")
-    if extension in CALENDAR_ATTACHMENT_EXTENSIONS or content_type in {"application/ics", "text/calendar"}:
-        categories.add("calendar")
-    if not categories:
-        categories.add("other")
-    return categories
-
-
 def should_extract_part(part: EmailMessage, settings: ExtractionSettings) -> bool:
     disposition = (part.get_content_disposition() or "").lower()
     if not (part.get_filename() or part.get("Content-ID") or disposition in {"attachment", "inline"}):
@@ -855,33 +786,6 @@ def should_extract_part(part: EmailMessage, settings: ExtractionSettings) -> boo
     if "large-media" in requested and "media" in categories and payload_size >= LARGE_MEDIA_MIN_PART_BYTES:
         return True
     return bool(categories & requested)
-
-
-def infer_attachment_mime_type(part: EmailMessage) -> str:
-    content_type = part.get_content_type().lower()
-    filename = part.get_filename()
-    guessed_type = mimetypes.guess_type(filename or "")[0]
-    if guessed_type:
-        guessed_type = guessed_type.lower()
-    if guessed_type == PDF_MIME_TYPE:
-        return PDF_MIME_TYPE
-    if content_type in GENERIC_ATTACHMENT_MIME_TYPES and guessed_type:
-        return guessed_type
-    return content_type
-
-
-def derive_attachment_filename(part: EmailMessage, index: int) -> str:
-    filename = part.get_filename()
-    if filename:
-        return sanitize_filename(filename)
-    ext = EXTENSION_OVERRIDES.get(part.get_content_type().lower()) or mimetypes.guess_extension(part.get_content_type()) or ""
-    return f"part-{index:02d}{ext}"
-
-
-def sanitize_filename(name: str) -> str:
-    base = Path(name).name
-    sanitized = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "_", base).strip(" .")
-    return sanitized or "attachment"
 
 
 def subject_slug(subject: str, max_chars: int = READABLE_BACKUP_SUBJECT_CHARS) -> str:
@@ -3799,19 +3703,6 @@ def plan_to_dict(plan: PlannedMessage) -> dict[str, object]:
     }
 
 
-def human_size(size_bytes: int) -> str:
-    units = ("B", "KB", "MB", "GB", "TB")
-    value = float(size_bytes)
-    unit = units[0]
-    for unit in units:
-        if value < 1024.0 or unit == units[-1]:
-            break
-        value /= 1024.0
-    if unit == "B":
-        return f"{int(value)} {unit}"
-    return f"{value:.1f} {unit}"
-
-
 def downgrade_request_profile(profile: str) -> str:
     order = list(VALID_REQUEST_PROFILES)
     try:
@@ -3920,23 +3811,6 @@ def render_summary(summary: dict[str, object]) -> str:
                 f"({len(item.get('attachments', []))} file(s), {item['message_backup_folder']}/)"
             )
     return "\n".join(lines)
-
-
-def message_filename_records(message: EmailMessage) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for part in message.walk():
-        filename = part.get_filename()
-        if not filename:
-            continue
-        records.append(
-            {
-                "content_type": part.get_content_type().lower(),
-                "disposition": part.get_content_disposition(),
-                "filename": filename,
-                "ignored_sidecar": is_ignored_sidecar_part(part),
-            }
-        )
-    return records
 
 
 def message_has_only_ignored_sidecars(message: EmailMessage) -> bool:
