@@ -187,6 +187,32 @@ PDF_ORIGINAL_TRASH_GENERATIONS = {
     PDF_UNREADABLE_ORIGINAL_TRASH_GENERATION,
 }
 PDF_NOTE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+IMAGE_METADATA_TAGS = (
+    "ExifIFD:UserComment",
+    "IFD0:ImageDescription",
+    "IPTC:Caption-Abstract",
+    "XMP-dc:Description",
+    "XMP-dc:Subject",
+)
+PDF_METADATA_TAGS = (
+    "PDF:Keywords",
+    "PDF:Subject",
+    "XMP-dc:Description",
+    "XMP-dc:Subject",
+)
+VIDEO_METADATA_TAGS = (
+    "ItemList:Comment",
+    "Keys:Description",
+    "XMP-dc:Description",
+    "XMP-dc:Subject",
+)
+QUICKTIME_MIME_TYPES = {
+    "video/3gpp",
+    "video/3gpp2",
+    "video/mp4",
+    "video/quicktime",
+    "video/x-m4v",
+}
 EMBEDDED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 SOFFICE_EMBEDDED_IMAGE_TIMEOUT_SECONDS = 120
 READABLE_BACKUP_SUBJECT_CHARS = 60
