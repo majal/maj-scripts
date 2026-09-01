@@ -20,6 +20,7 @@ import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
 import gmail_cleanup.message_rewrite as gmail_cleanup_message_rewrite
 import gmail_cleanup.metadata as gmail_cleanup_metadata
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
+import gmail_cleanup.pdf_password as gmail_cleanup_pdf_password
 import gmail_cleanup.pdf_processing as gmail_cleanup_pdf_processing
 import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
@@ -1495,11 +1496,11 @@ class GmailCleanupTest(unittest.TestCase):
                 "PASSWORD_SECRET_STORE_PATH",
                 secret_store,
             ), mock.patch.object(gmail_cleanup_password_stores, "PASSWORD_FAILURE_STORE_PATH", failure_store), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "select_pdf_password_backend",
                 return_value="john",
             ), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "resolve_pdf_password_with_backend",
                 return_value=None,
             ) as resolve_with_backend:
@@ -1544,11 +1545,11 @@ class GmailCleanupTest(unittest.TestCase):
                 "PASSWORD_FAILURE_STORE_PATH",
                 failure_store,
             ), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "select_pdf_password_backend",
                 return_value="john",
             ), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "resolve_pdf_password_with_backend",
                 return_value="654321",
             ) as resolve_with_backend:
@@ -1577,8 +1578,8 @@ class GmailCleanupTest(unittest.TestCase):
 
     def test_select_pdf_password_backend_prefers_john_with_pdf2john(self) -> None:
         settings = self.gmail_cleanup.default_extraction_settings()
-        with mock.patch.object(self.gmail_cleanup, "optional_tool_path", side_effect=lambda name: "/usr/bin/john" if name == "john" else None), mock.patch.object(
-            self.gmail_cleanup,
+        with mock.patch.object(gmail_cleanup_pdf_password, "optional_tool_path", side_effect=lambda name: "/usr/bin/john" if name == "john" else None), mock.patch.object(
+            gmail_cleanup_pdf_password,
             "find_pdf2john_path",
             return_value=Path("/usr/share/john/pdf2john.py"),
         ):
@@ -1634,11 +1635,11 @@ class GmailCleanupTest(unittest.TestCase):
                 return self.gmail_cleanup.subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
             with mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "optional_tool_path",
                 side_effect=lambda name: str(john_link) if name == "john" else None,
             ), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_pdf_password,
                 "find_pdf2john_path",
                 return_value=pdf2john_link,
             ), mock.patch.object(
@@ -1668,15 +1669,15 @@ class GmailCleanupTest(unittest.TestCase):
         buffered = self.gmail_cleanup.collect_buffered_media(self.gmail_cleanup.parse_email_message(plan.raw_bytes), plan)[0]
 
         with mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_pdf_password,
             "select_pdf_password_backend",
             return_value="pdfcrack",
         ), mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_pdf_password,
             "resolve_pdf_password_with_backend",
             return_value="123456",
         ) as resolve_backend, mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_pdf_password,
             "pdf_page_count",
         ) as pdf_page_count:
             password, attempted = self.gmail_cleanup.resolve_pdf_password(
