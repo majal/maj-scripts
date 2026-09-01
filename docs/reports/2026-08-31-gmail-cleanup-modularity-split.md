@@ -2,8 +2,156 @@
 
 **Date:** 2026-08-31 (session continued into 2026-09-01; GmailIndex
 follow-up pass done 2026-09-01; naming/attachment-writers/message-rewrite/
-pdf-processing/metadata follow-up pass also done 2026-09-01)
-**Status:** Partial — 17 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
+pdf-processing/metadata follow-up pass also done 2026-09-01; PDF password
+cracking follow-up pass also done 2026-09-01)
+**Status:** Partial — 18 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
+
+## 2026-09-01 follow-up: PDF password cracking extraction
+
+This was the dedicated pass the previous follow-up section explicitly
+deferred: the largest remaining single cluster (~25 functions, ~535 lines),
+left alone specifically for its size and consequence (real `pdfcrack`/
+`john`/`qpdf` subprocess invocation, persistent file-backed learned-password
+state), not because any back-edge had been found — that section's own
+call-graph trace had already shown a clean DAG with a single external entry
+point (`resolve_pdf_password`, called only from `write_pdf_outputs`).
+
+`password_candidate_variants` through `resolve_pdf_password` (all ~25
+functions listed in that section) moved **verbatim, in one commit**, into
+`gmail_cleanup/pdf_password.py`. Verified byte-for-byte with a scripted
+diff of the moved block against the new module before wiring the import
+back in (see method below) — the only difference found was a single
+trailing blank line at the seam. `write_pdf_outputs` and
+`write_backup_files` stayed in the top-level script exactly as planned:
+they're the orchestration layer that threads PDF mode, password handling,
+rendering, and text extraction together for a real backup run, not
+password-cracking primitives themselves.
+
+`gmail-cleanup` itself: **3,008 → 2,485 lines** this pass (523 lines moved
+out net, after also dropping five imports that became dead as a direct
+consequence of the move: `PASSWORD_HINT_PATTERN`/`PASSWORD_TOKEN_PATTERN`/
+`NUMERIC_TOKEN_PATTERN`/`PDFCRACK_FOUND_PASSWORD_PATTERN`/
+`JOHN_SHOW_PASSWORD_PATTERN` from constants, `optional_tool_path` from
+system_tools, the entire `gmail_cleanup.tool_paths` import block
+(`find_pdf2john_path`/`john_runtime_home`/`resolve_pdfcrack_path`/
+`resolve_qpdf_path`), `extract_message_search_text` from pdf_processing,
+`email.utils.parseaddr`, and the stdlib `date`/`timedelta` names from the
+`datetime` import); **7,201 → 2,485 lines total** since the split began
+(65% moved out). One commit, verified: `python3 -m unittest
+tests.test_gmail_cleanup -v` — 75/75 passed; `python3 -m tests` (full repo
+suite) — 152/152 passed; `./gmail-cleanup --help` and all four subcommand
+`--help` outputs run clean; no PII (`majal`, `/Users/maj`) in the new
+module.
+
+### The recurring `mock.patch.object` gotcha, once more
+
+Same gotcha as every prior pass, hit in five test methods that patch
+collaborators of `resolve_pdf_password`/`select_pdf_password_backend`
+(`select_pdf_password_backend`, `resolve_pdf_password_with_backend`,
+`optional_tool_path`, `find_pdf2john_path`, `pdf_page_count`) — all five
+fixed by importing `gmail_cleanup.pdf_password as gmail_cleanup_pdf_password`
+in the test file and retargeting those specific `mock.patch.object` calls
+to it instead of `self.gmail_cleanup`. One new wrinkle this pass:
+`self.gmail_cleanup.subprocess` did **not** need retargeting, even though
+several of the moved functions call `subprocess.run` — patching
+`subprocess.run` on the shared stdlib module object affects every
+importer of `import subprocess` identically, since `self.gmail_cleanup.
+subprocess` and `gmail_cleanup_pdf_password.subprocess` are the same
+object. This was confirmed the hard way: an initial cleanup pass removed
+`import subprocess` from the top-level script as an apparently-dead import
+(0 direct `subprocess.` call sites remained there after the move), which
+broke ten unrelated tests across the suite that use
+`mock.patch.object(self.gmail_cleanup.subprocess, "run", ...)` as a
+convenient global patch point having nothing to do with PDF passwords. The
+import was restored and the full suite re-verified green before committing
+— a reminder that "0 direct call sites" isn't sufficient evidence an
+import is dead when the test suite uses a module's own re-exported stdlib
+names as patch anchors.
+
+### Deliberately left alone
+
+Nothing was found unsafe to move. Three things were left untouched on
+purpose:
+
+- `write_pdf_outputs`/`write_backup_files` — out of scope by the task
+  definition, and correctly so: they're orchestration, not password-
+  cracking primitives.
+- `PASSWORD_FAILURE_STORE_PATH`/`PASSWORD_RECIPE_STORE_PATH`/
+  `PASSWORD_SECRET_STORE_PATH` stayed imported into the top-level script's
+  `constants` import block even though grep shows each now has exactly one
+  reference (the import line itself) there. These were *already* unused in
+  the top-level script before this pass — they were never referenced by
+  the moved block either (the moved functions reach the JSON stores
+  through `gmail_cleanup.password_stores`'s `load_*`/`save_*` wrappers,
+  which resolve those path constants from their own module's globals).
+  This is a pre-existing dead import unrelated to this extraction; per the
+  task's explicit instruction not to opportunistically fix unrelated
+  things noticed in passing, it was left alone. A future small cleanup
+  pass could remove these three names safely.
+- The learned-password-cache JSON store paths/formats
+  (`PASSWORD_RECIPE_STORE_PATH`/`PASSWORD_SECRET_STORE_PATH`/
+  `PASSWORD_FAILURE_STORE_PATH`, all still defined in
+  `gmail_cleanup/constants.py` and read/written by
+  `gmail_cleanup/password_stores.py`) were not touched at all -- no path,
+  format, or schema change of any kind.
+
+### Was a sub-split considered?
+
+Yes. The task allowed splitting into "learned-password-cache bookkeeping"
+vs. "pdfcrack/john invocation" as two commits if a natural boundary
+emerged. It does exist as a one-directional dependency (candidate-
+generation/bookkeeping functions never call the backend-invocation
+functions; `resolve_pdf_password` — squarely in the invocation half --
+calls back into most of the bookkeeping half). Given that shape, a
+same-module single commit was judged cleaner than two commits with a
+cross-module import between two halves of what is really one coherent
+capability (turning a locked PDF into an unlocked one), and it matches the
+precedent already set by `message_rewrite.py` (544 lines) and
+`pdf_processing.py` (452 lines), both comparably sized single-cluster
+single-commit extractions in the prior pass.
+
+### Is `gmail-cleanup`'s modularization essentially complete?
+
+The four clusters the original 2026-08-31 report named as "genuinely
+tangled" (not just unattempted) were: email parsing/note injection,
+attachment writing, PDF processing + PDF password cracking, and metadata
+embedding. All four are now extracted, across this pass and the two
+2026-09-01 passes before it. In that specific sense -- yes, the tangled
+part of this task is done.
+
+What's left in the 2,485-line script is real but was never called
+"tangled" -- it just wasn't attempted, per the original report's own
+"Suggested next steps" and "What's still monolithic" sections:
+
+- **Manifest / apply-queue JSONL persistence** (`append_manifest_record`
+  through `queued_message_ids_for_resume`, `append_password_review_record`)
+  -- roughly 220 lines of straightforward JSONL read/write helpers with no
+  signs of tangle, just not yet pulled into their own module.
+- **Message plan execution** (`find_existing_cleanup_replacement`,
+  `execute_message_plan`, `export_message_plan`, plus the small
+  `written_attachment_to_dict`/`written_attachment_metadata_embedded`/
+  `resolve_audit_labels`/`apply_review_label_to_skipped`/`plan_to_dict`/
+  `downgrade_request_profile` cluster around it) -- roughly 200 lines.
+- **Reporting/rendering** (`summarize_run`, `render_summary`,
+  `message_has_only_ignored_sidecars`, `run_report`, `render_report`) and
+  the **`doctor`** subsystem (`doctor_row` through `render_doctor`) --
+  mostly string formatting over data produced elsewhere, lowest priority,
+  as the original report already noted.
+- `write_pdf_outputs`/`write_backup_files` -- deliberately still in the
+  top-level script; see above.
+- `build_parser()`, `main()`, `inspect_matching_messages`, and
+  `run_extract_media` -- the CLI entrypoint and its two top-level
+  orchestration functions. The original report judged these as arguably
+  belonging in the top-level script regardless of how far the library
+  split goes, and nothing in this pass changes that judgment.
+
+None of the above are known to be tangled -- they're simply the remaining
+"not yet attempted, but probably safe" items from the original report's
+list, now that every item the report actually called *tangled* has been
+resolved. A future pass could reasonably extract the manifest/apply-queue
+and message-plan-execution clusters next (smallest, most self-contained of
+what's left), leaving reporting/doctor/CLI-entrypoint as the long-term
+floor for this script's size.
 
 ## 2026-09-01 follow-up: GmailIndex subsystem extraction
 
