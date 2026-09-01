@@ -17,6 +17,7 @@ from unittest import mock
 import gmail_cleanup.attachment_writers as gmail_cleanup_attachment_writers
 import gmail_cleanup.config as gmail_cleanup_config
 import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
+import gmail_cleanup.message_rewrite as gmail_cleanup_message_rewrite
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
 import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
@@ -195,7 +196,7 @@ class GmailCleanupTest(unittest.TestCase):
     def test_rewrite_message_skips_when_removal_would_empty_message(self) -> None:
         plan = self.gmail_cleanup.plan_message(self.build_record())
 
-        with mock.patch.object(self.gmail_cleanup, "prune_selected_parts", return_value=None):
+        with mock.patch.object(gmail_cleanup_message_rewrite, "prune_selected_parts", return_value=None):
             with self.assertRaises(self.gmail_cleanup.SkippableMessageError):
                 self.gmail_cleanup.rewrite_message_for_backup(
                     plan,
@@ -209,7 +210,7 @@ class GmailCleanupTest(unittest.TestCase):
         settings = self.gmail_cleanup.replace(settings, empty_after_removal="note-only")
         plan = self.gmail_cleanup.plan_message(self.build_record())
 
-        with mock.patch.object(self.gmail_cleanup, "prune_selected_parts", return_value=None):
+        with mock.patch.object(gmail_cleanup_message_rewrite, "prune_selected_parts", return_value=None):
             rewritten_raw, _ = self.gmail_cleanup.rewrite_message_for_backup(
                 plan,
                 datetime(2026, 4, 24, 4, 15, tzinfo=timezone.utc),
