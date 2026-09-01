@@ -18,6 +18,7 @@ import gmail_cleanup.attachment_writers as gmail_cleanup_attachment_writers
 import gmail_cleanup.config as gmail_cleanup_config
 import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
 import gmail_cleanup.message_rewrite as gmail_cleanup_message_rewrite
+import gmail_cleanup.metadata as gmail_cleanup_metadata
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
 import gmail_cleanup.pdf_processing as gmail_cleanup_pdf_processing
 import gmail_cleanup.trash as gmail_cleanup_trash
@@ -229,8 +230,8 @@ class GmailCleanupTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir)
-            with mock.patch.object(self.gmail_cleanup, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_metadata, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
+                gmail_cleanup_metadata,
                 "read_existing_metadata_tags",
                 return_value={},
             ), mock.patch.object(
@@ -470,8 +471,8 @@ class GmailCleanupTest(unittest.TestCase):
             backup_dir = Path(tmpdir)
             self.gmail_cleanup.append_apply_queue_record(backup_dir, "has:attachment", 25, settings, plan)
             self.gmail_cleanup.append_apply_queue_completed_record(backup_dir, "has:attachment", 25, settings, 1)
-            with mock.patch.object(self.gmail_cleanup, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_metadata, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
+                gmail_cleanup_metadata,
                 "read_existing_metadata_tags",
                 return_value={},
             ), mock.patch.object(
@@ -501,8 +502,8 @@ class GmailCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir)
             self.gmail_cleanup.append_apply_queue_record(backup_dir, "has:attachment", 25, settings, plan)
-            with mock.patch.object(self.gmail_cleanup, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_metadata, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
+                gmail_cleanup_metadata,
                 "read_existing_metadata_tags",
                 return_value={},
             ), mock.patch.object(
@@ -530,8 +531,8 @@ class GmailCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             backup_dir = Path(tmpdir)
             (backup_dir / "msg-1").mkdir()
-            with mock.patch.object(self.gmail_cleanup, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
-                self.gmail_cleanup,
+            with mock.patch.object(gmail_cleanup_metadata, "resolve_exiftool_path", return_value="/usr/bin/exiftool"), mock.patch.object(
+                gmail_cleanup_metadata,
                 "read_existing_metadata_tags",
                 return_value={},
             ), mock.patch.object(
@@ -719,15 +720,15 @@ class GmailCleanupTest(unittest.TestCase):
         )
         plan = self.gmail_cleanup.plan_message(self.build_record())
         with mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "resolve_exiftool_path",
             return_value="/usr/bin/exiftool",
         ), mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "embed_marker_metadata_with_exiftool",
             side_effect=RuntimeError("wmv unsupported"),
         ) as embed_with_exiftool, mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "embed_marker_metadata_with_ffmpeg",
         ) as embed_with_ffmpeg:
             self.gmail_cleanup.embed_marker_metadata(
@@ -755,15 +756,15 @@ class GmailCleanupTest(unittest.TestCase):
         )
         plan = self.gmail_cleanup.plan_message(self.build_record())
         with mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "resolve_exiftool_path",
             return_value="/usr/bin/exiftool",
         ), mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "embed_marker_metadata_with_exiftool",
             side_effect=RuntimeError("not a valid image"),
         ) as embed_with_exiftool, mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_metadata,
             "embed_marker_metadata_with_ffmpeg",
         ) as embed_with_ffmpeg:
             self.gmail_cleanup.embed_marker_metadata(
@@ -1289,7 +1290,7 @@ class GmailCleanupTest(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
-            self.gmail_cleanup,
+            gmail_cleanup_attachment_writers,
             "resolve_ffmpeg_path",
             return_value="ffmpeg",
         ), mock.patch.object(self.gmail_cleanup.subprocess, "run", side_effect=fake_run) as run:
@@ -1794,11 +1795,11 @@ class GmailCleanupTest(unittest.TestCase):
             backup_dir = Path(tmpdir)
             stderr = StringIO()
             with redirect_stderr(stderr), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_metadata,
                 "resolve_exiftool_path",
                 return_value="/usr/bin/exiftool",
             ), mock.patch.object(
-                self.gmail_cleanup,
+                gmail_cleanup_metadata,
                 "read_existing_metadata_tags",
                 return_value={},
             ), mock.patch.object(
