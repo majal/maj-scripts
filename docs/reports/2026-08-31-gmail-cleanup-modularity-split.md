@@ -1,8 +1,9 @@
 # gmail-cleanup UNIX-philosophy/modularity split
 
-**Date:** 2026-08-31 (session continued into 2026-09-01; GmailIndex follow-up
-pass done 2026-09-01)
-**Status:** Partial — 12 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
+**Date:** 2026-08-31 (session continued into 2026-09-01; GmailIndex
+follow-up pass done 2026-09-01; naming/attachment-writers/message-rewrite/
+pdf-processing/metadata follow-up pass also done 2026-09-01)
+**Status:** Partial — 17 of an open-ended set of extractions applied; safe stopping point reached, remainder documented below.
 
 ## 2026-09-01 follow-up: GmailIndex subsystem extraction
 
@@ -49,6 +50,167 @@ d8c648c Extract gmail-cleanup message/attachment leaf helpers into gmail_cleanup
 7e8f553 Extract gmail-cleanup SQLite index storage/client layer into gmail_cleanup/gmail_index.py
 6e93ed1 Extract gmail-cleanup index-analyze command into gmail_cleanup/gmail_index.py
 ```
+
+## 2026-09-01 follow-up: re-examining the four "genuinely tangled" clusters
+
+This report's "What's still monolithic" section (below) named four clusters
+as genuinely tangled, not just unattempted, and warned that a clean split
+needed "its own dedicated pass rather than an opportunistic one." This pass
+was exactly that dedicated pass: for each of the four, the actual call
+graph was traced (via `grep` for every call site, and for the larger
+clusters an AST walk collecting every name each function loads/calls)
+rather than trusting the original categorization. Two clusters turned out
+to be safely extractable once traced; one was extracted after the tracing
+showed the original "these two call each other" description no longer held
+at the direct-call level; one (metadata embedding) simply hadn't been
+looked at closely before and traced clean on the first pass. A fifth,
+smaller piece (naming/destination leaf helpers) was extracted first as a
+prerequisite, following the exact precedent `message_utils.py` set in the
+prior pass. One cluster (PDF password cracking, plus the write_pdf_outputs/
+write_backup_files orchestration that threads it together with PDF
+processing) was deliberately left alone -- not because a back-edge was
+found, but for reasons explained in its own subsection below.
+
+### What was extracted, in order
+
+| # | Module | Lines | Contents | Depends on |
+|---|--------|------:|----------|------------|
+| 13 | `gmail_cleanup/naming.py` | 188 | `subject_slug`, `backup_folder_name_for_plan`, `build_search_token`, `build_saved_filename`, `photos_search_query`, `normalize_content_id`, `unique_destination`, `is_deterministic_backup_filename`, `matching_destination`, `guess_mime_type_from_filename`, `sniff_image_mime_type`, `extension_for_mime_type`, `normalize_image_destination`, `build_pdf_page_search_token`, `build_pdf_page_filename`, `build_embedded_image_filename`, `build_libreoffice_embedded_image_filename`, `build_audio_video_filename` | constants, message_utils, models |
+| 14 | `gmail_cleanup/attachment_writers.py` | 438 | `write_bytes_attachment`, `find_soffice_executable`, `extract_zip_embedded_images_from_document`, `extract_libreoffice_embedded_images_from_document`, `extract_embedded_images_from_document`, `write_file_attachment`, `convert_audio_to_video_file`, `write_audio_video_attachment` | constants, models, message_utils, naming, tool_paths, config |
+| 15 | `gmail_cleanup/message_rewrite.py` | 544 | `detect_unsupported_message`, `plan_message`, `gmail_thread_url`, `collect_media_parts`, `message_matches_before_year`, `should_extract_part`, `collect_buffered_media`, `prune_selected_parts`, `buffered_note_fragments`, `is_pdf_page_output`, `written_note_fragments`, `format_pdf_text_section_text`/`_html`, `build_note_text`/`_html`, `inject_backup_note`, `note_charset`, `prepend_note`, `inline_placeholder_text`/`_html`, `replace_inline_media_references`, `replace_cid_references_in_html`, `sanitize_message_for_insert`, `build_note_only_message`, `rewrite_message_for_backup` | constants, models, message_utils, naming, config |
+| 16 | `gmail_cleanup/pdf_processing.py` | 452 | `pdf_password_args`, `pdf_page_count`, `parse_pdfimages_list_output`, `list_pdf_image_rows`, `is_probably_scanned_pdf`, `render_pdf_output_suffix`, `convert_image_file`, `choose_pdf_image_candidate`, `render_pdf_pages_to_images`, `extract_pdf_images_directly`, `extract_pdf_text`, `render_pdf_pages_for_ocr`, `ocr_image_with_tesseract`, `extract_pdf_ocr_text`, `build_pdf_text_blocks`, `html_to_text`, `extract_message_search_text` | constants, models, message_utils, naming, attachment_writers, tool_paths, config |
+| 17 | `gmail_cleanup/metadata.py` | 337 | `metadata_marker_text`, `metadata_tags_for_attachment`, `read_existing_metadata_tags`, `merge_marker_value`, `contains_subject_token`, `subject_tokens_for_attachment`, `build_exiftool_write_command`, `read_existing_ffprobe_tags`, `get_existing_ffprobe_tag`, `build_ffmpeg_metadata_write_command`, `embed_marker_metadata_with_ffmpeg`/`_with_exiftool`, `embed_marker_metadata` | constants, models, naming, tool_paths, config |
+
+`gmail-cleanup` itself: **4,657 → 3,008 lines** this pass (1,649 lines
+moved out, plus net import-list trimming); **7,201 → 3,008 lines total**
+since the split began (58% moved out). Every commit individually verified:
+`python3 -m unittest tests.test_gmail_cleanup -v` — 75/75 passed after
+every commit; `python3 -m tests` (full repo suite) — 152/152 after every
+commit; `./gmail-cleanup --help` and every subcommand's `--help` run clean
+after every commit; no PII (`majal`, `/Users/maj`) in any new module.
+Commits, in order:
+
+```
+fe8eef4 Extract gmail-cleanup naming/destination leaf helpers into gmail_cleanup/naming.py
+32ee431 Extract gmail-cleanup attachment-writing cluster into gmail_cleanup/attachment_writers.py
+307054b Extract gmail-cleanup message-parsing/note-injection cluster into gmail_cleanup/message_rewrite.py
+eafc8f8 Extract gmail-cleanup PDF rendering/extraction primitives into gmail_cleanup/pdf_processing.py
+6500790 Extract gmail-cleanup marker-metadata embedding into gmail_cleanup/metadata.py
+```
+
+### Why the original "genuinely tangled" call was wrong for three of the four clusters
+
+For attachment writing, message parsing/note injection, and PDF
+processing, the original report's tangle description was about the
+*region* of the file, not about the specific functions' own call graphs.
+Tracing showed:
+
+- **Attachment writing** (`write_bytes_attachment` through
+  `write_audio_video_attachment`): the report's concern was that shared
+  naming helpers (`matching_destination`, `build_saved_filename`,
+  `sanitize_filename`, `attachment_extension`) were "referenced from three
+  different places in the file." Two of those four were already extracted
+  into `message_utils.py` in the prior pass; this pass extracted the other
+  two (plus their own leaf dependents) into `naming.py` first, as a
+  prerequisite -- once that was done, a full function-name cross-grep of
+  the attachment-writing region against the message-parsing region came
+  back with **zero** calls in either direction.
+- **Message parsing / note injection** (`detect_unsupported_message`
+  through `rewrite_message_for_backup`): an AST walk of every name each
+  function in the region loads found a clean DAG with two independent
+  entry points (`plan_message`, used while deciding what to extract, and
+  `rewrite_message_for_backup`, used once bytes are already written) and
+  no back-edges. The "shared local state" the original report described
+  is per-call closures (e.g. `nonlocal counter` in `collect_media_parts`'s
+  inner `visit`), not module-level mutable state read and written by
+  multiple callers.
+- **PDF processing** (`pdf_password_args` through
+  `extract_message_search_text`): the report paired this with PDF
+  password cracking as mutually tangled. Tracing found the dependency is
+  one-directional: PDF processing calls nothing in the password-cracking
+  cluster; the password-cracking cluster (`resolve_pdf_password`) and
+  `write_pdf_outputs` call *into* PDF processing (e.g.
+  `resolve_pdf_password` calls `pdf_page_count`). The "these two call each
+  other" framing described data-flow influence (backend choice affecting
+  which candidates get tried), not literal bidirectional function calls.
+- **Metadata embedding** (`metadata_marker_text` through
+  `embed_marker_metadata`): this one was never actually traced in the
+  original pass -- it was left unattempted "simply on time/context budget,"
+  per that pass's own note. Traced clean on the first look: a DAG rooted
+  at `embed_marker_metadata`, all external dependencies already extracted.
+  Its four tag-name constants (`IMAGE_METADATA_TAGS`, `PDF_METADATA_TAGS`,
+  `VIDEO_METADATA_TAGS`, `QUICKTIME_MIME_TYPES`) were moved into
+  `constants.py` as a small prerequisite, since they were still sitting at
+  top-level-script scope.
+
+### The recurring `mock.patch.object` gotcha, again
+
+Every one of these five extractions hit the same gotcha this report
+documented in the original pass: when a patched function and its caller
+move into the *same* new submodule, `mock.patch.object(self.gmail_cleanup,
+...)` stops having any effect on the internal call, because the caller
+resolves the bare name from its own module's `__globals__`. Fixed the same
+way each time -- `import gmail_cleanup.<name> as gmail_cleanup_<name>` in
+the test file, then patch that module object instead. This hit:
+`find_soffice_executable` (attachment_writers), `prune_selected_parts`
+(message_rewrite), `extract_pdf_text`/`extract_pdf_ocr_text`
+(pdf_processing), and `resolve_exiftool_path`/`read_existing_metadata_tags`/
+`embed_marker_metadata_with_exiftool`/`embed_marker_metadata_with_ffmpeg`
+(metadata, four names across five test methods).
+
+One adjacent discovery while fixing the metadata-cluster patches: a test
+for the audio-to-video path in `write_backup_files` patched
+`self.gmail_cleanup.resolve_ffmpeg_path`, but the real call has been inside
+`gmail_cleanup.attachment_writers.convert_audio_to_video_file` since the
+attachment-writers extraction two commits earlier in this same pass. That
+patch had been silently ineffective since then -- the test still passed
+only because the mocked `subprocess.run` doesn't care what path string
+`resolve_ffmpeg_path` actually returns. Retargeted to
+`gmail_cleanup_attachment_writers` so the mock is load-bearing again. This
+is a reminder that a test passing is not proof a given patch target is
+correct; the gotcha can hide silently behind an unrelated assertion that
+happens to still pass.
+
+### What's still deliberately not extracted: PDF password cracking
+
+`resolve_pdf_password` and its ~25 helpers (password-recipe fingerprinting
+and learning, candidate generation from message text/dates/numeric tails,
+`select_pdf_password_backend`, `pdfcrack`/`john` invocation and output
+parsing) plus the `write_pdf_outputs`/`write_backup_files` orchestration
+that threads PDF mode, password handling, rendering, and text extraction
+together (`gmail-cleanup` lines 760–1572, ~813 lines) were traced the same
+way as everything else. The direct-call graph **is** a clean DAG here too
+-- no back-edges were found between the password-cracking functions
+themselves, and their only outward dependency on PDF processing is
+one-directional (`resolve_pdf_password` calls `pdf_page_count`). So this is
+not a "found a tangle, backed off" case.
+
+The reason it was left alone this pass is size and consequence, not
+call-graph safety:
+
+- It's the largest remaining single cluster (~813 lines, ~30 functions),
+  more than any of the five extracted this pass.
+- It runs real subprocesses (`pdfcrack`, `john`) against user PDF
+  attachments and writes/reads persistent file-backed state
+  (`password_stores.py`'s recipe/secret/failure JSON stores) with
+  real security and correctness stakes if a transcription slip changed
+  candidate-generation order, backend selection logic, or failure-count
+  bookkeeping.
+- `write_pdf_outputs` is a ~200-line orchestrator threading together PDF
+  mode selection, password resolution, rendering, direct extraction, and
+  text retention for every PDF attachment in a real backup run --
+  exactly the function the original report called out as the reason this
+  needs "its own dedicated pass."
+
+Verbatim-move extraction the way the other five were done today is very
+likely still safe here given the call-graph evidence above, but doing
+~30 functions' worth of copy-diff-verify correctly, for a cluster whose
+failure mode is silently cracking (or failing to crack) a user's real PDF
+attachments, deserves a dedicated pass with a fresh context budget and
+byte-for-byte diffing of every function, not one appended onto an
+already-five-extraction session. Nothing here is unsafe to extract in
+principle -- it just wasn't done today. A future pass can start directly
+from the call-graph evidence above instead of re-deriving it.
 
 Everything below this point is the original 2026-08-31 report, unedited.
 
