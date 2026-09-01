@@ -19,6 +19,7 @@ import gmail_cleanup.config as gmail_cleanup_config
 import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
 import gmail_cleanup.message_rewrite as gmail_cleanup_message_rewrite
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
+import gmail_cleanup.pdf_processing as gmail_cleanup_pdf_processing
 import gmail_cleanup.trash as gmail_cleanup_trash
 from tests.support import load_script_module
 
@@ -2039,8 +2040,8 @@ class GmailCleanupTest(unittest.TestCase):
             disposition="attachment",
             content_id=None,
         )
-        with mock.patch.object(self.gmail_cleanup, "extract_pdf_text", return_value=""), mock.patch.object(
-            self.gmail_cleanup,
+        with mock.patch.object(gmail_cleanup_pdf_processing, "extract_pdf_text", return_value=""), mock.patch.object(
+            gmail_cleanup_pdf_processing,
             "extract_pdf_ocr_text",
             return_value="Scanned invoice total 900",
         ):
