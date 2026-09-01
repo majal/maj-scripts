@@ -14,6 +14,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from unittest import mock
 
+import gmail_cleanup.attachment_writers as gmail_cleanup_attachment_writers
 import gmail_cleanup.config as gmail_cleanup_config
 import gmail_cleanup.gmail_client as gmail_cleanup_gmail_client
 import gmail_cleanup.password_stores as gmail_cleanup_password_stores
@@ -899,7 +900,7 @@ class GmailCleanupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             embedded_dir = Path(tmpdir) / "gp"
             with (
-                mock.patch.object(self.gmail_cleanup, "find_soffice_executable", return_value="/usr/bin/soffice"),
+                mock.patch.object(gmail_cleanup_attachment_writers, "find_soffice_executable", return_value="/usr/bin/soffice"),
                 mock.patch.object(self.gmail_cleanup.subprocess, "run", side_effect=fake_soffice_run),
             ):
                 written = self.gmail_cleanup.extract_embedded_images_from_document(
@@ -930,7 +931,7 @@ class GmailCleanupTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
-                mock.patch.object(self.gmail_cleanup, "find_soffice_executable", return_value=None),
+                mock.patch.object(gmail_cleanup_attachment_writers, "find_soffice_executable", return_value=None),
                 mock.patch.object(self.gmail_cleanup.subprocess, "run") as run_mock,
             ):
                 written = self.gmail_cleanup.extract_embedded_images_from_document(
