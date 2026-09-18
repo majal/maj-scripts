@@ -74,6 +74,12 @@ Overwrite an existing output on purpose:
 ffcut video.mp4 5 30 --force clip.mp4
 ```
 
+Drop streams you don't want in the output, the same way `ffmpeg -an`/`-sn`/`-dn` would:
+
+```bash
+ffcut video.mp4 10 60 --no-audio --no-subs clip.mp4
+```
+
 ## Important Behavior / Defaults
 
 - default output path is `<name> - cut.<ext>` next to the source, unless a fourth argument is given
@@ -84,6 +90,7 @@ ffcut video.mp4 5 30 --force clip.mp4
 - per-codec quality flags mirror the encoders used for re-encoded edges: `--h264-crf`/`--h264-preset`, `--hevc-crf`/`--hevc-preset`, `--av1-crf`/`--av1-preset`, `--vp9-crf`/`--vp9-cpu-used`, `--vp8-crf`/`--vp8-cpu-used`, and similar `--<codec>-q`/`--<codec>-profile` flags for the re-encode-only codecs; run `ffcut --help` for the full list and current defaults
 - copied audio/subtitle packets can't be split mid-packet, so their boundaries can land up to a few tens of milliseconds off the requested cut point even when the video itself is frame-exact
 - a timed data stream (e.g. GoPro telemetry, a timecode track) that has no packets at all inside the requested range is expected to disappear from the output - `ffcut` warns about it rather than treating it as a failure
+- `--no-audio`, `--no-subs`, and `--no-data` mirror ffmpeg's `-an`/`-sn`/`-dn` and drop those stream categories entirely from the output; `--no-cover` drops attached cover art, `--no-attachments` drops Matroska attachments (fonts, XML, etc.), and `--no-chapters` drops chapters - the primary video stream itself can't be dropped since it's what `ffcut` is cutting
 
 ## Notes / Caveats
 

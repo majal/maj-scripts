@@ -270,6 +270,62 @@ class FfcutMuxCommandTest(unittest.TestCase):
         idx = cmd.index("-display_rotation:v:0")
         self.assertEqual(cmd[idx + 1], "90")
 
+    def test_no_drop_opts_maps_everything(self) -> None:
+        ctx = self._ctx()
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"),
+        )
+        self.assertIn("1:a?", cmd)
+        self.assertIn("1:s?", cmd)
+        self.assertIn("2:t?", cmd)
+
+    def test_drop_audio_omits_audio_map(self) -> None:
+        ctx = self._ctx()
+        drop = self.ffcut.DropOpts(audio=True)
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"), drop,
+        )
+        self.assertNotIn("1:a?", cmd)
+        self.assertIn("1:s?", cmd)
+
+    def test_drop_subs_omits_subtitle_map(self) -> None:
+        ctx = self._ctx()
+        drop = self.ffcut.DropOpts(subs=True)
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"), drop,
+        )
+        self.assertIn("1:a?", cmd)
+        self.assertNotIn("1:s?", cmd)
+
+    def test_drop_data_omits_data_stream_maps(self) -> None:
+        ctx = self._ctx()
+        probe = {"streams": [{"index": 5, "codec_type": "data", "codec_name": "bin_data"}]}
+        drop = self.ffcut.DropOpts(data=True)
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, probe, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"), drop,
+        )
+        self.assertNotIn("1:5", cmd)
+
+    def test_drop_cover_omits_cover_map_and_disposition(self) -> None:
+        ctx = self._ctx()
+        probe = {"streams": [
+            {"index": 3, "codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+        ]}
+        drop = self.ffcut.DropOpts(cover=True)
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, probe, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"), drop,
+        )
+        self.assertNotIn("2:3", cmd)
+        self.assertNotIn("-disposition:v:1", cmd)
+
+    def test_drop_attachments_omits_attachment_map(self) -> None:
+        ctx = self._ctx()
+        drop = self.ffcut.DropOpts(attachments=True)
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"), drop,
+        )
+        self.assertNotIn("2:t?", cmd)
+
 
 class FfcutMiscTest(unittest.TestCase):
     @classmethod
@@ -345,6 +401,20 @@ class FfcutSmokeTest(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(decode.returncode, 0, decode.stderr)
+
+    def test_no_audio_drops_audio_stream(self) -> None:
+        out = self.tmp_path / "out-no-audio.mp4"
+        result = self.run_ffcut(str(self.source), "1.2", "3.1", "--no-audio", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(out.exists())
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        codec_types = [s["codec_type"] for s in json.loads(probe.stdout)["streams"]]
+        self.assertNotIn("audio", codec_types)
+        self.assertIn("video", codec_types)
 
     def test_end_must_be_after_start(self) -> None:
         out = self.tmp_path / "bad.mp4"

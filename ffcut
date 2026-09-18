@@ -681,6 +681,19 @@ def verify_decode(path: Path) -> bool:
 # Final mux
 
 
+@dataclass
+class DropOpts:
+    """Which auxiliary stream categories to omit from the output, mirroring
+    ffmpeg's -an/-sn/-dn but broken out per category (including ones ffmpeg
+    has no single flag for, like cover art or Matroska attachments)."""
+
+    audio: bool = False
+    subs: bool = False
+    data: bool = False
+    cover: bool = False
+    attachments: bool = False
+
+
 def build_final_mux_cmd(
     ctx: Context,
     input_probe: dict,
@@ -690,7 +703,9 @@ def build_final_mux_cmd(
     chapters_meta: Optional[Path],
     out_ext_lc: str,
     final_tmp: Path,
+    drop: Optional[DropOpts] = None,
 ) -> list[str]:
+    drop = drop or DropOpts()
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y"]
 
     if ctx.rotation != 0:
@@ -705,20 +720,26 @@ def build_final_mux_cmd(
         chapter_input = 3
         cmd += ["-f", "ffmetadata", "-i", str(chapters_meta)]
 
-    # Main video + all audio + all subtitles
-    cmd += ["-map", "0:v:0", "-map", "1:a?", "-map", "1:s?"]
+    # Main video, plus audio/subtitles unless dropped
+    cmd += ["-map", "0:v:0"]
+    if not drop.audio:
+        cmd += ["-map", "1:a?"]
+    if not drop.subs:
+        cmd += ["-map", "1:s?"]
 
     # Timed data streams (excluding the regenerated MP4 chapter track)
-    for idx in data_stream_indexes_to_copy(input_probe):
-        cmd += ["-map", f"1:{idx}"]
+    if not drop.data:
+        for idx in data_stream_indexes_to_copy(input_probe):
+            cmd += ["-map", f"1:{idx}"]
 
     # Cover artwork
-    covers = cover_streams(input_probe)
+    covers = [] if drop.cover else cover_streams(input_probe)
     for stream in covers:
         cmd += ["-map", f"2:{stream['index']}"]
 
     # Matroska attachments: fonts, XML, artwork, etc.
-    cmd += ["-map", "2:t?"]
+    if not drop.attachments:
+        cmd += ["-map", "2:t?"]
 
     cmd += ["-copy_unknown", "-map_metadata", "2"]
     if ctx.v_index is not None:
@@ -763,6 +784,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  ffcut video.mp4 00:10:23.456 00:12:34.567\n"
             "  ffcut video.mkv 01:20 end\n"
             "  ffcut video.mov -120 -10\n"
+            "  ffcut video.mp4 10 60 --no-audio --no-subs\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -776,6 +798,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-verify", action="store_true", help="Skip decode verification")
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files")
     parser.add_argument("--ra-scan-limit", type=int, default=16, help="Max keyframes to check per side for a safe splice point")
+
+    parser.add_argument("--no-audio", action="store_true", help="Drop all audio streams (like ffmpeg's -an)")
+    parser.add_argument("--no-subs", action="store_true", help="Drop all subtitle streams (like ffmpeg's -sn)")
+    parser.add_argument("--no-data", action="store_true", help="Drop timed data streams (like ffmpeg's -dn)")
+    parser.add_argument("--no-cover", action="store_true", help="Drop attached cover art")
+    parser.add_argument("--no-attachments", action="store_true", help="Drop Matroska attachments (fonts, XML, etc.)")
+    parser.add_argument("--no-chapters", action="store_true", help="Drop chapters")
 
     parser.add_argument("--h264-crf", type=int, default=18)
     parser.add_argument("--h264-preset", default="medium")
@@ -949,18 +978,26 @@ def run_ffcut(opts: argparse.Namespace) -> None:
 
         # Chapters
         chapters_meta: Optional[Path] = None
-        raw_meta = tmpdir / "source.ffmeta"
-        run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-f", "ffmetadata", str(raw_meta)])
-        chapters = trim_chapters(parse_ffmetadata_chapters(raw_meta.read_text(encoding="utf-8")), start_sec, end_sec)
-        if chapters:
-            chapters_meta = tmpdir / "chapters.ffmeta"
-            chapters_meta.write_text(render_ffmetadata_chapters(chapters), encoding="utf-8")
+        if not opts.no_chapters:
+            raw_meta = tmpdir / "source.ffmeta"
+            run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-f", "ffmetadata", str(raw_meta)])
+            chapters = trim_chapters(parse_ffmetadata_chapters(raw_meta.read_text(encoding="utf-8")), start_sec, end_sec)
+            if chapters:
+                chapters_meta = tmpdir / "chapters.ffmeta"
+                chapters_meta.write_text(render_ffmetadata_chapters(chapters), encoding="utf-8")
 
         # Final mux
         input_probe = probe_all_streams(input_path)
         out_ext_lc = output_path.suffix.lstrip(".").lower()
         final_tmp = tmpdir / f"final{output_path.suffix}"
-        mux_cmd = build_final_mux_cmd(ctx, input_probe, hybrid, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp)
+        drop = DropOpts(
+            audio=opts.no_audio,
+            subs=opts.no_subs,
+            data=opts.no_data,
+            cover=opts.no_cover,
+            attachments=opts.no_attachments,
+        )
+        mux_cmd = build_final_mux_cmd(ctx, input_probe, hybrid, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp, drop)
         run_ffmpeg(mux_cmd)
 
         if not final_tmp.exists() or final_tmp.stat().st_size == 0:
@@ -974,21 +1011,41 @@ def run_ffcut(opts: argparse.Namespace) -> None:
         if out_codec != codec:
             die(f"Primary video codec changed unexpectedly: {codec} -> {out_codec or 'unknown'}")
 
-        if audio_codec_list(input_probe) != audio_codec_list(output_probe):
+        if opts.no_audio:
+            if audio_codec_list(output_probe):
+                die("--no-audio was requested but the output still has audio streams")
+        elif audio_codec_list(input_probe) != audio_codec_list(output_probe):
             die("An 'a' stream was lost or changed codec during final mux")
-        if subtitle_codec_list(input_probe) != subtitle_codec_list(output_probe):
+
+        if opts.no_subs:
+            if subtitle_codec_list(output_probe):
+                die("--no-subs was requested but the output still has subtitle streams")
+        elif subtitle_codec_list(input_probe) != subtitle_codec_list(output_probe):
             die("An 's' stream was lost or changed codec during final mux")
-        if cover_codec_list(input_probe) != cover_codec_list(output_probe):
+
+        if opts.no_cover:
+            if cover_codec_list(output_probe):
+                die("--no-cover was requested but the output still has cover artwork")
+        elif cover_codec_list(input_probe) != cover_codec_list(output_probe):
             die("Attached cover artwork was lost or changed")
-        in_data_count = nonchapter_data_count(input_probe)
-        out_data_count = nonchapter_data_count(output_probe)
-        if in_data_count != out_data_count:
-            # Not fatal: a timed data stream (GoPro telemetry, timecode,
-            # etc.) can legitimately have zero packets inside the requested
-            # window and be dropped by the muxer - that's correct behavior,
-            # not lost data.
-            warn(f"Timed data stream count changed: {in_data_count} -> {out_data_count} (no packets in the cut range?)")
-        if attachment_count(input_probe) != attachment_count(output_probe):
+
+        if opts.no_data:
+            if nonchapter_data_count(output_probe):
+                die("--no-data was requested but the output still has data streams")
+        else:
+            in_data_count = nonchapter_data_count(input_probe)
+            out_data_count = nonchapter_data_count(output_probe)
+            if in_data_count != out_data_count:
+                # Not fatal: a timed data stream (GoPro telemetry, timecode,
+                # etc.) can legitimately have zero packets inside the
+                # requested window and be dropped by the muxer - that's
+                # correct behavior, not lost data.
+                warn(f"Timed data stream count changed: {in_data_count} -> {out_data_count} (no packets in the cut range?)")
+
+        if opts.no_attachments:
+            if attachment_count(output_probe):
+                die("--no-attachments was requested but the output still has attachments")
+        elif attachment_count(input_probe) != attachment_count(output_probe):
             die(f"Attachment count changed: {attachment_count(input_probe)} -> {attachment_count(output_probe)}")
 
         final_tmp.replace(output_path)
