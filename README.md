@@ -19,6 +19,7 @@ If you're just here to use a script, start here. This README is the friendly map
 
 - [Overview](#overview)
 - [Scripts](#scripts)
+  - [`ffcut`](#ffcut)
   - [`generate_html_colors_video`](#generate_html_colors_video)
   - [`gmail-cleanup`](#gmail-cleanup)
   - [`maj-online`](#maj-online)
@@ -41,6 +42,14 @@ If you're just here to use a script, start here. This README is the friendly map
 - [Contributing Docs](#contributing-docs)
 
 ## Scripts
+
+### [`ffcut`](./ffcut)
+
+`ffcut` is a frame-accurate video cutter that uses only `ffmpeg`/`ffprobe`, stream-copying whatever GOPs it safely can and re-encoding just the partial edges.
+
+Full docs: [docs/ffcut.md](docs/ffcut.md)
+
+[↑ TOC](#table-of-contents)
 
 ### [`generate_html_colors_video`](./generate_html_colors_video)
 

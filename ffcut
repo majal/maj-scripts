@@ -1,0 +1,1028 @@
+#!/usr/bin/env python3
+"""ffcut: frame-accurate video cutter using only ffmpeg + ffprobe.
+
+Where safe:
+    start partial GOP  -> re-encode
+    middle GOPs        -> stream-copy
+    end partial GOP    -> re-encode
+
+If a safe splice cannot be established, only the requested VIDEO segment is
+re-encoded. Audio/subtitles/data/etc. are still stream-copied.
+
+Smart splice codecs:
+    H.264 / AVC
+    H.265 / HEVC   (IDR/BLA closed-GOP boundaries only; CRA/open-GOP is
+                    intentionally rejected and falls back to a re-encode)
+    AV1
+    VP9
+    VP8
+
+Other supported video codecs are cut exactly by re-encoding the requested
+video segment, while other streams are still copied.
+
+Containers: MP4, M4V, MOV, MKV, WebM, TS, M2TS, etc., subject to FFmpeg
+muxer support.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, getcontext
+from pathlib import Path
+from typing import Optional
+
+getcontext().prec = 40
+
+PROG = "ffcut"
+
+NINE_PLACES = Decimal("0.000000001")
+EQ_EPSILON = Decimal("0.0005")
+K_SEARCH_EPSILON = Decimal("0.0005")
+EOF_GRACE = Decimal("0.250")
+NUDGE = Decimal("0.000001")
+
+MP4_LIKE_EXTS = {"mp4", "m4v", "mov", "3gp", "3g2", "mj2"}
+MKV_LIKE_EXTS = {"mkv", "mka", "mks", "webm"}
+
+
+class FfcutError(Exception):
+    """Raised for any condition that should abort the run with a message."""
+
+
+def die(msg: str) -> None:
+    raise FfcutError(msg)
+
+
+def warn(msg: str) -> None:
+    print(f"{PROG}: WARNING: {msg}", file=sys.stderr)
+
+
+def info(msg: str) -> None:
+    print(f"{PROG}: {msg}", file=sys.stderr)
+
+
+def fmt_time(value: Decimal) -> str:
+    # str(Decimal) uses scientific notation for e.g. 0 ("0E-9"), which
+    # ffmpeg/ffprobe won't parse as a time - force fixed-point notation.
+    return format(value.quantize(NINE_PLACES), "f")
+
+
+def flt_eq(a: Decimal, b: Decimal, epsilon: Decimal = EQ_EPSILON) -> bool:
+    return abs(a - b) <= epsilon
+
+
+###############################################################################
+# Subprocess handling (tracks the in-flight ffmpeg/ffprobe process so a
+# SIGTERM/SIGHUP can stop it too, not just the Python process).
+
+_current_proc: Optional[subprocess.Popen] = None
+
+
+def _popen(cmd: list[str], cwd: Optional[Path], capture: bool) -> subprocess.CompletedProcess:
+    global _current_proc
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        text=True,
+    )
+    _current_proc = proc
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        _current_proc = None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _handle_terminating_signal(signum: int, _frame) -> None:
+    if _current_proc is not None and _current_proc.poll() is None:
+        _current_proc.terminate()
+    raise SystemExit(128 + signum)
+
+
+def run_ffmpeg(cmd: list[str], cwd: Optional[Path] = None) -> None:
+    """Run an ffmpeg/ffprobe command with output streamed to the terminal."""
+    result = _popen(cmd, cwd=cwd, capture=False)
+    if result.returncode != 0:
+        die(f"Command failed ({result.returncode}): {' '.join(cmd)}")
+
+
+def run_captured(cmd: list[str]) -> subprocess.CompletedProcess:
+    return _popen(cmd, cwd=None, capture=True)
+
+
+###############################################################################
+# ffprobe helpers (pure-ish: take a path, return plain dict/list data)
+
+
+def ffprobe_json(path: Path, *args: str) -> dict:
+    cmd = ["ffprobe", "-v", "error", "-print_format", "json", *args, str(path)]
+    result = run_captured(cmd)
+    if result.returncode != 0:
+        return {}
+    try:
+        return json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def probe_primary_video(path: Path) -> dict:
+    """Single combined ffprobe call for the primary video stream + format."""
+    return ffprobe_json(path, "-select_streams", "V:0", "-show_streams", "-show_format")
+
+
+def probe_all_streams(path: Path) -> dict:
+    """Single combined ffprobe call for every stream + format in the file."""
+    return ffprobe_json(path, "-show_streams", "-show_format")
+
+
+def normal_video_count(path: Path) -> int:
+    data = ffprobe_json(path, "-select_streams", "V", "-show_entries", "stream=index")
+    return len(data.get("streams") or [])
+
+
+def streams_by_type(probe: dict, codec_type: str) -> list[dict]:
+    return [s for s in probe.get("streams") or [] if s.get("codec_type") == codec_type]
+
+
+def is_attached_pic(stream: dict) -> bool:
+    return stream.get("codec_type") == "video" and (stream.get("disposition") or {}).get("attached_pic") == 1
+
+
+def cover_streams(probe: dict) -> list[dict]:
+    return [s for s in streams_by_type(probe, "video") if is_attached_pic(s)]
+
+
+def cover_codec_list(probe: dict) -> list[str]:
+    return sorted(s.get("codec_name", "") for s in cover_streams(probe))
+
+
+def audio_codec_list(probe: dict) -> list[str]:
+    return sorted(s.get("codec_name", "") for s in streams_by_type(probe, "audio"))
+
+
+def subtitle_codec_list(probe: dict) -> list[str]:
+    return sorted(s.get("codec_name", "") for s in streams_by_type(probe, "subtitle"))
+
+
+def attachment_count(probe: dict) -> int:
+    return len(streams_by_type(probe, "attachment"))
+
+
+def data_stream_indexes_to_copy(probe: dict) -> list[int]:
+    """MP4 chapter tracks are regenerated from chapter metadata, not copied."""
+    indexes = []
+    for s in streams_by_type(probe, "data"):
+        codec = s.get("codec_name")
+        tag = s.get("codec_tag_string")
+        handler = (s.get("tags") or {}).get("handler_name")
+        if codec == "bin_data" and tag == "text" and handler == "SubtitleHandler":
+            continue
+        idx = s.get("index")
+        if idx is not None:
+            indexes.append(idx)
+    return indexes
+
+
+def nonchapter_data_count(probe: dict) -> int:
+    return len(data_stream_indexes_to_copy(probe))
+
+
+def video_rotation(stream: dict) -> Decimal:
+    for side_data in stream.get("side_data_list") or []:
+        if "rotation" in side_data:
+            try:
+                return Decimal(str(side_data["rotation"]))
+            except InvalidOperation:
+                pass
+    return Decimal(0)
+
+
+def encoder_exists(name: str) -> bool:
+    result = run_captured(["ffmpeg", "-hide_banner", "-encoders"])
+    return bool(re.search(rf"\s{re.escape(name)}\s", result.stdout or ""))
+
+
+def bsf_exists(name: str) -> bool:
+    result = run_captured(["ffmpeg", "-hide_banner", "-bsfs"])
+    return name in (result.stdout or "").splitlines()
+
+
+###############################################################################
+# Time handling
+
+
+def time_to_seconds(raw: str) -> Decimal:
+    text = raw.strip()
+    sign = Decimal(1)
+    if text.startswith("-"):
+        sign = Decimal(-1)
+        text = text[1:]
+    parts = text.split(":")
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f"Invalid time: {raw}")
+    try:
+        nums = [Decimal(p) for p in parts]
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid time: {raw}") from exc
+    total = Decimal(0)
+    for n in nums:
+        total = total * 60 + n
+    return sign * total
+
+
+def resolve_time(raw: str, duration: Decimal) -> Decimal:
+    low = raw.strip().lower()
+    if low in ("start", "s"):
+        return Decimal(0)
+    if low in ("end", "e"):
+        return duration
+    seconds = time_to_seconds(raw)
+    if seconds < 0:
+        seconds = duration + seconds
+    return seconds
+
+
+###############################################################################
+# Chapters
+
+
+@dataclass
+class ChapterBlock:
+    timebase: str
+    start: Decimal
+    end: Decimal
+    tags: list[str] = field(default_factory=list)
+
+
+def parse_ffmetadata_chapters(text: str) -> list[ChapterBlock]:
+    chapters: list[ChapterBlock] = []
+    in_chapter = False
+    timebase = "1/1000"
+    start: Optional[Decimal] = None
+    end: Optional[Decimal] = None
+    tags: list[str] = []
+
+    def flush() -> None:
+        nonlocal in_chapter, timebase, start, end, tags
+        if in_chapter and start is not None and end is not None:
+            chapters.append(ChapterBlock(timebase, start, end, tags[:]))
+        timebase = "1/1000"
+        start = None
+        end = None
+        tags = []
+
+    for line in text.splitlines():
+        if line == "[CHAPTER]":
+            flush()
+            in_chapter = True
+            continue
+        if line.startswith("[") and line != "[CHAPTER]":
+            flush()
+            in_chapter = False
+            continue
+        if not in_chapter:
+            continue
+        if line.startswith("TIMEBASE="):
+            timebase = line[len("TIMEBASE="):]
+        elif line.startswith("START="):
+            try:
+                start = Decimal(line[len("START="):])
+            except InvalidOperation:
+                start = None
+        elif line.startswith("END="):
+            try:
+                end = Decimal(line[len("END="):])
+            except InvalidOperation:
+                end = None
+        else:
+            tags.append(line)
+    flush()
+    return chapters
+
+
+def trim_chapters(chapters: list[ChapterBlock], cut_start: Decimal, cut_end: Decimal) -> list[ChapterBlock]:
+    """Keep only the portion of each chapter that overlaps [cut_start, cut_end),
+    rebased so the new timeline starts at zero."""
+    result: list[ChapterBlock] = []
+    for chapter in chapters:
+        try:
+            num_str, den_str = chapter.timebase.split("/")
+            num, den = Decimal(num_str), Decimal(den_str)
+        except (ValueError, InvalidOperation):
+            continue
+        if num <= 0 or den <= 0:
+            continue
+        tick = num / den
+
+        seg_start = chapter.start * tick
+        seg_end = chapter.end * tick
+        overlap_start = max(seg_start, cut_start)
+        overlap_end = min(seg_end, cut_end)
+        if overlap_end <= overlap_start:
+            continue
+
+        new_start_ticks = (overlap_start - cut_start) / tick
+        new_end_ticks = (overlap_end - cut_start) / tick
+        result.append(
+            ChapterBlock(
+                chapter.timebase,
+                new_start_ticks.to_integral_value(rounding=ROUND_HALF_UP),
+                new_end_ticks.to_integral_value(rounding=ROUND_HALF_UP),
+                chapter.tags,
+            )
+        )
+    return result
+
+
+def render_ffmetadata_chapters(chapters: list[ChapterBlock]) -> str:
+    lines = [";FFMETADATA1"]
+    for chapter in chapters:
+        lines.append("[CHAPTER]")
+        lines.append(f"TIMEBASE={chapter.timebase}")
+        lines.append(f"START={int(chapter.start)}")
+        lines.append(f"END={int(chapter.end)}")
+        lines.extend(chapter.tags)
+    return "\n".join(lines) + "\n"
+
+
+###############################################################################
+# Codec profile selection
+
+
+@dataclass
+class CodecProfile:
+    smart_capable: bool
+    intermediate_ext: str
+    encoder: str
+    enc_args: list[str]
+
+
+def build_codec_profile(codec: str, opts: argparse.Namespace) -> CodecProfile:
+    if codec == "h264":
+        return CodecProfile(True, "ts", "libx264", [
+            "-preset", opts.h264_preset, "-crf", str(opts.h264_crf),
+            "-x264-params", "open-gop=0:repeat-headers=1",
+        ])
+    if codec == "hevc":
+        return CodecProfile(True, "ts", "libx265", [
+            "-preset", opts.hevc_preset, "-crf", str(opts.hevc_crf),
+            "-x265-params", "open-gop=0:repeat-headers=1",
+        ])
+    if codec == "av1":
+        return CodecProfile(True, "mkv", "libsvtav1", [
+            "-preset", str(opts.av1_preset), "-crf", str(opts.av1_crf),
+        ])
+    if codec == "vp9":
+        return CodecProfile(True, "mkv", "libvpx-vp9", [
+            "-deadline", "good", "-cpu-used", str(opts.vp9_cpu_used),
+            "-crf", str(opts.vp9_crf), "-b:v", "0",
+        ])
+    if codec == "vp8":
+        return CodecProfile(True, "mkv", "libvpx", [
+            "-deadline", "good", "-cpu-used", str(opts.vp8_cpu_used),
+            "-crf", str(opts.vp8_crf), "-b:v", "0",
+        ])
+    if codec == "mpeg2video":
+        return CodecProfile(False, "mkv", "mpeg2video", ["-q:v", str(opts.mpeg2_q)])
+    if codec == "mpeg4":
+        return CodecProfile(False, "mkv", "mpeg4", ["-q:v", str(opts.mpeg4_q)])
+    if codec == "prores":
+        return CodecProfile(False, "mkv", "prores_ks", ["-profile:v", str(opts.prores_profile)])
+    if codec == "mjpeg":
+        return CodecProfile(False, "mkv", "mjpeg", ["-q:v", str(opts.mjpeg_q)])
+    if codec == "dnxhd":
+        return CodecProfile(False, "mkv", "dnxhd", [])
+    if codec == "ffv1":
+        return CodecProfile(False, "mkv", "ffv1", ["-level", "3"])
+    if codec == "huffyuv":
+        return CodecProfile(False, "mkv", "huffyuv", [])
+    if codec == "theora":
+        return CodecProfile(False, "mkv", "libtheora", ["-q:v", str(opts.theora_q)])
+    die(f"Unsupported video codec for exact cutting: {codec}")
+    raise AssertionError("unreachable")  # die() always raises; satisfies type checkers
+
+
+def video_props_args(stream: dict) -> list[str]:
+    args: list[str] = []
+    pix_fmt = stream.get("pix_fmt")
+    if pix_fmt and pix_fmt != "unknown":
+        args += ["-pix_fmt", pix_fmt]
+    for key, flag in (
+        ("color_range", "-color_range"),
+        ("color_space", "-colorspace"),
+        ("color_transfer", "-color_trc"),
+        ("color_primaries", "-color_primaries"),
+    ):
+        value = stream.get(key)
+        if value and value != "unknown":
+            args += [flag, value]
+    return args
+
+
+###############################################################################
+# Context: everything derived from the input file once, up front
+
+
+@dataclass
+class Context:
+    input: Path
+    codec: str
+    profile: CodecProfile
+    smart_capable: bool
+    video_props: list[str]
+    src_duration: Decimal
+    src_start_time: Decimal
+    v_index: Optional[int]
+    codec_tag: str
+    time_base: str
+    rotation: Decimal
+
+
+###############################################################################
+# Safe splice-point detection
+
+
+def first_packet_nal_types(ctx: Context, t: Decimal) -> list[int]:
+    """NAL unit types seen in the first packet at/after time t, in order, by
+    asking ffmpeg to trace headers on a single copied frame. A packet can
+    carry several NALs (e.g. H.264 SPS + PPS + slice), so callers need every
+    type in order, not just the first one."""
+    seek = t + NUDGE
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "verbose",
+        "-ss", fmt_time(seek),
+        "-i", str(ctx.input),
+        "-map", "0:V:0", "-frames:v", "1",
+        "-c:v", "copy", "-bsf:v", "trace_headers",
+        "-f", "null", "-",
+    ]
+    result = run_captured(cmd)
+    types: list[int] = []
+    seen_packet = False
+    in_first_packet = False
+    for line in (result.stderr or "").splitlines():
+        if "Packet:" in line:
+            if seen_packet:
+                break
+            seen_packet = True
+            in_first_packet = True
+            continue
+        if in_first_packet and "nal_unit_type" in line:
+            match = re.search(r"(-?\d+)\s*$", line.strip())
+            if match:
+                types.append(int(match.group(1)))
+    return types
+
+
+def is_safe_ra(ctx: Context, t: Decimal) -> bool:
+    """A keyframe is only a safe splice point if its packet's first *slice*
+    NAL (as opposed to a parameter-set NAL like SPS/PPS/VPS, which precedes
+    it in the same packet) is an IDR (H.264) or IDR/BLA (HEVC; CRA is
+    intentionally rejected - see module docstring)."""
+    if ctx.codec in ("av1", "vp9", "vp8"):
+        return True
+    if ctx.codec == "h264":
+        for n in first_packet_nal_types(ctx, t):
+            if 1 <= n <= 5:
+                return n == 5
+        return False
+    if ctx.codec == "hevc":
+        for n in first_packet_nal_types(ctx, t):
+            if 0 <= n <= 31:
+                return n in (16, 17, 18, 19, 20)
+        return False
+    return False
+
+
+def list_keyframes(ctx: Context, probe_from: Decimal, probe_to: Decimal) -> list[Decimal]:
+    probe_from_abs = ctx.src_start_time + probe_from
+    probe_to_abs = ctx.src_start_time + probe_to
+    data = ffprobe_json(
+        ctx.input,
+        "-read_intervals", f"{fmt_time(probe_from_abs)}%{fmt_time(probe_to_abs)}",
+        "-select_streams", "V:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time,flags",
+    )
+    seen: set[str] = set()
+    keyframes: list[Decimal] = []
+    for packet in data.get("packets") or []:
+        pts_time = packet.get("pts_time")
+        flags = packet.get("flags") or ""
+        if not pts_time or pts_time == "N/A" or "K" not in flags:
+            continue
+        t = Decimal(pts_time) - ctx.src_start_time
+        key = str(t)
+        if key not in seen:
+            seen.add(key)
+            keyframes.append(t)
+    return keyframes
+
+
+def find_splice_points(
+    ctx: Context, start_sec: Decimal, end_sec: Decimal, ra_scan_limit: int
+) -> tuple[Optional[Decimal], Optional[Decimal]]:
+    if not ctx.smart_capable:
+        return None, None
+
+    probe_from = max(start_sec - 5, Decimal(0))
+    probe_to = min(end_sec + 5, ctx.src_duration)
+    keyframes = list_keyframes(ctx, probe_from, probe_to)
+    if not keyframes:
+        return None, None
+
+    k_start: Optional[Decimal] = None
+    checked = 0
+    for k in keyframes:
+        if k < start_sec - K_SEARCH_EPSILON:
+            continue
+        if k > end_sec:
+            break
+        checked += 1
+        if is_safe_ra(ctx, k):
+            k_start = k
+            break
+        if checked >= ra_scan_limit:
+            break
+
+    k_end: Optional[Decimal] = None
+    checked = 0
+    for k in reversed(keyframes):
+        if k > end_sec + K_SEARCH_EPSILON:
+            continue
+        if k < start_sec:
+            break
+        checked += 1
+        if is_safe_ra(ctx, k):
+            k_end = k
+            break
+        if checked >= ra_scan_limit:
+            break
+
+    return k_start, k_end
+
+
+###############################################################################
+# Encoding / copying segments
+
+
+def encode_segment(ctx: Context, start: Decimal, end: Decimal, out: Path) -> None:
+    duration = end - start
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
+        "-ss", fmt_time(start),
+        "-noautorotate",
+        "-i", str(ctx.input),
+        "-t", fmt_time(duration),
+        "-map", "0:V:0",
+        "-an", "-sn", "-dn",
+        "-c:v", ctx.profile.encoder,
+        *ctx.profile.enc_args,
+        *ctx.video_props,
+        "-fps_mode", "passthrough",
+        str(out),
+    ]
+    run_ffmpeg(cmd)
+
+
+def copy_middle(ctx: Context, start: Decimal, end: Decimal, out: Path) -> None:
+    # A tiny nudge makes ffmpeg seek to the keyframe at/before "start".
+    seek = start + NUDGE
+    raw_from = fmt_time(ctx.src_start_time + start)
+    raw_to = fmt_time(ctx.src_start_time + end)
+
+    bsf = f"noise=drop='lt(pts*tb,{raw_from})+gte(pts*tb,{raw_to})',setts=pts=PTS-{raw_from}/TB:dts=DTS-{raw_from}/TB"
+    if ctx.codec == "h264":
+        bsf += ",h264_mp4toannexb"
+    elif ctx.codec == "hevc":
+        bsf += ",hevc_mp4toannexb"
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
+        "-copyts",
+        "-ss", fmt_time(seek),
+        "-i", str(ctx.input),
+        "-map", "0:V:0", "-an", "-sn", "-dn",
+        "-c:v", "copy",
+        "-bsf:v", bsf,
+        str(out),
+    ]
+    run_ffmpeg(cmd)
+
+
+def smart_render(
+    ctx: Context, start_sec: Decimal, end_sec: Decimal, k_start: Decimal, k_end: Decimal, tmpdir: Path
+) -> Path:
+    parts: list[Path] = []
+    middle_start = k_start
+    middle_end = k_end
+
+    if not flt_eq(start_sec, k_start):
+        head = tmpdir / f"head.{ctx.profile.intermediate_ext}"
+        encode_segment(ctx, start_sec, k_start, head)
+        parts.append(head)
+    else:
+        middle_start = start_sec
+
+    if middle_end > middle_start:
+        body = tmpdir / f"body.{ctx.profile.intermediate_ext}"
+        copy_middle(ctx, middle_start, middle_end, body)
+        parts.append(body)
+
+    if not flt_eq(end_sec, k_end):
+        tail = tmpdir / f"tail.{ctx.profile.intermediate_ext}"
+        encode_segment(ctx, k_end, end_sec, tail)
+        parts.append(tail)
+
+    hybrid = tmpdir / f"hybrid.{ctx.profile.intermediate_ext}"
+    if len(parts) == 1:
+        shutil.copy(parts[0], hybrid)
+    else:
+        concat_file = tmpdir / "parts.ffconcat"
+        concat_file.write_text(
+            "ffconcat version 1.0\n" + "".join(f"file '{p.name}'\n" for p in parts),
+            encoding="utf-8",
+        )
+        run_ffmpeg(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file.name,
+                "-map", "0:v:0", "-c:v", "copy",
+                hybrid.name,
+            ],
+            cwd=tmpdir,
+        )
+    return hybrid
+
+
+def verify_decode(path: Path) -> bool:
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-xerror",
+        "-i", str(path),
+        "-map", "0:v:0", "-an", "-sn", "-dn",
+        "-f", "null", "-",
+    ]
+    result = run_captured(cmd)
+    return result.returncode == 0
+
+
+###############################################################################
+# Final mux
+
+
+def build_final_mux_cmd(
+    ctx: Context,
+    input_probe: dict,
+    hybrid: Path,
+    start_sec: Decimal,
+    cut_duration: Decimal,
+    chapters_meta: Optional[Path],
+    out_ext_lc: str,
+    final_tmp: Path,
+) -> list[str]:
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y"]
+
+    if ctx.rotation != 0:
+        cmd += ["-display_rotation:v:0", str(ctx.rotation)]
+
+    cmd += ["-i", str(hybrid)]
+    cmd += ["-ss", fmt_time(start_sec), "-i", str(ctx.input)]
+    cmd += ["-i", str(ctx.input)]
+
+    chapter_input = -1
+    if chapters_meta is not None:
+        chapter_input = 3
+        cmd += ["-f", "ffmetadata", "-i", str(chapters_meta)]
+
+    # Main video + all audio + all subtitles
+    cmd += ["-map", "0:v:0", "-map", "1:a?", "-map", "1:s?"]
+
+    # Timed data streams (excluding the regenerated MP4 chapter track)
+    for idx in data_stream_indexes_to_copy(input_probe):
+        cmd += ["-map", f"1:{idx}"]
+
+    # Cover artwork
+    covers = cover_streams(input_probe)
+    for stream in covers:
+        cmd += ["-map", f"2:{stream['index']}"]
+
+    # Matroska attachments: fonts, XML, artwork, etc.
+    cmd += ["-map", "2:t?"]
+
+    cmd += ["-copy_unknown", "-map_metadata", "2"]
+    if ctx.v_index is not None:
+        cmd += ["-map_metadata:s:v:0", f"2:s:{ctx.v_index}"]
+
+    cmd += ["-map_chapters", str(chapter_input) if chapter_input >= 0 else "-1"]
+    cmd += ["-c", "copy"]
+
+    # Restore attached_pic disposition (covers land after data streams)
+    for i in range(1, len(covers) + 1):
+        cmd += [f"-disposition:v:{i}", "attached_pic"]
+
+    # Bound copied auxiliary streams to the requested output length.
+    cmd += ["-t", fmt_time(cut_duration)]
+
+    if out_ext_lc in MP4_LIKE_EXTS:
+        if ctx.codec_tag and ctx.codec_tag not in ("", "[0][0][0][0]"):
+            cmd += ["-tag:v:0", ctx.codec_tag]
+        if ctx.time_base.startswith("1/"):
+            ts = ctx.time_base[2:]
+            if ts.isdigit():
+                cmd += ["-video_track_timescale", ts]
+        cmd += ["-use_editlist", "1", "-movflags", "+faststart"]
+    elif out_ext_lc in MKV_LIKE_EXTS:
+        cmd += ["-default_mode", "infer_no_subs"]
+
+    cmd += [str(final_tmp)]
+    return cmd
+
+
+###############################################################################
+# CLI
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=PROG,
+        description="Frame-accurate video cutter using only ffmpeg + ffprobe.",
+        epilog=(
+            "Examples:\n"
+            "  ffcut video.mp4 10.250 130.750\n"
+            "  ffcut video.mp4 00:10:23.456 00:12:34.567\n"
+            "  ffcut video.mkv 01:20 end\n"
+            "  ffcut video.mov -120 -10\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input", help="Source video file")
+    parser.add_argument("start", help="Start time (seconds, HH:MM:SS(.ms), 'start', or negative-from-end)")
+    parser.add_argument("end", nargs="?", default="end", help="End time (default: end of file)")
+    parser.add_argument("output", nargs="?", default=None, help="Output path (default: '<name> - cut.<ext>')")
+
+    parser.add_argument("--force", action="store_true", help="Overwrite an existing output file")
+    parser.add_argument("--no-play", action="store_true", help="Do not open the result in mpv")
+    parser.add_argument("--no-verify", action="store_true", help="Skip decode verification")
+    parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files")
+    parser.add_argument("--ra-scan-limit", type=int, default=16, help="Max keyframes to check per side for a safe splice point")
+
+    parser.add_argument("--h264-crf", type=int, default=18)
+    parser.add_argument("--h264-preset", default="medium")
+    parser.add_argument("--hevc-crf", type=int, default=20)
+    parser.add_argument("--hevc-preset", default="medium")
+    parser.add_argument("--av1-crf", type=int, default=23)
+    parser.add_argument("--av1-preset", type=int, default=4)
+    parser.add_argument("--vp9-crf", type=int, default=22)
+    parser.add_argument("--vp9-cpu-used", type=int, default=2)
+    parser.add_argument("--vp8-crf", type=int, default=10)
+    parser.add_argument("--vp8-cpu-used", type=int, default=2)
+    parser.add_argument("--mpeg2-q", type=int, default=2)
+    parser.add_argument("--mpeg4-q", type=int, default=2)
+    parser.add_argument("--prores-profile", type=int, default=3)
+    parser.add_argument("--mjpeg-q", type=int, default=2)
+    parser.add_argument("--theora-q", type=int, default=7)
+
+    return parser
+
+
+def default_output_path(input_path: Path) -> Path:
+    suffix = input_path.suffix
+    if suffix:
+        stem = input_path.stem
+        ext = suffix[1:]
+    else:
+        stem = input_path.name
+        ext = "mkv"
+    return input_path.parent / f"{stem} - cut.{ext}"
+
+
+###############################################################################
+# Main
+
+
+def run_ffcut(opts: argparse.Namespace) -> None:
+    for tool in ("ffmpeg", "ffprobe"):
+        if shutil.which(tool) is None:
+            die(f"Required program not found: {tool}")
+
+    input_path = Path(opts.input)
+    if not input_path.is_file():
+        die(f"File not found: {input_path}")
+
+    output_path = Path(opts.output) if opts.output else default_output_path(input_path)
+    if input_path.resolve() == output_path.resolve():
+        die("Output must not overwrite input")
+    out_dir = output_path.parent
+    if not out_dir.is_dir():
+        die(f"Output directory does not exist: {out_dir}")
+    if output_path.exists() and not opts.force:
+        die(f"Output already exists: {output_path} (pass --force to overwrite)")
+
+    probe = probe_primary_video(input_path)
+    streams = probe.get("streams") or []
+    if not streams:
+        die("Could not determine primary video codec")
+    vstream = streams[0]
+    fmt = probe.get("format") or {}
+
+    duration_raw = vstream.get("duration") or fmt.get("duration")
+    if not duration_raw or duration_raw == "N/A":
+        die("Could not determine source duration")
+    src_duration = Decimal(duration_raw)
+
+    start_time_raw = fmt.get("start_time")
+    src_start_time = Decimal(start_time_raw) if start_time_raw and start_time_raw != "N/A" else Decimal(0)
+
+    try:
+        start_sec = resolve_time(opts.start, src_duration)
+    except ValueError:
+        die(f"Invalid start time: {opts.start}")
+    try:
+        end_sec = resolve_time(opts.end, src_duration)
+    except ValueError:
+        die(f"Invalid end time: {opts.end}")
+
+    if start_sec < 0:
+        die("Start is before beginning of file")
+    if end_sec <= start_sec:
+        die("End must be after start")
+    if start_sec > src_duration:
+        die("Start is past EOF")
+    if end_sec > src_duration:
+        if end_sec <= src_duration + EOF_GRACE:
+            end_sec = src_duration
+        else:
+            die(f"End is past EOF ({src_duration}s)")
+
+    cut_duration = end_sec - start_sec
+
+    if normal_video_count(input_path) != 1:
+        die(f"Expected exactly one normal video stream; found {normal_video_count(input_path)}")
+
+    codec = vstream.get("codec_name")
+    if not codec:
+        die("Could not determine primary video codec")
+
+    profile = build_codec_profile(codec, opts)
+    if not encoder_exists(profile.encoder):
+        die(f"FFmpeg encoder not available: {profile.encoder}")
+
+    smart_capable = profile.smart_capable
+    if smart_capable:
+        if not (bsf_exists("noise") and bsf_exists("setts")):
+            smart_capable = False
+        if codec == "h264" and not bsf_exists("h264_mp4toannexb"):
+            smart_capable = False
+        if codec == "hevc" and not bsf_exists("hevc_mp4toannexb"):
+            smart_capable = False
+
+    ctx = Context(
+        input=input_path,
+        codec=codec,
+        profile=profile,
+        smart_capable=smart_capable,
+        video_props=video_props_args(vstream),
+        src_duration=src_duration,
+        src_start_time=src_start_time,
+        v_index=vstream.get("index"),
+        codec_tag=vstream.get("codec_tag_string") or "",
+        time_base=vstream.get("time_base") or "",
+        rotation=video_rotation(vstream),
+    )
+
+    tmpdir = Path(tempfile.mkdtemp(dir=out_dir, prefix=f".{PROG}."))
+    old_handlers = {}
+    for sig_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            old_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_terminating_signal)
+
+    try:
+        k_start, k_end = find_splice_points(ctx, start_sec, end_sec, opts.ra_scan_limit)
+        can_smart = k_start is not None and k_end is not None and k_end > k_start
+
+        smart_used = False
+        if can_smart:
+            info(f"Smart cut: {codec}  {fmt_time(start_sec)}s -> {fmt_time(end_sec)}s")
+            info(f"Safe splice points: {fmt_time(k_start)}s .. {fmt_time(k_end)}s")
+            hybrid = smart_render(ctx, start_sec, end_sec, k_start, k_end, tmpdir)
+            smart_used = True
+        else:
+            if smart_capable:
+                if codec == "hevc":
+                    warn("No safe HEVC IDR/BLA splice pair found; CRA/open-GOP video will not be spliced blindly.")
+                else:
+                    warn("No safe splice pair found.")
+            else:
+                warn(f"{codec} is not smart-spliced by this script.")
+            warn("Encoding only the requested video segment instead.")
+            hybrid = tmpdir / f"hybrid.{profile.intermediate_ext}"
+            encode_segment(ctx, start_sec, end_sec, hybrid)
+
+        if not hybrid.exists() or hybrid.stat().st_size == 0:
+            die("Video stage produced no output")
+
+        if not opts.no_verify:
+            info("Verifying video decode...")
+            if not verify_decode(hybrid):
+                if smart_used:
+                    warn("Smart splice failed verification; falling back to full requested-video encode.")
+                    hybrid.unlink(missing_ok=True)
+                    encode_segment(ctx, start_sec, end_sec, hybrid)
+                    if not verify_decode(hybrid):
+                        die("Fallback video encode failed verification")
+                    smart_used = False
+                else:
+                    die("Encoded video failed verification")
+
+        # Chapters
+        chapters_meta: Optional[Path] = None
+        raw_meta = tmpdir / "source.ffmeta"
+        run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-f", "ffmetadata", str(raw_meta)])
+        chapters = trim_chapters(parse_ffmetadata_chapters(raw_meta.read_text(encoding="utf-8")), start_sec, end_sec)
+        if chapters:
+            chapters_meta = tmpdir / "chapters.ffmeta"
+            chapters_meta.write_text(render_ffmetadata_chapters(chapters), encoding="utf-8")
+
+        # Final mux
+        input_probe = probe_all_streams(input_path)
+        out_ext_lc = output_path.suffix.lstrip(".").lower()
+        final_tmp = tmpdir / f"final{output_path.suffix}"
+        mux_cmd = build_final_mux_cmd(ctx, input_probe, hybrid, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp)
+        run_ffmpeg(mux_cmd)
+
+        if not final_tmp.exists() or final_tmp.stat().st_size == 0:
+            die("Final mux produced no output")
+
+        # Verify important stream preservation
+        output_probe = probe_all_streams(final_tmp)
+        out_streams = output_probe.get("streams") or []
+        out_video = next((s for s in out_streams if s.get("codec_type") == "video" and not is_attached_pic(s)), {})
+        out_codec = out_video.get("codec_name")
+        if out_codec != codec:
+            die(f"Primary video codec changed unexpectedly: {codec} -> {out_codec or 'unknown'}")
+
+        if audio_codec_list(input_probe) != audio_codec_list(output_probe):
+            die("An 'a' stream was lost or changed codec during final mux")
+        if subtitle_codec_list(input_probe) != subtitle_codec_list(output_probe):
+            die("An 's' stream was lost or changed codec during final mux")
+        if cover_codec_list(input_probe) != cover_codec_list(output_probe):
+            die("Attached cover artwork was lost or changed")
+        in_data_count = nonchapter_data_count(input_probe)
+        out_data_count = nonchapter_data_count(output_probe)
+        if in_data_count != out_data_count:
+            # Not fatal: a timed data stream (GoPro telemetry, timecode,
+            # etc.) can legitimately have zero packets inside the requested
+            # window and be dropped by the muxer - that's correct behavior,
+            # not lost data.
+            warn(f"Timed data stream count changed: {in_data_count} -> {out_data_count} (no packets in the cut range?)")
+        if attachment_count(input_probe) != attachment_count(output_probe):
+            die(f"Attachment count changed: {attachment_count(input_probe)} -> {attachment_count(output_probe)}")
+
+        final_tmp.replace(output_path)
+
+        if smart_used:
+            info(f"Done (smart cut): {output_path}")
+        else:
+            info(f"Done (requested video segment encoded): {output_path}")
+        info(f"Codec: {codec} | {fmt_time(start_sec)}s -> {fmt_time(end_sec)}s ({fmt_time(cut_duration)}s requested)")
+
+        if not opts.no_play and shutil.which("mpv"):
+            subprocess.run(["mpv", "--keep-open", "--fullscreen", str(output_path)])
+    finally:
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        if opts.keep_temp:
+            info(f"Temporary files kept: {tmpdir}")
+        else:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_arg_parser()
+    opts = parser.parse_args(argv)
+    try:
+        run_ffcut(opts)
+    except FfcutError as exc:
+        print(f"{PROG}: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(f"{PROG}: interrupted", file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
