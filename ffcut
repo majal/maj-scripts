@@ -49,7 +49,7 @@ K_SEARCH_EPSILON = Decimal("0.0005")
 EOF_GRACE = Decimal("0.250")
 NUDGE = Decimal("0.000001")
 
-MP4_LIKE_EXTS = {"mp4", "m4v", "mov", "3gp", "3g2", "mj2"}
+MP4_LIKE_EXTS = {"mp4", "m4v", "mov", "3gp", "3g2", "mj2", "m4a"}
 MKV_LIKE_EXTS = {"mkv", "mka", "mks", "webm"}
 
 
@@ -252,6 +252,34 @@ def resolve_time(raw: str, duration: Decimal) -> Decimal:
     return seconds
 
 
+def resolve_cut_window(raw_start: str, raw_end: str, src_duration: Decimal) -> tuple[Decimal, Decimal, Decimal]:
+    """Resolve and validate the [start, end) window, snapping an END that
+    lands just past EOF back to the exact duration. Returns (start, end,
+    end - start)."""
+    try:
+        start_sec = resolve_time(raw_start, src_duration)
+    except ValueError:
+        die(f"Invalid start time: {raw_start}")
+    try:
+        end_sec = resolve_time(raw_end, src_duration)
+    except ValueError:
+        die(f"Invalid end time: {raw_end}")
+
+    if start_sec < 0:
+        die("Start is before beginning of file")
+    if end_sec <= start_sec:
+        die("End must be after start")
+    if start_sec > src_duration:
+        die("Start is past EOF")
+    if end_sec > src_duration:
+        if end_sec <= src_duration + EOF_GRACE:
+            end_sec = src_duration
+        else:
+            die(f"End is past EOF ({src_duration}s)")
+
+    return start_sec, end_sec, end_sec - start_sec
+
+
 ###############################################################################
 # Chapters
 
@@ -353,6 +381,20 @@ def render_ffmetadata_chapters(chapters: list[ChapterBlock]) -> str:
         lines.append(f"END={int(chapter.end)}")
         lines.extend(chapter.tags)
     return "\n".join(lines) + "\n"
+
+
+def build_chapters_meta(input_path: Path, tmpdir: Path, start_sec: Decimal, end_sec: Decimal) -> Optional[Path]:
+    """Extract the source's chapters, trim/rebase them to [start_sec, end_sec),
+    and write them back out as an ffmetadata file - or return None if nothing
+    survives the cut."""
+    raw_meta = tmpdir / "source.ffmeta"
+    run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-f", "ffmetadata", str(raw_meta)])
+    chapters = trim_chapters(parse_ffmetadata_chapters(raw_meta.read_text(encoding="utf-8")), start_sec, end_sec)
+    if not chapters:
+        return None
+    chapters_meta = tmpdir / "chapters.ffmeta"
+    chapters_meta.write_text(render_ffmetadata_chapters(chapters), encoding="utf-8")
+    return chapters_meta
 
 
 ###############################################################################
@@ -770,6 +812,95 @@ def build_final_mux_cmd(
     return cmd
 
 
+def build_no_video_mux_cmd(
+    input_path: Path,
+    input_probe: dict,
+    start_sec: Decimal,
+    cut_duration: Decimal,
+    chapters_meta: Optional[Path],
+    out_ext_lc: str,
+    final_tmp: Path,
+    drop: DropOpts,
+) -> list[str]:
+    """Extract only the non-video streams. There's no GOP to splice around
+    without a video stream, so this is just a seek + stream-copy of the
+    original file, bounded to the requested window."""
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y"]
+    cmd += ["-ss", fmt_time(start_sec), "-i", str(input_path)]
+    cmd += ["-i", str(input_path)]
+
+    chapter_input = -1
+    if chapters_meta is not None:
+        chapter_input = 2
+        cmd += ["-f", "ffmetadata", "-i", str(chapters_meta)]
+
+    if not drop.audio:
+        cmd += ["-map", "0:a?"]
+    if not drop.subs:
+        cmd += ["-map", "0:s?"]
+    if not drop.data:
+        for idx in data_stream_indexes_to_copy(input_probe):
+            cmd += ["-map", f"0:{idx}"]
+    if not drop.attachments:
+        cmd += ["-map", "1:t?"]
+
+    cmd += ["-copy_unknown", "-map_metadata", "1"]
+    cmd += ["-map_chapters", str(chapter_input) if chapter_input >= 0 else "-1"]
+    cmd += ["-c", "copy"]
+
+    # Bound copied streams to the requested output length.
+    cmd += ["-t", fmt_time(cut_duration)]
+
+    if out_ext_lc in MP4_LIKE_EXTS:
+        cmd += ["-movflags", "+faststart"]
+    elif out_ext_lc in MKV_LIKE_EXTS:
+        cmd += ["-default_mode", "infer_no_subs"]
+
+    cmd += [str(final_tmp)]
+    return cmd
+
+
+def verify_aux_streams(opts: argparse.Namespace, input_probe: dict, output_probe: dict) -> None:
+    """Check that whatever wasn't explicitly dropped survived the final mux
+    intact, and that whatever was explicitly dropped is actually gone."""
+    if opts.no_audio:
+        if audio_codec_list(output_probe):
+            die("--no-audio was requested but the output still has audio streams")
+    elif audio_codec_list(input_probe) != audio_codec_list(output_probe):
+        die("An 'a' stream was lost or changed codec during final mux")
+
+    if opts.no_subs:
+        if subtitle_codec_list(output_probe):
+            die("--no-subs was requested but the output still has subtitle streams")
+    elif subtitle_codec_list(input_probe) != subtitle_codec_list(output_probe):
+        die("An 's' stream was lost or changed codec during final mux")
+
+    if opts.no_cover or opts.no_video:
+        if cover_codec_list(output_probe):
+            die("Cover artwork was requested to be dropped but the output still has it")
+    elif cover_codec_list(input_probe) != cover_codec_list(output_probe):
+        die("Attached cover artwork was lost or changed")
+
+    if opts.no_data:
+        if nonchapter_data_count(output_probe):
+            die("--no-data was requested but the output still has data streams")
+    else:
+        in_data_count = nonchapter_data_count(input_probe)
+        out_data_count = nonchapter_data_count(output_probe)
+        if in_data_count != out_data_count:
+            # Not fatal: a timed data stream (GoPro telemetry, timecode,
+            # etc.) can legitimately have zero packets inside the requested
+            # window and be dropped by the muxer - that's correct behavior,
+            # not lost data.
+            warn(f"Timed data stream count changed: {in_data_count} -> {out_data_count} (no packets in the cut range?)")
+
+    if opts.no_attachments:
+        if attachment_count(output_probe):
+            die("--no-attachments was requested but the output still has attachments")
+    elif attachment_count(input_probe) != attachment_count(output_probe):
+        die(f"Attachment count changed: {attachment_count(input_probe)} -> {attachment_count(output_probe)}")
+
+
 ###############################################################################
 # CLI
 
@@ -785,6 +916,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  ffcut video.mkv 01:20 end\n"
             "  ffcut video.mov -120 -10\n"
             "  ffcut video.mp4 10 60 --no-audio --no-subs\n"
+            "  ffcut video.mp4 10 60 --no-video audio-clip.m4a\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -799,9 +931,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary files")
     parser.add_argument("--ra-scan-limit", type=int, default=16, help="Max keyframes to check per side for a safe splice point")
 
-    parser.add_argument("--no-audio", action="store_true", help="Drop all audio streams (like ffmpeg's -an)")
-    parser.add_argument("--no-subs", action="store_true", help="Drop all subtitle streams (like ffmpeg's -sn)")
-    parser.add_argument("--no-data", action="store_true", help="Drop timed data streams (like ffmpeg's -dn)")
+    parser.add_argument("--no-video", "-vn", action="store_true", help="Drop the video stream and extract only the other streams (like ffmpeg's -vn)")
+    parser.add_argument("--no-audio", "-an", action="store_true", help="Drop all audio streams (like ffmpeg's -an)")
+    parser.add_argument("--no-subs", "-sn", action="store_true", help="Drop all subtitle streams (like ffmpeg's -sn)")
+    parser.add_argument("--no-data", "-dn", action="store_true", help="Drop timed data streams (like ffmpeg's -dn)")
     parser.add_argument("--no-cover", action="store_true", help="Drop attached cover art")
     parser.add_argument("--no-attachments", action="store_true", help="Drop Matroska attachments (fonts, XML, etc.)")
     parser.add_argument("--no-chapters", action="store_true", help="Drop chapters")
@@ -858,6 +991,15 @@ def run_ffcut(opts: argparse.Namespace) -> None:
     if output_path.exists() and not opts.force:
         die(f"Output already exists: {output_path} (pass --force to overwrite)")
 
+    if opts.no_video:
+        if opts.no_audio and opts.no_subs and opts.no_data:
+            die("--no-video combined with --no-audio, --no-subs, and --no-data would leave nothing to cut")
+        _run_no_video_cut(opts, input_path, output_path, out_dir)
+    else:
+        _run_video_cut(opts, input_path, output_path, out_dir)
+
+
+def _run_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path, out_dir: Path) -> None:
     probe = probe_primary_video(input_path)
     streams = probe.get("streams") or []
     if not streams:
@@ -873,28 +1015,7 @@ def run_ffcut(opts: argparse.Namespace) -> None:
     start_time_raw = fmt.get("start_time")
     src_start_time = Decimal(start_time_raw) if start_time_raw and start_time_raw != "N/A" else Decimal(0)
 
-    try:
-        start_sec = resolve_time(opts.start, src_duration)
-    except ValueError:
-        die(f"Invalid start time: {opts.start}")
-    try:
-        end_sec = resolve_time(opts.end, src_duration)
-    except ValueError:
-        die(f"Invalid end time: {opts.end}")
-
-    if start_sec < 0:
-        die("Start is before beginning of file")
-    if end_sec <= start_sec:
-        die("End must be after start")
-    if start_sec > src_duration:
-        die("Start is past EOF")
-    if end_sec > src_duration:
-        if end_sec <= src_duration + EOF_GRACE:
-            end_sec = src_duration
-        else:
-            die(f"End is past EOF ({src_duration}s)")
-
-    cut_duration = end_sec - start_sec
+    start_sec, end_sec, cut_duration = resolve_cut_window(opts.start, opts.end, src_duration)
 
     if normal_video_count(input_path) != 1:
         die(f"Expected exactly one normal video stream; found {normal_video_count(input_path)}")
@@ -976,15 +1097,7 @@ def run_ffcut(opts: argparse.Namespace) -> None:
                 else:
                     die("Encoded video failed verification")
 
-        # Chapters
-        chapters_meta: Optional[Path] = None
-        if not opts.no_chapters:
-            raw_meta = tmpdir / "source.ffmeta"
-            run_ffmpeg(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(input_path), "-f", "ffmetadata", str(raw_meta)])
-            chapters = trim_chapters(parse_ffmetadata_chapters(raw_meta.read_text(encoding="utf-8")), start_sec, end_sec)
-            if chapters:
-                chapters_meta = tmpdir / "chapters.ffmeta"
-                chapters_meta.write_text(render_ffmetadata_chapters(chapters), encoding="utf-8")
+        chapters_meta = None if opts.no_chapters else build_chapters_meta(input_path, tmpdir, start_sec, end_sec)
 
         # Final mux
         input_probe = probe_all_streams(input_path)
@@ -1011,42 +1124,7 @@ def run_ffcut(opts: argparse.Namespace) -> None:
         if out_codec != codec:
             die(f"Primary video codec changed unexpectedly: {codec} -> {out_codec or 'unknown'}")
 
-        if opts.no_audio:
-            if audio_codec_list(output_probe):
-                die("--no-audio was requested but the output still has audio streams")
-        elif audio_codec_list(input_probe) != audio_codec_list(output_probe):
-            die("An 'a' stream was lost or changed codec during final mux")
-
-        if opts.no_subs:
-            if subtitle_codec_list(output_probe):
-                die("--no-subs was requested but the output still has subtitle streams")
-        elif subtitle_codec_list(input_probe) != subtitle_codec_list(output_probe):
-            die("An 's' stream was lost or changed codec during final mux")
-
-        if opts.no_cover:
-            if cover_codec_list(output_probe):
-                die("--no-cover was requested but the output still has cover artwork")
-        elif cover_codec_list(input_probe) != cover_codec_list(output_probe):
-            die("Attached cover artwork was lost or changed")
-
-        if opts.no_data:
-            if nonchapter_data_count(output_probe):
-                die("--no-data was requested but the output still has data streams")
-        else:
-            in_data_count = nonchapter_data_count(input_probe)
-            out_data_count = nonchapter_data_count(output_probe)
-            if in_data_count != out_data_count:
-                # Not fatal: a timed data stream (GoPro telemetry, timecode,
-                # etc.) can legitimately have zero packets inside the
-                # requested window and be dropped by the muxer - that's
-                # correct behavior, not lost data.
-                warn(f"Timed data stream count changed: {in_data_count} -> {out_data_count} (no packets in the cut range?)")
-
-        if opts.no_attachments:
-            if attachment_count(output_probe):
-                die("--no-attachments was requested but the output still has attachments")
-        elif attachment_count(input_probe) != attachment_count(output_probe):
-            die(f"Attachment count changed: {attachment_count(input_probe)} -> {attachment_count(output_probe)}")
+        verify_aux_streams(opts, input_probe, output_probe)
 
         final_tmp.replace(output_path)
 
@@ -1058,6 +1136,61 @@ def run_ffcut(opts: argparse.Namespace) -> None:
 
         if not opts.no_play and shutil.which("mpv"):
             subprocess.run(["mpv", "--keep-open", "--fullscreen", str(output_path)])
+    finally:
+        for sig, handler in old_handlers.items():
+            signal.signal(sig, handler)
+        if opts.keep_temp:
+            info(f"Temporary files kept: {tmpdir}")
+        else:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _run_no_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path, out_dir: Path) -> None:
+    input_probe = probe_all_streams(input_path)
+    fmt = input_probe.get("format") or {}
+    duration_raw = fmt.get("duration")
+    if not duration_raw or duration_raw == "N/A":
+        die("Could not determine source duration")
+    src_duration = Decimal(duration_raw)
+
+    start_sec, end_sec, cut_duration = resolve_cut_window(opts.start, opts.end, src_duration)
+
+    tmpdir = Path(tempfile.mkdtemp(dir=out_dir, prefix=f".{PROG}."))
+    old_handlers = {}
+    for sig_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            old_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_terminating_signal)
+
+    try:
+        chapters_meta = None if opts.no_chapters else build_chapters_meta(input_path, tmpdir, start_sec, end_sec)
+
+        out_ext_lc = output_path.suffix.lstrip(".").lower()
+        final_tmp = tmpdir / f"final{output_path.suffix}"
+        drop = DropOpts(
+            audio=opts.no_audio,
+            subs=opts.no_subs,
+            data=opts.no_data,
+            cover=True,
+            attachments=opts.no_attachments,
+        )
+        mux_cmd = build_no_video_mux_cmd(input_path, input_probe, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp, drop)
+        run_ffmpeg(mux_cmd)
+
+        if not final_tmp.exists() or final_tmp.stat().st_size == 0:
+            die("Final mux produced no output")
+
+        output_probe = probe_all_streams(final_tmp)
+        verify_aux_streams(opts, input_probe, output_probe)
+
+        final_tmp.replace(output_path)
+
+        info(f"Done (video dropped): {output_path}")
+        info(f"{fmt_time(start_sec)}s -> {fmt_time(end_sec)}s ({fmt_time(cut_duration)}s requested)")
+
+        if not opts.no_play and shutil.which("mpv"):
+            subprocess.run(["mpv", "--keep-open", str(output_path)])
     finally:
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)

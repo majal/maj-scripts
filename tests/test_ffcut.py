@@ -327,6 +327,90 @@ class FfcutMuxCommandTest(unittest.TestCase):
         self.assertNotIn("2:t?", cmd)
 
 
+class FfcutNoVideoMuxCommandTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    def test_no_video_maps_audio_subs_data_no_video(self) -> None:
+        probe = {"streams": [{"index": 5, "codec_type": "data", "codec_name": "bin_data"}]}
+        drop = self.ffcut.DropOpts()
+        cmd = self.ffcut.build_no_video_mux_cmd(
+            Path("in.mp4"), probe, Decimal("1"), Decimal("5"), None, "mkv", Path("final.mkv"), drop,
+        )
+        self.assertNotIn("0:v", cmd)
+        self.assertIn("0:a?", cmd)
+        self.assertIn("0:s?", cmd)
+        self.assertIn("0:5", cmd)
+        self.assertIn("1:t?", cmd)
+        self.assertIn("-t", cmd)
+        self.assertEqual(cmd[cmd.index("-t") + 1], "5.000000000")
+
+    def test_no_video_respects_drop_flags(self) -> None:
+        drop = self.ffcut.DropOpts(audio=True, subs=True, attachments=True)
+        cmd = self.ffcut.build_no_video_mux_cmd(
+            Path("in.mp4"), {"streams": []}, Decimal("1"), Decimal("5"), None, "mkv", Path("final.mkv"), drop,
+        )
+        self.assertNotIn("0:a?", cmd)
+        self.assertNotIn("0:s?", cmd)
+        self.assertNotIn("1:t?", cmd)
+
+    def test_no_video_chapters_meta_sets_map_chapters_to_second_extra_input(self) -> None:
+        drop = self.ffcut.DropOpts()
+        cmd = self.ffcut.build_no_video_mux_cmd(
+            Path("in.mp4"), {"streams": []}, Decimal("1"), Decimal("5"),
+            Path("chapters.ffmeta"), "mkv", Path("final.mkv"), drop,
+        )
+        idx = cmd.index("-map_chapters")
+        self.assertEqual(cmd[idx + 1], "2")
+
+    def test_no_video_mp4_ext_gets_faststart(self) -> None:
+        drop = self.ffcut.DropOpts()
+        cmd = self.ffcut.build_no_video_mux_cmd(
+            Path("in.mp4"), {"streams": []}, Decimal("1"), Decimal("5"), None, "m4a", Path("final.m4a"), drop,
+        )
+        self.assertIn("-movflags", cmd)
+        self.assertIn("+faststart", cmd)
+
+
+class FfcutVerifyAuxStreamsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    def _opts(self, **overrides):
+        opts = self.ffcut.build_arg_parser().parse_args(["in.mp4", "0", "1"])
+        for key, value in overrides.items():
+            setattr(opts, key, value)
+        return opts
+
+    def test_passes_when_nothing_dropped_and_nothing_changed(self) -> None:
+        probe = {"streams": [{"codec_type": "audio", "codec_name": "aac"}]}
+        self.ffcut.verify_aux_streams(self._opts(), probe, probe)
+
+    def test_dies_when_no_audio_requested_but_audio_survives(self) -> None:
+        input_probe = {"streams": [{"codec_type": "audio", "codec_name": "aac"}]}
+        output_probe = {"streams": [{"codec_type": "audio", "codec_name": "aac"}]}
+        with self.assertRaises(self.ffcut.FfcutError):
+            self.ffcut.verify_aux_streams(self._opts(no_audio=True), input_probe, output_probe)
+
+    def test_dies_when_audio_lost_unexpectedly(self) -> None:
+        input_probe = {"streams": [{"codec_type": "audio", "codec_name": "aac"}]}
+        output_probe = {"streams": []}
+        with self.assertRaises(self.ffcut.FfcutError):
+            self.ffcut.verify_aux_streams(self._opts(), input_probe, output_probe)
+
+    def test_no_video_implies_cover_must_be_gone(self) -> None:
+        input_probe = {"streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+        ]}
+        output_probe = {"streams": [
+            {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+        ]}
+        with self.assertRaises(self.ffcut.FfcutError):
+            self.ffcut.verify_aux_streams(self._opts(no_video=True), input_probe, output_probe)
+
+
 class FfcutMiscTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -351,13 +435,32 @@ class FfcutSmokeTest(unittest.TestCase):
         cls.tmp = TemporaryDirectory()
         cls.tmp_path = Path(cls.tmp.name)
         cls.source = cls.tmp_path / "src.mp4"
+
+        srt_path = cls.tmp_path / "src.srt"
+        srt_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\nHello\n\n"
+            "2\n00:00:02,000 --> 00:00:04,000\nWorld\n",
+            encoding="utf-8",
+        )
+        chapters_path = cls.tmp_path / "src.ffmeta"
+        chapters_path.write_text(
+            ";FFMETADATA1\n"
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Intro\n"
+            "[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4000\ntitle=Outro\n",
+            encoding="utf-8",
+        )
         subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=4",
                 "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                "-i", str(srt_path),
+                "-i", str(chapters_path),
+                "-map", "0:v", "-map", "1:a", "-map", "2:s",
+                "-map_metadata", "3", "-map_chapters", "3",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "25", "-crf", "30", "-preset", "ultrafast",
                 "-c:a", "aac",
+                "-c:s", "mov_text",
                 str(cls.source),
             ],
             check=True,
@@ -415,6 +518,75 @@ class FfcutSmokeTest(unittest.TestCase):
         codec_types = [s["codec_type"] for s in json.loads(probe.stdout)["streams"]]
         self.assertNotIn("audio", codec_types)
         self.assertIn("video", codec_types)
+
+    def test_no_subs_drops_subtitle_stream(self) -> None:
+        out = self.tmp_path / "out-no-subs.mp4"
+        result = self.run_ffcut(str(self.source), "1.2", "3.1", "--no-subs", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(out.exists())
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        codec_types = [s["codec_type"] for s in json.loads(probe.stdout)["streams"]]
+        self.assertNotIn("subtitle", codec_types)
+        self.assertIn("video", codec_types)
+        self.assertIn("audio", codec_types)
+
+    def test_no_chapters_drops_chapters(self) -> None:
+        out = self.tmp_path / "out-no-chapters.mp4"
+        result = self.run_ffcut(str(self.source), "0", "end", "--no-chapters", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(json.loads(probe.stdout).get("chapters"), [])
+
+    def test_chapters_are_kept_by_default(self) -> None:
+        out = self.tmp_path / "out-with-chapters.mp4"
+        result = self.run_ffcut(str(self.source), "0", "end", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_chapters", "-of", "json", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertTrue(json.loads(probe.stdout).get("chapters"))
+
+    def test_no_video_extracts_audio_only(self) -> None:
+        out = self.tmp_path / "out-audio-only.m4a"
+        result = self.run_ffcut(str(self.source), "1.2", "3.1", "--no-video", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(out.exists())
+
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        data = json.loads(probe.stdout)
+        codec_types = [s["codec_type"] for s in data["streams"]]
+        self.assertNotIn("video", codec_types)
+        self.assertIn("audio", codec_types)
+        duration = float(data["format"]["duration"])
+        self.assertAlmostEqual(duration, 1.9, delta=0.3)
+
+    def test_no_video_short_flag_matches_long_flag(self) -> None:
+        out = self.tmp_path / "out-audio-only-short.m4a"
+        result = self.run_ffcut(str(self.source), "1.2", "3.1", "-vn", "--no-play", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(out.exists())
+
+    def test_no_video_with_all_aux_streams_dropped_is_rejected(self) -> None:
+        out = self.tmp_path / "out-empty.mka"
+        result = self.run_ffcut(
+            str(self.source), "1.2", "3.1", "--no-video", "--no-audio", "--no-subs", "--no-data",
+            "--no-play", str(out),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nothing to cut", result.stderr)
 
     def test_end_must_be_after_start(self) -> None:
         out = self.tmp_path / "bad.mp4"
