@@ -34,7 +34,7 @@ No install step beyond having `ffmpeg` on `PATH`. Basic run:
 ffcut video.mp4 10.250 130.750
 ```
 
-This writes `video - cut.mp4` next to the source and, if `mpv` is installed, opens it when done.
+This writes `video_ffcut.mp4` next to the source and, if `mpv` is installed, opens it when done.
 
 ## Common Usage Examples
 
@@ -88,7 +88,7 @@ ffcut video.mp4 10 60 --no-video audio-clip.m4a
 
 ## Important Behavior / Defaults
 
-- default output path is `<name> - cut.<ext>` next to the source, unless a fourth argument is given
+- default output path is `<name>_ffcut.<ext>` next to the source, unless a fourth argument is given
 - `START`/`END` accept plain seconds, `HH:MM:SS(.mmm)`, `MM:SS(.mmm)`, the literal `start`/`end` (or `s`/`e`), or a negative number meaning "this many seconds before the end"
 - if `END` lands within 250ms past the source's actual duration, it's silently snapped to the exact end instead of erroring
 - `--no-verify` skips the post-splice decode check (faster, but a bad smart splice could slip through)

@@ -418,11 +418,11 @@ class FfcutMiscTest(unittest.TestCase):
 
     def test_default_output_path(self) -> None:
         result = self.ffcut.default_output_path(Path("/videos/clip.mp4"))
-        self.assertEqual(result, Path("/videos/clip - cut.mp4"))
+        self.assertEqual(result, Path("/videos/clip_ffcut.mp4"))
 
     def test_default_output_path_no_extension(self) -> None:
         result = self.ffcut.default_output_path(Path("/videos/clip"))
-        self.assertEqual(result, Path("/videos/clip - cut.mkv"))
+        self.assertEqual(result, Path("/videos/clip_ffcut.mkv"))
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe not available")
