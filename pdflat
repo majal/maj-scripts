@@ -17,12 +17,12 @@ echo -e "\e[1m\e[32mPress [Enter] to continue... \e[31m[Ctrl+C to cancel]\e[0m"
 read
 printf "Flattening... "
 
-for a in "$@"; do mv "${a}" "${dir}/${a}"; done
+for a in "$@"; do mv "${a}" "${dir}/$(basename "${a}")"; done
 
-for b in "${dir}/"*".pdf"; do
+for a in "$@"; do
   cc=$((cc+1))
   printf "\rFlattening... $cc of $c"
-  gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -dPreserveAnnots=false -sOutputFile="$(basename "${b}")" "$b"
+  gs -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOCACHE -sDEVICE=pdfwrite -dPreserveAnnots=false -sOutputFile="${a}" "${dir}/$(basename "${a}")"
 done
 
 echo ". Done."
@@ -34,7 +34,7 @@ echo -ne "\e[32mMove ${dir} to \"orig\" folder? [y/N] \e[0m"
 read yn
 echo
 
-[[ "${yn,,}" == y* ]] && {
+[[ "${yn}" == [Yy]* ]] && {
   [ -d orig ] || mkdir orig
   rsync -a "${dir}/" orig/ && rm -r "${dir}"
   echo "Moved ${dir} to orig, done."
