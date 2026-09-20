@@ -100,6 +100,21 @@ When adding a new top-level script to the repo:
 
 Do not add a new script without updating the README.
 
+## Bash Script Portability Rule
+
+New or edited bash scripts use `#!/usr/bin/env bash`, not `#!/bin/bash`.
+
+macOS ships bash 3.2 as `/bin/bash` (Apple hasn't updated it since the
+GPLv2/v3 license change), while Homebrew's modern bash sits ahead of it
+on `$PATH` on this user's Mac. `#!/bin/bash` hardcodes the ancient one
+and silently breaks bash 4+ syntax (`${var,,}`) and even some `echo -e`
+escape sequences (`\e` is not recognized by bash 3.2's builtin `echo`,
+so `echo -e "\e[1mBold\e[0m"` prints the literal escape text instead of
+formatting — confirmed 2026-09-20 via `pdflat`). `#!/usr/bin/env bash`
+resolves through `$PATH` to Homebrew's bash on macOS and to the normal
+modern bash on Linux, matching the shebang the `bin` repo already uses
+for the large majority of its bash scripts.
+
 ## Test Rules
 
 Run `python3 -m tests` before pushing changes that affect scripts, tests, or README/AGENTS documentation. On Windows, use `py -m tests`.
