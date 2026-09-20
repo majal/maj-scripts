@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 dir="$(mktemp -ud | sed 's/tmp\./pdflat./')"
 [ -d "${dir}" ] || mkdir "${dir}"

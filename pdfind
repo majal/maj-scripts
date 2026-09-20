@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Find search terms inside PDFs. Regex supported.
 # May be used with nautilus-actions.

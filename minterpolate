@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Multicore minterpolate in ffmpeg
 # Just slice & process & concat
