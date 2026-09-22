@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""thumb: batch thumbnail generator for images and videos.
+
+Features
+--------
+- Preserves aspect ratio; neither dimension exceeds --size.
+- Default output directory is ./thumbnails.
+- Default output format is JPEG for broad compatibility.
+- Images are auto-oriented from EXIF metadata.
+- Videos prefer embedded artwork by default.
+- Otherwise, samples nearly the whole timeline and lets FFmpeg choose a
+  representative frame, then compares it with fallback timestamps to avoid
+  black/blank selections.
+- Optional recursive scan, include/exclude globs, mtime-only rebuilds,
+  parallel jobs, artwork-only mode, custom suffixes, and dry-run.
+- Uses only Python's standard library plus ffmpeg/ffprobe/ImageMagick.
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import fnmatch
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Optional
+
+IMAGE_EXTS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".avif", ".heic", ".heif",
+    ".tif", ".tiff", ".bmp", ".gif", ".jxl",
+}
+VIDEO_EXTS = {
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpg", ".mpeg",
+    ".mts", ".m2ts", ".ts", ".3gp", ".wmv", ".flv", ".ogv",
+}
+SUPPORTED_OUTPUTS = ("jpg", "jpeg", "png", "webp", "avif")
+
+
+@dataclass
+class Result:
+    status: str
+    src: Path
+    dst: Optional[Path] = None
+    reason: str = ""
+
+
+class SkipMedia(Exception):
+    pass
+
+
+def eprint(*args: object) -> None:
+    print(*args, file=sys.stderr)
+
+
+def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+
+def require_tools() -> None:
+    missing = [x for x in ("ffmpeg", "ffprobe", "magick") if shutil.which(x) is None]
+    if missing:
+        raise SystemExit(
+            "Missing required command(s): "
+            + ", ".join(missing)
+            + "\nOn macOS: brew install ffmpeg imagemagick"
+        )
+
+
+def probe_video(path: Path) -> tuple[Optional[float], Optional[int]]:
+    """Return (duration_seconds, attached_picture_stream_index)."""
+    cp = run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_streams", "-show_format",
+            "-of", "json",
+            str(path),
+        ],
+        capture=True,
+    )
+    data = json.loads(cp.stdout)
+
+    duration: Optional[float] = None
+    raw_duration = data.get("format", {}).get("duration")
+    try:
+        if raw_duration is not None:
+            d = float(raw_duration)
+            if math.isfinite(d) and d > 0:
+                duration = d
+    except (TypeError, ValueError):
+        pass
+
+    attached: Optional[int] = None
+    for stream in data.get("streams", []):
+        if stream.get("codec_type") != "video":
+            continue
+        if stream.get("disposition", {}).get("attached_pic") == 1:
+            try:
+                attached = int(stream["index"])
+                break
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    return duration, attached
+
+
+def magick_thumb(src: Path, dst: Path, size: int, quality: int, outfmt: str) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    source = f"{src}[0]"
+
+    cmd = [
+        "magick", source,
+        "-auto-orient",
+        "-thumbnail", f"{size}x{size}>",
+        "-strip",
+    ]
+
+    if outfmt in {"jpg", "jpeg"}:
+        cmd += [
+            "-background", "white",
+            "-alpha", "remove",
+            "-alpha", "off",
+            "-interlace", "Plane",
+            "-quality", str(quality),
+        ]
+    elif outfmt in {"webp", "avif"}:
+        cmd += ["-quality", str(quality)]
+    elif outfmt == "png":
+        cmd += ["-define", "png:compression-level=9"]
+
+    cmd.append(str(dst))
+    run(cmd)
+
+
+def extract_attached_art(video: Path, stream_index: int, dst: Path) -> None:
+    run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-nostdin", "-y",
+            "-i", str(video),
+            "-map", f"0:{stream_index}",
+            "-frames:v", "1",
+            str(dst),
+        ]
+    )
+
+
+def extract_frame(video: Path, timestamp: float, dst: Path) -> None:
+    run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-nostdin", "-y",
+            "-ss", f"{max(0.0, timestamp):.3f}",
+            "-i", str(video),
+            "-frames:v", "1",
+            str(dst),
+        ]
+    )
+
+
+def extract_representative(video: Path, duration: float, dst: Path, samples: int) -> None:
+    """Sample nearly the whole video and let FFmpeg choose a representative frame."""
+    if duration <= 1.0:
+        extract_frame(video, duration * 0.5, dst)
+        return
+
+    start = min(duration * 0.05, 30.0)
+    end_margin = min(duration * 0.05, 30.0)
+    end = max(start + 0.1, duration - end_margin)
+    span = max(0.1, end - start)
+
+    n = max(12, min(samples, int(max(12.0, span * 2.0))))
+    fps = n / span
+    vf = (
+        f"trim=start={start:.6f}:end={end:.6f},"
+        "setpts=PTS-STARTPTS,"
+        f"fps={fps:.8f},"
+        f"thumbnail={n}"
+    )
+
+    run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-nostdin", "-y",
+            "-i", str(video),
+            "-vf", vf,
+            "-frames:v", "1",
+            str(dst),
+        ]
+    )
+
+
+def image_score(path: Path) -> float:
+    """Prefer non-blank frames with visual detail and sane brightness."""
+    cp = run(
+        [
+            "magick", str(path),
+            "-auto-orient",
+            "-resize", "64x64!",
+            "-colorspace", "Gray",
+            "-format", "%[fx:mean] %[fx:standard_deviation] %[entropy]",
+            "info:",
+        ],
+        capture=True,
+    )
+    parts = cp.stdout.strip().split()
+    if len(parts) != 3:
+        return -1e9
+
+    try:
+        mean, stdev, entropy = map(float, parts)
+    except ValueError:
+        return -1e9
+
+    score = entropy * 2.0 + stdev * 0.8
+    if mean < 0.06:
+        score -= (0.06 - mean) * 20.0 + 2.0
+    elif mean < 0.14:
+        score -= (0.14 - mean) * 4.0
+    if mean > 0.96:
+        score -= (mean - 0.96) * 20.0 + 2.0
+    elif mean > 0.90:
+        score -= (mean - 0.90) * 4.0
+    return score
+
+
+def choose_video_frame(video: Path, duration: float, workdir: Path, samples: int) -> Path:
+    candidates: list[tuple[Path, float]] = []
+
+    representative = workdir / "representative.jpg"
+    try:
+        extract_representative(video, duration, representative, samples)
+        candidates.append((representative, image_score(representative) + 0.30))
+    except subprocess.CalledProcessError:
+        pass
+
+    for i, frac in enumerate((0.18, 0.32, 0.50, 0.68, 0.82), start=1):
+        candidate = workdir / f"fallback-{i}.jpg"
+        try:
+            extract_frame(video, duration * frac, candidate)
+            bias = 0.05 if frac == 0.50 else 0.0
+            candidates.append((candidate, image_score(candidate) + bias))
+        except subprocess.CalledProcessError:
+            pass
+
+    if not candidates:
+        raise RuntimeError("FFmpeg could not extract any usable video frame")
+
+    return max(candidates, key=lambda item: item[1])[0]
+
+
+def video_thumb(
+    src: Path,
+    dst: Path,
+    size: int,
+    quality: int,
+    samples: int,
+    prefer_artwork: bool,
+    artwork_only: bool,
+    outfmt: str,
+) -> None:
+    duration, attached = probe_video(src)
+
+    if artwork_only and attached is None:
+        raise SkipMedia("video has no embedded artwork")
+
+    with tempfile.TemporaryDirectory(prefix="thumb-") as td:
+        workdir = Path(td)
+
+        if (prefer_artwork or artwork_only) and attached is not None:
+            artwork = workdir / "artwork.png"
+            try:
+                extract_attached_art(src, attached, artwork)
+                magick_thumb(artwork, dst, size, quality, outfmt)
+                return
+            except subprocess.CalledProcessError:
+                if artwork_only:
+                    raise RuntimeError("embedded artwork exists but could not be extracted")
+
+        if artwork_only:
+            raise SkipMedia("video has no usable embedded artwork")
+
+        if duration is None:
+            frame = workdir / "frame.jpg"
+            extract_frame(src, 10.0, frame)
+        else:
+            frame = choose_video_frame(src, duration, workdir, samples)
+
+        magick_thumb(frame, dst, size, quality, outfmt)
+
+
+def pattern_matches(path: Path, root: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    rel = path.relative_to(root).as_posix().lower()
+    name = path.name.lower()
+    return any(
+        fnmatch.fnmatchcase(rel, pat.lower()) or fnmatch.fnmatchcase(name, pat.lower())
+        for pat in patterns
+    )
+
+
+def iter_media(
+    root: Path,
+    recursive: bool,
+    outdir: Path,
+    includes: list[str],
+    excludes: list[str],
+) -> Iterable[Path]:
+    it = root.rglob("*") if recursive else root.iterdir()
+    out_resolved = outdir.resolve()
+
+    for path in it:
+        if not path.is_file():
+            continue
+
+        try:
+            resolved = path.resolve()
+            if out_resolved == resolved.parent or out_resolved in resolved.parents:
+                continue
+        except OSError:
+            pass
+
+        ext = path.suffix.lower()
+        if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
+            continue
+
+        if includes and not pattern_matches(path, root, includes):
+            continue
+        if excludes and pattern_matches(path, root, excludes):
+            continue
+
+        yield path
+
+
+def output_for(
+    src: Path,
+    root: Path,
+    outdir: Path,
+    recursive: bool,
+    outfmt: str,
+    suffix: str,
+) -> Path:
+    ext = ".jpg" if outfmt == "jpeg" else f".{outfmt}"
+    name = f"{src.name}{suffix}{ext}"
+    if recursive:
+        rel_parent = src.parent.relative_to(root)
+        return outdir / rel_parent / name
+    return outdir / name
+
+
+def should_process(src: Path, dst: Path, *, force: bool, mtime_only: bool) -> tuple[bool, str]:
+    if force:
+        return True, ""
+    if not dst.exists():
+        return True, ""
+    if mtime_only:
+        try:
+            if src.stat().st_mtime > dst.stat().st_mtime:
+                return True, ""
+            return False, "thumbnail is newer than source"
+        except OSError:
+            return True, ""
+    return False, "thumbnail already exists"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="thumb",
+        description=(
+            "Create aspect-ratio-preserving thumbnails for images and videos.\n"
+            "Videos prefer embedded artwork by default; otherwise FFmpeg chooses\n"
+            "a representative frame from across nearly the whole timeline."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  thumb\n"
+            "  thumb ~/Pictures\n"
+            "  thumb -r ~/Media\n"
+            "  thumb -r --include '*.jpg' --include '*.mp4' ~/Media\n"
+            "  thumb -r --exclude 'cache/*' --exclude '*-preview.*' ~/Media\n"
+            "  thumb --mtime-only ~/Pictures\n"
+            "  thumb -j 4 -r ~/Media\n"
+            "  thumb --artwork-only ~/Videos\n"
+            "  thumb --no-artwork ~/Videos\n"
+            "  thumb --suffix=-thumb ~/Pictures\n"
+            "  thumb --format webp --quality 80 .\n"
+            "  thumb --dry-run -r .\n"
+            "\n"
+            "Naming:\n"
+            "  By default the original extension is retained in the basename to\n"
+            "  avoid collisions. Example: photo.png -> photo.png.jpg.\n"
+            "  --suffix=-thumb gives photo.png-thumb.jpg.\n"
+            "\n"
+            "Defaults:\n"
+            "  input directory : .\n"
+            "  output directory: ./thumbnails\n"
+            "  maximum size    : 256 px\n"
+            "  output format   : jpg\n"
+            "  quality         : 85\n"
+            "  jobs            : 1\n"
+            "\n"
+            "Requirements:\n"
+            "  ffmpeg, ffprobe, ImageMagick ('magick')\n"
+            "  macOS: brew install ffmpeg imagemagick"
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=".",
+        help="directory to scan (default: .)",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default="thumbnails",
+        metavar="DIR",
+        help=(
+            "output directory; relative paths are created inside PATH "
+            "(default: thumbnails)"
+        ),
+    )
+    parser.add_argument(
+        "-s", "--size",
+        type=int,
+        default=256,
+        metavar="PX",
+        help="maximum width or height in pixels (default: 256)",
+    )
+    parser.add_argument(
+        "-q", "--quality",
+        type=int,
+        default=85,
+        metavar="N",
+        help="quality for jpg/webp/avif, 1-100 (default: 85)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=SUPPORTED_OUTPUTS,
+        default="jpg",
+        help="thumbnail output format (default: jpg)",
+    )
+    parser.add_argument(
+        "--suffix",
+        default="",
+        metavar="TEXT",
+        help=(
+            "text appended after the source filename and before the output extension "
+            "(default: none)"
+        ),
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=120,
+        metavar="N",
+        help=(
+            "maximum whole-video samples considered by FFmpeg's representative-frame "
+            "selector (default: 120; minimum: 12)"
+        ),
+    )
+    parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="scan subdirectories and mirror their layout under the output directory",
+    )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "process only paths matching this glob; may be repeated. "
+            "Matches basename or path relative to PATH"
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "skip paths matching this glob; may be repeated. "
+            "Exclusions override inclusions"
+        ),
+    )
+
+    rebuild = parser.add_mutually_exclusive_group()
+    rebuild.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="recreate thumbnails even when output files already exist",
+    )
+    rebuild.add_argument(
+        "--mtime-only",
+        action="store_true",
+        help=(
+            "create missing thumbnails and rebuild existing ones only when the "
+            "source file is newer"
+        ),
+    )
+
+    artwork = parser.add_mutually_exclusive_group()
+    artwork.add_argument(
+        "--no-artwork",
+        action="store_true",
+        help="ignore embedded video artwork and always choose a frame from the video",
+    )
+    artwork.add_argument(
+        "--artwork-only",
+        action="store_true",
+        help=(
+            "for videos, create thumbnails only from embedded artwork; "
+            "videos without artwork are skipped"
+        ),
+    )
+
+    parser.add_argument(
+        "-j", "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "number of files to process in parallel; 0 = auto "
+            "(default: 1)"
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what would be created or skipped without writing files",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress per-file OK/SKIP lines; failures and final summary remain",
+    )
+
+    return parser
+
+
+def process_one(
+    src: Path,
+    *,
+    root: Path,
+    outdir: Path,
+    recursive: bool,
+    outfmt: str,
+    suffix: str,
+    size: int,
+    quality: int,
+    samples: int,
+    prefer_artwork: bool,
+    artwork_only: bool,
+    force: bool,
+    mtime_only: bool,
+    dry_run: bool,
+) -> Result:
+    dst = output_for(src, root, outdir, recursive, outfmt, suffix)
+    do_it, reason = should_process(src, dst, force=force, mtime_only=mtime_only)
+
+    if not do_it:
+        return Result("skip", src, dst, reason)
+
+    if dry_run:
+        return Result("dry", src, dst, "would create")
+
+    try:
+        if src.suffix.lower() in IMAGE_EXTS:
+            magick_thumb(src, dst, size, quality, outfmt)
+        else:
+            video_thumb(
+                src,
+                dst,
+                size,
+                quality,
+                samples,
+                prefer_artwork=prefer_artwork,
+                artwork_only=artwork_only,
+                outfmt=outfmt,
+            )
+        return Result("ok", src, dst)
+    except SkipMedia as exc:
+        return Result("skip", src, dst, str(exc))
+    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
+        return Result("fail", src, dst, str(exc))
+
+
+def show_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    require_tools()
+
+    root = Path(args.path).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"not a directory: {root}")
+    if args.size < 1:
+        parser.error("--size must be >= 1")
+    if not 1 <= args.quality <= 100:
+        parser.error("--quality must be 1..100")
+    if args.samples < 12:
+        parser.error("--samples must be >= 12")
+    if args.jobs < 0:
+        parser.error("--jobs must be >= 0")
+
+    outdir_arg = Path(args.output).expanduser()
+    outdir = outdir_arg if outdir_arg.is_absolute() else root / outdir_arg
+
+    if args.jobs == 0:
+        jobs = min(8, max(1, os.cpu_count() or 1))
+    else:
+        jobs = args.jobs
+
+    if not args.dry_run:
+        outdir.mkdir(parents=True, exist_ok=True)
+
+    media = list(
+        iter_media(
+            root,
+            args.recursive,
+            outdir,
+            args.include,
+            args.exclude,
+        )
+    )
+
+    common = dict(
+        root=root,
+        outdir=outdir,
+        recursive=args.recursive,
+        outfmt=args.format,
+        suffix=args.suffix,
+        size=args.size,
+        quality=args.quality,
+        samples=args.samples,
+        prefer_artwork=not args.no_artwork,
+        artwork_only=args.artwork_only,
+        force=args.force,
+        mtime_only=args.mtime_only,
+        dry_run=args.dry_run,
+    )
+
+    results: list[Result] = []
+
+    if jobs == 1:
+        for src in media:
+            results.append(process_one(src, **common))
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+            future_map = {
+                executor.submit(process_one, src, **common): src
+                for src in media
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                src = future_map[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:  # defensive: worker should normally convert errors
+                    results.append(Result("fail", src, reason=str(exc)))
+
+    created = skipped = failed = dry = 0
+
+    for result in results:
+        if result.status == "ok":
+            created += 1
+            if not args.quiet:
+                print(f"OK    {result.src.name} -> {show_path(result.dst, root)}")
+        elif result.status == "dry":
+            dry += 1
+            if not args.quiet:
+                print(f"DRY   {result.src.name} -> {show_path(result.dst, root)}")
+        elif result.status == "skip":
+            skipped += 1
+            if not args.quiet:
+                suffix = f" ({result.reason})" if result.reason else ""
+                print(f"SKIP  {result.src.name}{suffix}")
+        else:
+            failed += 1
+            eprint(f"FAIL  {result.src}: {result.reason}")
+
+    if args.dry_run:
+        print(f"Done: {dry} would create, {skipped} skipped, {failed} failed")
+    else:
+        print(f"Done: {created} created, {skipped} skipped, {failed} failed")
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
