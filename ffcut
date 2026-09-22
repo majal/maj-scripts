@@ -22,6 +22,13 @@ video segment, while other streams are still copied.
 
 Containers: MP4, M4V, MOV, MKV, WebM, TS, M2TS, etc., subject to FFmpeg
 muxer support.
+
+Audio compatibility:
+    Audio remains stream-copied. By default, negative seek-preroll packets are
+    dropped so cuts do not depend on player support for long MP4 edit-list /
+    Skip Samples preroll. This can move the audio start by less than one encoded
+    audio packet. Use --exact-audio-copy to keep the old sample-exact metadata-
+    based behavior when the target players are known to handle it correctly.
 """
 
 from __future__ import annotations
@@ -488,6 +495,7 @@ class Context:
     codec_tag: str
     time_base: str
     rotation: Decimal
+    exact_audio_copy: bool = False
 
 
 ###############################################################################
@@ -794,6 +802,17 @@ def build_final_mux_cmd(
     for i in range(1, len(covers) + 1):
         cmd += [f"-disposition:v:{i}", "attached_pic"]
 
+    # Input-side -ss on a multiplexed file may seek via a video keyframe.
+    # Stream-copied audio can therefore arrive with a large negative preroll
+    # and rely on MP4 edit-list / Skip Samples metadata for exact trimming.
+    # Some players mishandle that metadata and play the preroll, causing an
+    # obvious A/V offset.  By default, drop only negative audio packets.  This
+    # keeps the encoded audio bitstream untouched and trades sample-exactness
+    # at the very first packet for broad player compatibility (normally <= one
+    # encoded audio packet).  --exact-audio-copy restores the old behavior.
+    if not drop.audio and not ctx.exact_audio_copy:
+        cmd += ["-bsf:a", "noise=drop='lt(pts,0)'"]
+
     # Bound copied auxiliary streams to the requested output length.
     cmd += ["-t", fmt_time(cut_duration)]
 
@@ -821,6 +840,7 @@ def build_no_video_mux_cmd(
     out_ext_lc: str,
     final_tmp: Path,
     drop: DropOpts,
+    exact_audio_copy: bool = False,
 ) -> list[str]:
     """Extract only the non-video streams. There's no GOP to splice around
     without a video stream, so this is just a seek + stream-copy of the
@@ -847,6 +867,11 @@ def build_no_video_mux_cmd(
     cmd += ["-copy_unknown", "-map_metadata", "1"]
     cmd += ["-map_chapters", str(chapter_input) if chapter_input >= 0 else "-1"]
     cmd += ["-c", "copy"]
+
+    # See build_final_mux_cmd(): avoid large negative audio preroll by
+    # default when doing a stream-copy cut.
+    if not drop.audio and not exact_audio_copy:
+        cmd += ["-bsf:a", "noise=drop='lt(pts,0)'"]
 
     # Bound copied streams to the requested output length.
     cmd += ["-t", fmt_time(cut_duration)]
@@ -933,6 +958,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--no-video", "-vn", action="store_true", help="Drop the video stream and extract only the other streams (like ffmpeg's -vn)")
     parser.add_argument("--no-audio", "-an", action="store_true", help="Drop all audio streams (like ffmpeg's -an)")
+    parser.add_argument(
+        "--exact-audio-copy",
+        action="store_true",
+        help=(
+            "Preserve sample-exact stream-copied audio using preroll/edit-list metadata. "
+            "Default drops negative preroll for better compatibility with players that "
+            "mishandle MP4 edit lists (usually sacrificing less than one audio packet at the start)."
+        ),
+    )
     parser.add_argument("--no-subs", "-sn", action="store_true", help="Drop all subtitle streams (like ffmpeg's -sn)")
     parser.add_argument("--no-data", "-dn", action="store_true", help="Drop timed data streams (like ffmpeg's -dn)")
     parser.add_argument("--no-cover", action="store_true", help="Drop attached cover art")
@@ -1037,6 +1071,11 @@ def _run_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path
         if codec == "hevc" and not bsf_exists("hevc_mp4toannexb"):
             smart_capable = False
 
+    exact_audio_copy = opts.exact_audio_copy
+    if not opts.no_audio and not exact_audio_copy and not bsf_exists("noise"):
+        warn("FFmpeg 'noise' bitstream filter is unavailable; preserving exact audio preroll/edit-list behavior.")
+        exact_audio_copy = True
+
     ctx = Context(
         input=input_path,
         codec=codec,
@@ -1049,6 +1088,7 @@ def _run_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path
         codec_tag=vstream.get("codec_tag_string") or "",
         time_base=vstream.get("time_base") or "",
         rotation=video_rotation(vstream),
+        exact_audio_copy=exact_audio_copy,
     )
 
     tmpdir = Path(tempfile.mkdtemp(dir=out_dir, prefix=f".{PROG}."))
@@ -1175,7 +1215,14 @@ def _run_no_video_cut(opts: argparse.Namespace, input_path: Path, output_path: P
             cover=True,
             attachments=opts.no_attachments,
         )
-        mux_cmd = build_no_video_mux_cmd(input_path, input_probe, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp, drop)
+        exact_audio_copy = opts.exact_audio_copy
+        if not opts.no_audio and not exact_audio_copy and not bsf_exists("noise"):
+            warn("FFmpeg 'noise' bitstream filter is unavailable; preserving exact audio preroll/edit-list behavior.")
+            exact_audio_copy = True
+        mux_cmd = build_no_video_mux_cmd(
+            input_path, input_probe, start_sec, cut_duration, chapters_meta,
+            out_ext_lc, final_tmp, drop, exact_audio_copy=exact_audio_copy
+        )
         run_ffmpeg(mux_cmd)
 
         if not final_tmp.exists() or final_tmp.stat().st_size == 0:
