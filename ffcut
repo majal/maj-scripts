@@ -185,6 +185,20 @@ def attachment_count(probe: dict) -> int:
     return len(streams_by_type(probe, "attachment"))
 
 
+def passthrough_stream_metadata(probe: dict, input_index: int, drop: "DropOpts") -> list[str]:
+    """Carry each kept audio/subtitle stream's own tags (language, title)
+    across. Once -map_metadata names a global source, ffmpeg stops copying
+    per-stream tags, so a cut file lost e.g. 'tgl' (Tagalog audio) and 'eng'
+    (English subs) and showed 'und'."""
+    args: list[str] = []
+    for kind, dropped, spec in (("audio", drop.audio, "a"), ("subtitle", drop.subs, "s")):
+        if dropped:
+            continue
+        for n, _ in enumerate(streams_by_type(probe, kind)):
+            args += [f"-map_metadata:s:{spec}:{n}", f"{input_index}:s:{spec}:{n}"]
+    return args
+
+
 def data_stream_indexes_to_copy(probe: dict) -> list[int]:
     """MP4 chapter tracks are regenerated from chapter metadata, not copied."""
     indexes = []
@@ -794,6 +808,7 @@ def build_final_mux_cmd(
     cmd += ["-copy_unknown", "-map_metadata", "2"]
     if ctx.v_index is not None:
         cmd += ["-map_metadata:s:v:0", f"2:s:{ctx.v_index}"]
+    cmd += passthrough_stream_metadata(input_probe, 1, drop)
 
     cmd += ["-map_chapters", str(chapter_input) if chapter_input >= 0 else "-1"]
     cmd += ["-c", "copy"]
@@ -865,6 +880,7 @@ def build_no_video_mux_cmd(
         cmd += ["-map", "1:t?"]
 
     cmd += ["-copy_unknown", "-map_metadata", "1"]
+    cmd += passthrough_stream_metadata(input_probe, 0, drop)
     cmd += ["-map_chapters", str(chapter_input) if chapter_input >= 0 else "-1"]
     cmd += ["-c", "copy"]
 
