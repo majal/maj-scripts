@@ -604,3 +604,21 @@ class FfcutSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FfcutStreamMetadataTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    probe = {"streams": [{"codec_type": "video"}, {"codec_type": "audio"}, {"codec_type": "audio"}, {"codec_type": "subtitle"}]}
+
+    def test_each_kept_audio_and_subtitle_stream_gets_its_tags_mapped(self) -> None:
+        args = self.ffcut.passthrough_stream_metadata(self.probe, 1, self.ffcut.DropOpts())
+        self.assertEqual(args, [
+            "-map_metadata:s:a:0", "1:s:a:0", "-map_metadata:s:a:1", "1:s:a:1", "-map_metadata:s:s:0", "1:s:s:0",
+        ])
+
+    def test_dropped_stream_kinds_are_skipped(self) -> None:
+        args = self.ffcut.passthrough_stream_metadata(self.probe, 0, self.ffcut.DropOpts(audio=True))
+        self.assertEqual(args, ["-map_metadata:s:s:0", "0:s:s:0"])
