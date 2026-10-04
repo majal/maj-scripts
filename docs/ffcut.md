@@ -99,6 +99,8 @@ ffcut video.mp4 10 60 --no-video audio-clip.m4a
 - `--no-video`/`-vn`, `--no-audio`/`-an`, `--no-subs`/`-sn`, and `--no-data`/`-dn` mirror ffmpeg's own flags of the same name and drop those stream categories entirely from the output; `--no-cover` drops attached cover art, `--no-attachments` drops Matroska attachments (fonts, XML, etc.), and `--no-chapters` drops chapters
 - `--no-video` skips the GOP-aware splice pipeline entirely (there's no video left to splice around) and just seeks and stream-copies whatever else you kept - it also implies dropping cover art, since that's a video stream too. Combining it with `--no-audio`, `--no-subs`, and `--no-data` all at once is rejected, since nothing would be left to write
 
+- If [jwkit](https://github.com/majal/jwkit) is installed (its `jwkit-provenance` on `PATH`, or in `~/dig/jwkit`), each cut also records, **inside the output file**, how it was made: the source (name, size, MD5), the time window, whether the cut was a stream copy or re-encoded, the exact `ffcut ...` command, and ffcut's git commit. It is a small extra box/tag - the streams are untouched - and ffcut's behavior is identical without jwkit. `--provenance beside` writes a `<output>.jwkit.json` instead, `--provenance folder` (with `--provenance-dir`) keeps it in a separate folder, `--provenance none` skips it; the default is jwkit's `provenance_mode` (embed). Read it with `jwkit-provenance show <file>`.
+
 ## Notes / Caveats
 
 - exactly one non-cover-art video stream is required; files with zero or multiple primary video streams are rejected

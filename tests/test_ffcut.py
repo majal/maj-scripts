@@ -622,3 +622,40 @@ class FfcutStreamMetadataTest(unittest.TestCase):
     def test_dropped_stream_kinds_are_skipped(self) -> None:
         args = self.ffcut.passthrough_stream_metadata(self.probe, 0, self.ffcut.DropOpts(audio=True))
         self.assertEqual(args, ["-map_metadata:s:s:0", "0:s:s:0"])
+
+
+class FfcutProvenanceHookTest(unittest.TestCase):
+    """If jwkit's `jwkit-provenance` is installed, ffcut records the cut; if not, nothing happens."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    def opts(self, argv, **overrides):
+        opts = self.ffcut.build_arg_parser().parse_args(argv)
+        opts._argv = argv
+        for key, value in overrides.items():
+            setattr(opts, key, value)
+        return opts
+
+    def test_records_source_window_command_and_settings(self) -> None:
+        from unittest import mock
+        argv = ["in.mp4", "10", "20", "--no-audio", "--provenance", "beside"]
+        with mock.patch.object(self.ffcut, "find_jwkit_provenance", return_value="/x/jwkit-provenance"), \
+             mock.patch.object(self.ffcut.subprocess, "run") as run:
+            self.ffcut.record_provenance(self.opts(argv), Path("in.mp4"), Path("out.mp4"), Decimal("10"), Decimal("20"), video_codec="h264", smart_cut=True)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:3], ["/x/jwkit-provenance", "record", "out.mp4"])
+        self.assertEqual(cmd[cmd.index("--tool") + 1], "ffcut")
+        self.assertEqual(cmd[cmd.index("--source") + 1], "in.mp4")
+        self.assertEqual(cmd[cmd.index("--window") + 1], "10.000000000-20.000000000")
+        self.assertEqual(cmd[cmd.index("--command") + 1], "ffcut in.mp4 10 20 --no-audio --provenance beside")
+        self.assertEqual(cmd[cmd.index("--provenance") + 1], "beside")
+        settings = json.loads(cmd[cmd.index("--settings-json") + 1])
+        self.assertEqual((settings["video_codec"], settings["smart_cut"], settings["no_audio"]), ("h264", True, True))
+
+    def test_does_nothing_when_jwkit_is_not_installed(self) -> None:
+        from unittest import mock
+        with mock.patch.object(self.ffcut, "find_jwkit_provenance", return_value=None), mock.patch.object(self.ffcut.subprocess, "run") as run:
+            self.ffcut.record_provenance(self.opts(["in.mp4", "1", "2"]), Path("in.mp4"), Path("out.mp4"), Decimal("1"), Decimal("2"))
+        run.assert_not_called()
