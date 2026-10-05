@@ -231,6 +231,23 @@ class FfcutMuxCommandTest(unittest.TestCase):
         self.assertIn("infer_no_subs", cmd)
         self.assertNotIn("-movflags", cmd)
 
+    def test_video_offset_delays_only_the_video_input(self) -> None:
+        ctx = self._ctx()
+        cmd = self.ffcut.build_final_mux_cmd(
+            ctx, {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"),
+            video_offset=Decimal("0.02"),
+        )
+        i = cmd.index("-itsoffset")
+        self.assertEqual(cmd[i + 1], "0.020000000")
+        self.assertEqual(cmd[i + 2:i + 4], ["-i", "hybrid.ts"])
+        self.assertEqual(cmd.count("-itsoffset"), 1)
+
+    def test_no_video_offset_adds_no_itsoffset(self) -> None:
+        cmd = self.ffcut.build_final_mux_cmd(
+            self._ctx(), {"streams": []}, Path("hybrid.ts"), Decimal("1"), Decimal("5"), None, "mp4", Path("final.mp4"),
+        )
+        self.assertNotIn("-itsoffset", cmd)
+
     def test_chapters_meta_sets_map_chapters_to_third_extra_input(self) -> None:
         ctx = self._ctx()
         cmd = self.ffcut.build_final_mux_cmd(
@@ -470,6 +487,45 @@ class FfcutFrameBoundaryTest(unittest.TestCase):
         self.assertIsNone(self.ffcut.frames_in_window(ctx, Decimal("1"), Decimal("2")))
 
 
+class FfcutStartSyncTest(unittest.TestCase):
+    """The video begins on the first whole frame at/after START; --start-sync picks
+    how the rest of the streams are lined up with that."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    def resolve(self, mode, frames, start="1.01", end="2"):
+        from unittest import mock
+        with mock.patch.object(self.ffcut, "frames_in_window", return_value=frames):
+            return self.ffcut.resolve_start_sync(mock.Mock(), mode, Decimal(start), Decimal(end))
+
+    def test_default_is_frame(self) -> None:
+        opts = self.ffcut.build_arg_parser().parse_args(["in.mp4", "0", "1"])
+        self.assertEqual(opts.start_sync, "frame")
+
+    def test_frame_cuts_the_other_streams_at_the_first_frame(self) -> None:
+        self.assertEqual(self.resolve("frame", [Decimal("1.04")]), (Decimal("1.04"), Decimal(0)))
+
+    def test_audio_keeps_start_and_delays_the_video_by_the_gap(self) -> None:
+        self.assertEqual(self.resolve("audio", [Decimal("1.04")]), (Decimal("1.01"), Decimal("0.03")))
+
+    def test_off_changes_nothing(self) -> None:
+        self.assertEqual(self.resolve("off", [Decimal("1.04")]), (Decimal("1.01"), Decimal(0)))
+
+    def test_no_gap_when_start_is_on_a_frame(self) -> None:
+        for mode in ("frame", "audio", "off"):
+            self.assertEqual(self.resolve(mode, [Decimal("1.01")]), (Decimal("1.01"), Decimal(0)))
+
+    def test_unreadable_or_empty_frame_times_mean_no_correction(self) -> None:
+        for frames in (None, []):
+            for mode in ("frame", "audio"):
+                self.assertEqual(self.resolve(mode, frames), (Decimal("1.01"), Decimal(0)))
+
+    def test_a_frame_slightly_before_start_is_not_a_negative_gap(self) -> None:
+        self.assertEqual(self.resolve("audio", [Decimal("1.0098")]), (Decimal("1.01"), Decimal(0)))
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe not available")
 class FfcutSmokeTest(unittest.TestCase):
     """End-to-end run against a tiny synthetic H.264 clip. Slow-ish but the
@@ -688,6 +744,41 @@ class FfcutSmokeTest(unittest.TestCase):
         for end in ("2.0", "2.001", "2.01", "2.04", "2.5", "3.0", "3.96"):
             with self.subTest(end=end):
                 self.assert_cut_has_exactly_the_frames_in("0.5", end)
+
+    def stream_start_times(self, path: Path) -> dict[str, float]:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time", "-of", "json", str(path)],
+            capture_output=True, text=True, check=True,
+        )
+        return {s["codec_type"]: float(s["start_time"]) for s in json.loads(probe.stdout)["streams"]}
+
+    def test_start_sync_modes_line_up_audio_and_video_as_documented(self) -> None:
+        # 25fps, so frames are 0.04s apart: START 1.51 puts the first whole frame at 1.52,
+        # a 10ms gap. Frame start times are checked as the offset between the two streams.
+        results = {}
+        for mode in ("off", "audio", "frame"):
+            out = self.tmp_path / f"sync_{mode}.mp4"
+            out.unlink(missing_ok=True)
+            result = self.run_ffcut(str(self.source), "1.51", "3.0", "--no-play", "--no-subs", "--provenance", "none",
+                                    "--start-sync", mode, str(out))
+            self.assertEqual(result.returncode, 0, f"{mode}: {result.stderr}")
+            starts = self.stream_start_times(out)
+            results[mode] = starts["video"] - starts["audio"]
+        # frame: both begin together (within one audio packet); off: video runs early by the gap
+        self.assertAlmostEqual(results["frame"], 0, delta=0.025)
+        self.assertAlmostEqual(results["audio"] - results["off"], 0.01, delta=0.003)
+        self.assertGreater(results["audio"], results["off"])
+
+    def test_start_sync_frame_shortens_the_cut_by_the_gap_only(self) -> None:
+        out = self.tmp_path / "sync_len.mp4"
+        out.unlink(missing_ok=True)
+        result = self.run_ffcut(str(self.source), "1.51", "3.0", "--no-play", "--no-subs", "--provenance", "none", str(out))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertAlmostEqual(float(probe.stdout.strip(",\n ")), 1.48, delta=0.04)
 
     def test_window_with_no_safe_keyframe_inside_it(self) -> None:
         for start, end in (("1.1", "1.3"), ("1.01", "1.05"), ("1.2", "1.21")):

@@ -737,6 +737,36 @@ def encode_segment(ctx: Context, start: Decimal, end: Decimal, out: Path) -> Non
     run_ffmpeg(cmd)
 
 
+START_SYNC_CHOICES = ("frame", "audio", "off")
+
+
+def resolve_start_sync(
+    ctx: Context, mode: str, start_sec: Decimal, end_sec: Decimal
+) -> tuple[Decimal, Decimal]:
+    """Where the first video frame sits relative to the requested start. The video
+    segment begins on its first whole frame, which is up to one frame after START;
+    audio, subtitles and chapters are cut at exactly START. Returns
+    (aux_start, video_offset): where the non-video streams are cut, and how far the
+    video is delayed in the output, chosen by --start-sync:
+
+      off    (0, ...) the video begins at zero and the rest at START, so the video
+             runs early against the audio by the gap (what ffcut used to do);
+      audio  the rest are cut at START and the video is delayed by the gap -- in sync,
+             with a short empty lead-in on the video (an edit list in MP4);
+      frame  the rest are cut at the first frame instead -- in sync, nothing empty,
+             and the cut begins up to one frame after START.
+
+    The gap is unknown (so no correction is possible) when the frame timestamps
+    can't be read."""
+    frames = None if mode == "off" else frames_in_window(ctx, start_sec, end_sec)
+    if not frames:
+        return start_sec, Decimal(0)
+    gap = max(frames[0] - start_sec, Decimal(0))
+    if mode == "audio":
+        return start_sec, gap
+    return start_sec + gap, Decimal(0)
+
+
 def copy_middle(ctx: Context, start: Decimal, end: Decimal, out: Path) -> None:
     # A tiny nudge makes ffmpeg seek to the keyframe at/before "start".
     seek = start + NUDGE
@@ -862,6 +892,7 @@ def build_final_mux_cmd(
     out_ext_lc: str,
     final_tmp: Path,
     drop: Optional[DropOpts] = None,
+    video_offset: Decimal = Decimal(0),
 ) -> list[str]:
     drop = drop or DropOpts()
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y"]
@@ -869,6 +900,8 @@ def build_final_mux_cmd(
     if ctx.rotation != 0:
         cmd += ["-display_rotation:v:0", str(ctx.rotation)]
 
+    if video_offset > 0:
+        cmd += ["-itsoffset", fmt_time(video_offset)]
     cmd += ["-i", str(hybrid)]
     cmd += ["-ss", fmt_time(start_sec), "-i", str(ctx.input)]
     cmd += ["-i", str(ctx.input)]
@@ -1069,6 +1102,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Where jwkit records how the cut was made (needs jwkit's jwkit-provenance on PATH): inside the file, a .jwkit.json beside it, a separate folder, or nowhere. Default: jwkit's provenance_mode (embed)")
     parser.add_argument("--provenance-dir", default=None, help="Folder for --provenance folder (default: a hidden .jwkit folder beside the output)")
 
+    parser.add_argument(
+        "--start-sync", choices=START_SYNC_CHOICES, default="frame",
+        help="How to line up audio with video when START falls between frames (the video begins on its next whole frame): "
+             "'frame' (default) starts audio/subtitles/chapters on that frame too, so everything is in sync and the cut begins "
+             "up to one frame after START; 'audio' keeps the audio at exactly START and delays the video by the gap (in sync, "
+             "with a short empty lead-in on the video, stored as an MP4 edit list that some players ignore); 'off' leaves them "
+             "unaligned, so the video runs early by up to one frame (the old behavior)",
+    )
     parser.add_argument("--no-video", "-vn", action="store_true", help="Drop the video stream and extract only the other streams (like ffmpeg's -vn)")
     parser.add_argument("--no-audio", "-an", action="store_true", help="Drop all audio streams (like ffmpeg's -an)")
     parser.add_argument(
@@ -1139,7 +1180,7 @@ def record_provenance(opts: argparse.Namespace, input_path: Path, output_path: P
     if tool is None:
         return
     settings.update({key: value for key, value in vars(opts).items()
-                     if key.startswith(("no_", "h264_", "hevc_", "av1_", "vp9_", "vp8_", "mpeg", "prores_", "mjpeg_", "theora_", "exact_", "ra_"))
+                     if key.startswith(("no_", "start_sync", "h264_", "hevc_", "av1_", "vp9_", "vp8_", "mpeg", "prores_", "mjpeg_", "theora_", "exact_", "ra_"))
                      and value not in (False, None)})
     cmd = [tool, "record", str(output_path), "--tool", PROG, "--tool-file", str(Path(__file__).resolve()),
            "--source", str(input_path), "--window", f"{fmt_time(start_sec)}-{fmt_time(end_sec)}",
@@ -1284,7 +1325,9 @@ def _run_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path
                 else:
                     die("Encoded video failed verification")
 
-        chapters_meta = None if opts.no_chapters else build_chapters_meta(input_path, tmpdir, start_sec, end_sec)
+        aux_start, video_offset = resolve_start_sync(ctx, opts.start_sync, start_sec, end_sec)
+        aux_duration = end_sec - aux_start
+        chapters_meta = None if opts.no_chapters else build_chapters_meta(input_path, tmpdir, aux_start, end_sec)
 
         # Final mux
         input_probe = probe_all_streams(input_path)
@@ -1297,7 +1340,7 @@ def _run_video_cut(opts: argparse.Namespace, input_path: Path, output_path: Path
             cover=opts.no_cover,
             attachments=opts.no_attachments,
         )
-        mux_cmd = build_final_mux_cmd(ctx, input_probe, hybrid, start_sec, cut_duration, chapters_meta, out_ext_lc, final_tmp, drop)
+        mux_cmd = build_final_mux_cmd(ctx, input_probe, hybrid, aux_start, aux_duration, chapters_meta, out_ext_lc, final_tmp, drop, video_offset)
         run_ffmpeg(mux_cmd)
 
         if not final_tmp.exists() or final_tmp.stat().st_size == 0:
