@@ -425,6 +425,51 @@ class FfcutMiscTest(unittest.TestCase):
         self.assertEqual(result, Path("/videos/clip_ffcut.mkv"))
 
 
+class FfcutFrameBoundaryTest(unittest.TestCase):
+    """Cut boundaries sit midway between frames so 6-decimal timestamp rounding
+    and ffmpeg's own comparisons can't keep, drop or duplicate a boundary frame."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.ffcut = load_script_module("ffcut")
+
+    def ctx_with_frames(self, times):
+        from unittest import mock
+        ctx = mock.Mock(src_start_time=Decimal(0))
+        patcher = mock.patch.object(self.ffcut, "frame_times", return_value=[Decimal(t) for t in times])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return ctx
+
+    def test_boundary_is_midway_between_the_frames_either_side(self) -> None:
+        ctx = self.ctx_with_frames(["1.00", "1.04", "1.08", "1.12"])
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("1.08")), Decimal("1.06"))
+        # a time a hair before a frame still counts as that frame (typed-in frame time)
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("1.0799")), Decimal("1.06"))
+        # a time inside a frame's span belongs to the NEXT frame: [start, end) semantics
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("1.07")), Decimal("1.06"))
+
+    def test_boundary_before_first_and_after_last_frame(self) -> None:
+        ctx = self.ctx_with_frames(["1.00", "1.04", "1.08"])
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("0.5")), Decimal("0.98"))
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("5")), Decimal("1.10"))
+
+    def test_boundary_falls_back_when_frame_times_are_unreadable(self) -> None:
+        ctx = self.ctx_with_frames([])
+        self.assertEqual(self.ffcut.frame_boundary(ctx, Decimal("2")), Decimal("2") - self.ffcut.EQ_EPSILON)
+
+    def test_frames_in_window_is_half_open(self) -> None:
+        ctx = self.ctx_with_frames(["1.00", "1.04", "1.08", "1.12"])
+        window = lambda a, b: self.ffcut.frames_in_window(ctx, Decimal(a), Decimal(b))
+        self.assertEqual(window("1.04", "1.12"), [Decimal("1.04"), Decimal("1.08")])
+        self.assertEqual(window("1.01", "1.03"), [])  # narrower than a frame, none inside
+        self.assertEqual(window("1.03", "1.05"), [Decimal("1.04")])
+
+    def test_frames_in_window_is_none_when_unreadable(self) -> None:
+        ctx = self.ctx_with_frames([])
+        self.assertIsNone(self.ffcut.frames_in_window(ctx, Decimal("1"), Decimal("2")))
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe not available")
 class FfcutSmokeTest(unittest.TestCase):
     """End-to-end run against a tiny synthetic H.264 clip. Slow-ish but the
@@ -601,9 +646,53 @@ class FfcutSmokeTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--force", result.stderr)
 
+    def source_frame_times(self) -> list[float]:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(self.source)],
+            capture_output=True, text=True, check=True,
+        )
+        return sorted(float(line.strip(",")) for line in probe.stdout.split() if line)
 
-if __name__ == "__main__":
-    unittest.main()
+    def assert_cut_has_exactly_the_frames_in(self, start: str, end: str) -> None:
+        out = self.tmp_path / "frames.mp4"
+        out.unlink(missing_ok=True)
+        result = self.run_ffcut(str(self.source), start, end, "--no-play", "--no-audio", "--no-subs", "--provenance", "none", str(out))
+        self.assertEqual(result.returncode, 0, f"{start}-{end}: {result.stderr}")
+        expected = [t for t in self.source_frame_times() if float(start) - 0.0005 <= t < float(end) - 0.0005]
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(out)],
+            capture_output=True, text=True, check=True,
+        )
+        got = sorted(float(line.strip(",")) for line in probe.stdout.split() if line)
+        self.assertEqual(len(got), len(expected), f"{start}-{end}: frame count")
+        gaps = [round(b - a, 3) for a, b in zip(got, got[1:])]
+        self.assertTrue(all(abs(gap - 0.04) < 0.003 for gap in gaps), f"{start}-{end}: irregular frame spacing {gaps}")
+
+    def test_start_between_the_last_frame_before_a_keyframe_and_the_keyframe(self) -> None:
+        # Keyframes are at 1.0, 2.0, 3.0; the frame before the 1.0 one is at 0.96. A start
+        # in (0.96, 1.0) has no whole frame before the first splice point: the head is
+        # empty, which used to crash the join ("Invalid data found when processing input").
+        for start in ("0.97", "0.99", "0.999", "1.5", "1.99"):
+            with self.subTest(start=start):
+                self.assert_cut_has_exactly_the_frames_in(start, "3.5")
+
+    def test_start_just_before_a_frame_keeps_that_frame_and_no_extra(self) -> None:
+        # A one-frame head: the exact count (not ffmpeg's own -t guess) decides it.
+        for start in ("0.95", "0.9601", "1.4", "1.42"):
+            with self.subTest(start=start):
+                self.assert_cut_has_exactly_the_frames_in(start, "3.5")
+
+    def test_end_on_or_near_a_frame_never_duplicates_the_seam_frame(self) -> None:
+        # The copied middle ends and the re-encoded tail begins on the same keyframe; both
+        # used to contain it when the keyframe's rounded timestamp compared a hair high.
+        for end in ("2.0", "2.001", "2.01", "2.04", "2.5", "3.0", "3.96"):
+            with self.subTest(end=end):
+                self.assert_cut_has_exactly_the_frames_in("0.5", end)
+
+    def test_window_with_no_safe_keyframe_inside_it(self) -> None:
+        for start, end in (("1.1", "1.3"), ("1.01", "1.05"), ("1.2", "1.21")):
+            with self.subTest(start=start, end=end):
+                self.assert_cut_has_exactly_the_frames_in(start, end)
 
 
 class FfcutStreamMetadataTest(unittest.TestCase):
@@ -659,3 +748,7 @@ class FfcutProvenanceHookTest(unittest.TestCase):
         with mock.patch.object(self.ffcut, "find_jwkit_provenance", return_value=None), mock.patch.object(self.ffcut.subprocess, "run") as run:
             self.ffcut.record_provenance(self.opts(["in.mp4", "1", "2"]), Path("in.mp4"), Path("out.mp4"), Decimal("1"), Decimal("2"))
         run.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

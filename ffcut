@@ -56,6 +56,7 @@ EQ_EPSILON = Decimal("0.0005")
 K_SEARCH_EPSILON = Decimal("0.0005")
 EOF_GRACE = Decimal("0.250")
 NUDGE = Decimal("0.000001")
+SEEK_LEAD = Decimal("0.001")  # how far before a segment's first frame its re-encode seeks
 
 MP4_LIKE_EXTS = {"mp4", "m4v", "mov", "3gp", "3g2", "mj2", "m4a"}
 MKV_LIKE_EXTS = {"mkv", "mka", "mks", "webm"}
@@ -638,17 +639,93 @@ def find_splice_points(
 
 
 ###############################################################################
+# Frame-aligned cut boundaries
+#
+# A cut boundary that lands exactly on a frame's timestamp is fragile: ffprobe
+# prints timestamps rounded to 6 decimals, so the same keyframe can compare as
+# a hair before or after itself depending on how that particular value
+# rounded, and ffmpeg's own -ss/-t comparisons have their own tolerances. The
+# visible results were a frame duplicated or lost at a seam, and, when the
+# window before the first keyframe held no whole frame, an empty segment that
+# crashed the join. Every boundary is therefore expressed as the time midway
+# between the last frame before it and the first frame at/after it, where no
+# rounding can matter. A frame belongs to the cut when its timestamp is in
+# [start, end), with EQ_EPSILON of slack so an exactly-typed frame time counts
+# as that frame.
+
+
+def frame_times(ctx: Context, lo: Decimal, hi: Decimal) -> list[Decimal]:
+    """Presentation times (relative to the source start) of the primary video
+    stream's frames around [lo, hi], ascending. Empty if ffprobe can't say."""
+    probe_from = max(lo, Decimal(0))
+    data = ffprobe_json(
+        ctx.input,
+        "-read_intervals", f"{fmt_time(ctx.src_start_time + probe_from)}%{fmt_time(ctx.src_start_time + hi)}",
+        "-select_streams", "V:0",
+        "-show_packets",
+        "-show_entries", "packet=pts_time",
+    )
+    times: set[Decimal] = set()
+    for packet in data.get("packets") or []:
+        pts_time = packet.get("pts_time")
+        if pts_time and pts_time != "N/A":
+            times.add(Decimal(pts_time) - ctx.src_start_time)
+    return sorted(times)
+
+
+def frame_boundary(ctx: Context, t: Decimal) -> Decimal:
+    """The time that separates the frames before `t` from the frames at/after
+    it, midway between the two nearest ones. Falls back to `t` less the slack
+    when the frame timestamps can't be read."""
+    times = frame_times(ctx, t - 2, t + 2)
+    before = [x for x in times if x < t - EQ_EPSILON]
+    after = [x for x in times if x >= t - EQ_EPSILON]
+    if before and after:
+        return (before[-1] + after[0]) / 2
+    if after:
+        gap = after[1] - after[0] if len(after) > 1 else Decimal("0.04")
+        return max(after[0] - gap / 2, Decimal(0))
+    if before:
+        gap = before[-1] - before[-2] if len(before) > 1 else Decimal("0.04")
+        return before[-1] + gap / 2
+    return max(t - EQ_EPSILON, Decimal(0))
+
+
+###############################################################################
 # Encoding / copying segments
 
 
+def frames_in_window(ctx: Context, start: Decimal, end: Decimal) -> Optional[list[Decimal]]:
+    """Timestamps of the frames in [start, end), with EQ_EPSILON of slack; None
+    when the stream's frame timestamps can't be read at all (no way to tell an
+    empty window from an unreadable one otherwise)."""
+    times = frame_times(ctx, start - 2, end + 2)
+    if not times:
+        return None
+    return [t for t in times if start - EQ_EPSILON <= t < end - EQ_EPSILON]
+
+
 def encode_segment(ctx: Context, start: Decimal, end: Decimal, out: Path) -> None:
-    duration = end - start
+    """Re-encode the frames in [start, end). ffmpeg's own -ss/-t comparisons are
+    unreliable at frame-sized windows (a window narrower than a frame can give an
+    empty file, one ending on a frame can keep or drop it), so the segment is
+    asked for by position -- -ss just before its first frame -- and an exact
+    frame count instead. Unlike a seek midway between frames, a seek this close
+    to the first frame leaves the output timestamps on the source's own grid.
+    See "Frame-aligned cut boundaries"."""
+    frames = frames_in_window(ctx, start, end)
+    if frames:  # None (unreadable) or empty (callers skip empty windows) both take the fallback
+        limit = ["-frames:v", str(len(frames))]
+        seek = max(frames[0] - SEEK_LEAD, Decimal(0))
+    else:  # frame timestamps unreadable: fall back to ffmpeg's own time limits
+        limit = ["-t", fmt_time(end - start)]
+        seek = start
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
-        "-ss", fmt_time(start),
+        "-ss", fmt_time(seek),
         "-noautorotate",
         "-i", str(ctx.input),
-        "-t", fmt_time(duration),
+        *limit,
         "-map", "0:V:0",
         "-an", "-sn", "-dn",
         "-c:v", ctx.profile.encoder,
@@ -664,9 +741,15 @@ def copy_middle(ctx: Context, start: Decimal, end: Decimal, out: Path) -> None:
     # A tiny nudge makes ffmpeg seek to the keyframe at/before "start".
     seek = start + NUDGE
     raw_from = fmt_time(ctx.src_start_time + start)
-    raw_to = fmt_time(ctx.src_start_time + end)
+    # Packets are kept when their timestamp is in [start, end); the thresholds sit
+    # midway between frames (not on `start`/`end`, which are frame timestamps whose
+    # 6-decimal rounding could keep or drop the boundary frame by accident -- a
+    # duplicate or missing frame at the seam). Timestamps are still shifted by the
+    # real start so the segment begins at zero as before.
+    drop_below = fmt_time(ctx.src_start_time + frame_boundary(ctx, start))
+    drop_from = fmt_time(ctx.src_start_time + frame_boundary(ctx, end))
 
-    bsf = f"noise=drop='lt(pts*tb,{raw_from})+gte(pts*tb,{raw_to})',setts=pts=PTS-{raw_from}/TB:dts=DTS-{raw_from}/TB"
+    bsf = f"noise=drop='lt(pts*tb,{drop_below})+gte(pts*tb,{drop_from})',setts=pts=PTS-{raw_from}/TB:dts=DTS-{raw_from}/TB"
     if ctx.codec == "h264":
         bsf += ",h264_mp4toannexb"
     elif ctx.codec == "hevc":
@@ -689,35 +772,45 @@ def smart_render(
     ctx: Context, start_sec: Decimal, end_sec: Decimal, k_start: Decimal, k_end: Decimal, tmpdir: Path
 ) -> Path:
     parts: list[Path] = []
+    # How long each part plays in the source's own timeline (None = unknown). Written
+    # into the concat list rather than left to the demuxer, which has to guess a part's
+    # duration from its timestamps and guesses half a frame short for a one-frame part.
+    durations: list[Optional[Decimal]] = []
     middle_start = k_start
     middle_end = k_end
 
-    if not flt_eq(start_sec, k_start):
+    # The head is every frame in [start, k_start). When start falls within one frame
+    # of k_start there is none: the cut simply begins on the keyframe.
+    head_frames = None if flt_eq(start_sec, k_start) else frames_in_window(ctx, start_sec, k_start)
+    if not flt_eq(start_sec, k_start) and head_frames != []:
         head = tmpdir / f"head.{ctx.profile.intermediate_ext}"
         encode_segment(ctx, start_sec, k_start, head)
         parts.append(head)
-    else:
-        middle_start = start_sec
+        durations.append(k_start - head_frames[0] if head_frames else None)
 
     if middle_end > middle_start:
         body = tmpdir / f"body.{ctx.profile.intermediate_ext}"
         copy_middle(ctx, middle_start, middle_end, body)
         parts.append(body)
+        durations.append(middle_end - middle_start)
 
     if not flt_eq(end_sec, k_end):
         tail = tmpdir / f"tail.{ctx.profile.intermediate_ext}"
         encode_segment(ctx, k_end, end_sec, tail)
         parts.append(tail)
+        durations.append(None)  # last part: nothing follows it
 
     hybrid = tmpdir / f"hybrid.{ctx.profile.intermediate_ext}"
     if len(parts) == 1:
         shutil.copy(parts[0], hybrid)
     else:
+        lines = ["ffconcat version 1.0\n"]
+        for part, duration in zip(parts, durations):
+            lines.append(f"file '{part.name}'\n")
+            if duration is not None:
+                lines.append(f"duration {fmt_time(duration)}\n")
         concat_file = tmpdir / "parts.ffconcat"
-        concat_file.write_text(
-            "ffconcat version 1.0\n" + "".join(f"file '{p.name}'\n" for p in parts),
-            encoding="utf-8",
-        )
+        concat_file.write_text("".join(lines), encoding="utf-8")
         run_ffmpeg(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",

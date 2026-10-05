@@ -7,6 +7,7 @@
 ## What It Does
 
 - cuts `[START, END)` out of a video: the partial GOP at the start and the partial GOP at the end are re-encoded, everything fully inside that range is stream-copied untouched
+- the video frames in the cut are exactly the ones whose timestamp falls in `[START, END)` (0.5ms of slack, so typing a frame's own timestamp counts as that frame): a `START` between two frames begins on the next frame, and an `END` on a frame leaves that frame out. Boundaries are handed to ffmpeg midway between frames rather than on a timestamp, so rounding can't add, drop or duplicate the frame at a seam
 - for H.264, H.265/HEVC, AV1, VP9, and VP8, it looks for real keyframes it can safely splice on; for H.265 specifically, only IDR/BLA (closed-GOP) keyframes count as safe — a CRA/open-GOP keyframe is deliberately rejected rather than risking a corrupt splice, and the whole requested segment is re-encoded instead
 - for every other video codec ffmpeg can encode (MPEG-2, MPEG-4 part 2, ProRes, MJPEG, DNxHD, FFV1, Huffyuv, Theora), it re-encodes the exact requested segment - other streams are still copied
 - carries over audio, subtitles, timed data streams, attached cover art, Matroska attachments, chapters (clipped and rebased to the new start), global metadata, and video rotation
