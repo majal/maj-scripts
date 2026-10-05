@@ -4,16 +4,15 @@ Tracked follow-ups that are intentionally deferred, not forgotten.
 
 ## Rewrite legacy scripts as cross-platform tools
 
-`minterpolate`, `pdfcompress`, `pdfind`, and `pdflat`/`pdflat-auto`/`pdflat-single`
-are legacy bash scripts migrated as-is from the pre-rename repo (`2afe1d5`).
-They should eventually be upgraded to the same style as `wh`/`whisper`:
-cross-platform (macOS/Linux/Windows), with a proper `docs/<script>.md` page
-following the template in `AGENTS.md`. Until then they're undocumented in
-`README.md` and `test_readme.py` correctly flags them as such — this is
-known, not a bug to fix by documenting the bash versions.
+`pdflat`/`pdflat-auto`/`pdflat-single` are legacy bash scripts migrated as-is
+from the pre-rename repo (`2afe1d5`). They should eventually be upgraded to the
+same style as `wh`/`whisper`: cross-platform (macOS/Linux/Windows), with a
+proper `docs/<script>.md` page following the template in `AGENTS.md`.
 
-`generate_html_colors_video` and `maj-online` are in the same
-undocumented/legacy bucket, not yet triaged into a specific follow-up.
+`minterpolate`, `pdfcompress`, `pdfind`, `generate_html_colors_video`,
+`maj-online` and `vboxsign` were archived to `maj-scripts-archive-2026/`
+(commit `a4028b1`, 2026-09-22); their README sections were pruned and their
+docs moved to `maj-scripts-archive-2026/docs/`. `thumb` has no tests yet.
 
 `jwget` and `jwinbox` used to be in this bucket too — `jwget`'s periodicals
 were absorbed into [`majal/jwkit`](https://github.com/majal/jwkit)'s `jwdl`
@@ -25,10 +24,6 @@ pre-2018 jw.org account watcher, plaintext password by default) — see
 
 ## Other repo-hygiene follow-ups
 
-- `vboxsign` is kept in place deliberately (not archived) — see the commit
-  message / conversation history around 2026-08-12: it's linked from the
-  operator's own public GitHub Gist. That gist's URL is already broken
-  today regardless (points at the old repo name's `master` branch, which
-  no longer resolves after the GitHub rename-redirect expired) — the
-  actual fix is updating the gist to point at `main` on the current repo,
-  which is outside this repo's scope.
+- `vboxsign` was archived (see above). The operator's public GitHub Gist
+  that linked to it already pointed at a dead URL (old repo name's `master`);
+  updating or retiring that gist is outside this repo's scope.
