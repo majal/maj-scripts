@@ -7,11 +7,11 @@ diverge.
 
 Guidance for future contributors and AI agents working in this repo.
 
-Repo name: `maj-scripts-vibe`
+Repo name: `maj-scripts`
 
 ## Purpose
 
-`maj-scripts-vibe` is expected to grow into a collection of unrelated or loosely related scripts.
+`maj-scripts` is expected to grow into a collection of unrelated or loosely related scripts.
 
 This repo is for public, user-facing utility scripts that can be tested and
 documented as standalone tools. It is not the replacement home for private

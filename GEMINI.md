@@ -1,4 +1,4 @@
-# maj-scripts-vibe — Antigravity/Gemini entry point
+# maj-scripts — Antigravity/Gemini entry point
 
 This file exists only because Antigravity/Gemini tooling auto-loads
 `GEMINI.md` by convention. All actual instructions live in `AGENTS.md`

@@ -1,4 +1,4 @@
-# maj-scripts-vibe — Claude Code entry point
+# maj-scripts — Claude Code entry point
 
 This file exists only because Claude Code auto-loads `CLAUDE.md` by
 convention. All actual instructions live in `AGENTS.md` (shared across

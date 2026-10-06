@@ -2,7 +2,7 @@
 
 LLMs have changed the way the programming world works. Welcome to the machine-made code era! 🤖
 
-[![Tests](https://github.com/majal/maj-scripts-vibe/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/majal/maj-scripts-vibe/actions/workflows/tests.yml)
+[![Tests](https://github.com/majal/maj-scripts/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/majal/maj-scripts/actions/workflows/tests.yml)
 
 ## Overview
 
@@ -181,7 +181,7 @@ Example wrapper shape:
 
 ```zsh
 #!/bin/zsh
-cd /path/to/maj-scripts-vibe || exit 1
+cd /path/to/maj-scripts || exit 1
 ./script-name "$@"
 ```
 
@@ -199,7 +199,7 @@ Helpful Windows patterns:
 Example wrapper shape:
 
 ```powershell
-py C:\path\to\maj-scripts-vibe\script-name @args
+py C:\path\to\maj-scripts\script-name @args
 ```
 
 #### Linux Launchers
@@ -216,7 +216,7 @@ Helpful Linux patterns:
 Example `.desktop` command shape:
 
 ```ini
-Exec=/path/to/maj-scripts-vibe/script-name %F
+Exec=/path/to/maj-scripts/script-name %F
 Terminal=true
 ```
 
@@ -328,8 +328,8 @@ git --version
 If you have Git, you can make a local copy with:
 
 ```bash
-git clone https://github.com/majal/maj-scripts-vibe.git
-cd maj-scripts-vibe
+git clone https://github.com/majal/maj-scripts.git
+cd maj-scripts
 ```
 
 Later, update that copy from inside the repo folder:
@@ -394,7 +394,7 @@ winget --version
 Common examples with `winget`:
 
 ```powershell
-winget install Python.Python.3
+winget install Python.Python.3.13
 winget install Gyan.FFmpeg
 winget install Git.Git
 ```
