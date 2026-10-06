@@ -100,6 +100,16 @@ When adding a new top-level script to the repo:
 
 Do not add a new script without updating the README.
 
+## Quick Install
+
+`install.sh` / `uninstall.sh` (macOS, Linux) and `install.ps1` / `uninstall.ps1` (Windows) are the root-level one-liner installers described in the README's Quick Install section. They are adapted from `jwkit`'s installers (same design: idempotent, installs Python 3.11+/`ffmpeg`/`git` if missing, clones to `~/.maj-scripts`, guarded PATH edit, `maj-scripts-update`, uninstall that removes only what the installer added) - keep the two repos' installers aligned when fixing one.
+
+- `install.sh`'s `TOOLS` lists every root script; `install.ps1`/`uninstall.ps1`'s `$Tools` lists only the Python ones (Windows can't run the bash scripts, and `ubuntu-hibernate` is Linux-only). **Add a new script to those lists**, alphabetically, when you add it.
+- Never trust `Get-Command python` on Windows: the Microsoft Store ships a `python.exe` stub that exists but only prints "Python was not found". `install.ps1` runs the candidate and checks its version instead, and the `.cmd` shims resolve `py -3` / `python` at run time.
+- The winget package ID must be version-specific (`Python.Python.3.13`); `Python.Python.3` does not exist.
+- `install.ps1` has not been verified on a real Windows machine by this repo's agents; prefer a real Windows test after touching it. Test `install.sh` with `HOME=/tmp/scratch bash install.sh` so it never edits a real shell profile.
+- `install.sh`/`uninstall.sh` have shebangs but are exempt from the README-section-per-script rule (`INSTALLERS` in `tests/test_readme.py`).
+
 ## Bash Script Portability Rule
 
 New or edited bash scripts use `#!/usr/bin/env bash`, not `#!/bin/bash`.
@@ -241,4 +251,5 @@ This rule has now fired: the repo outgrew a single-file README (10 scripts, ~200
 - keep Your Local Setup generic; move script-specific notes into the script's `docs/<script>.md`
 - use `↑ TOC` consistently in README, and the back-link in `docs/<script>.md`
 - keep examples concise and copy-pasteable
+- add the script to `TOOLS` in `install.sh` (and `$Tools` in `install.ps1`/`uninstall.ps1` if it's a Python script that runs on Windows)
 - keep links and headings stable

@@ -19,6 +19,10 @@ SCRIPT_TEMPLATE_HEADINGS = (
 )
 
 
+# Quick-install entry points, not user-facing scripts with their own docs.
+INSTALLERS = {"install.sh", "uninstall.sh"}
+
+
 def doc_filename(script_name: str) -> str:
     """Full per-script docs now live in docs/<script>.md - see AGENTS.md's
     Growth Rule. A trailing .sh is stripped so e.g. jwvideo-mux-shortcuts.sh
@@ -30,7 +34,7 @@ def doc_filename(script_name: str) -> str:
 def root_scripts() -> list[str]:
     scripts: list[str] = []
     for path in REPO_ROOT.iterdir():
-        if not path.is_file() or path.name.startswith("."):
+        if not path.is_file() or path.name.startswith(".") or path.name in INSTALLERS:
             continue
         try:
             first_line = path.read_text(encoding="utf-8").splitlines()[0]

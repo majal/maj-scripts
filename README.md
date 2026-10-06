@@ -18,6 +18,7 @@ If you're just here to use a script, start here. This README is the friendly map
 ## Table of Contents
 
 - [Overview](#overview)
+- [Quick Install](#quick-install)
 - [Scripts](#scripts)
   - [`ffcut`](#ffcut)
   - [`gmail-cleanup`](#gmail-cleanup)
@@ -35,6 +36,38 @@ If you're just here to use a script, start here. This README is the friendly map
   - [Git](#git)
   - [Package Managers](#package-managers)
 - [Contributing Docs](#contributing-docs)
+
+## Quick Install
+
+One command installs Python, `ffmpeg`, `git`, and these scripts, and puts them on your `PATH` so `ffcut`, `wh`, `whisper`, and the rest just work.
+
+**macOS or Linux** (Terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/majal/maj-scripts/main/install.sh | bash
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/majal/maj-scripts/main/install.ps1 | iex
+```
+
+Then close **every** open terminal window and open a new one (PATH changes only reach terminals started after the install), and try:
+
+```bash
+ffcut --help
+wh --help
+```
+
+- Windows gets the Python scripts only (`ffcut`, `gmail-cleanup`, `thumb`, `wh`, `whisper`); `pdflat*` and `printing-mode` are bash scripts and `ubuntu-hibernate` is Linux-only.
+- Anything a script needs beyond Python/`ffmpeg`/`git` (Whisper models, Gmail OAuth credentials, ...) is covered in that script's `docs/<script>.md`.
+- Update with `maj-scripts-update`, or re-run the install command. Both are safe to repeat.
+- Uninstall with `curl -fsSL https://raw.githubusercontent.com/majal/maj-scripts/main/uninstall.sh | bash` (Windows: `irm https://raw.githubusercontent.com/majal/maj-scripts/main/uninstall.ps1 | iex`). It removes the installed copy, its PATH entry, and only dependencies the installer itself added.
+
+Prefer to do it by hand, or something didn't work? See [Your Local Setup](#your-local-setup).
+
+[↑ TOC](#table-of-contents)
 
 ## Scripts
 
