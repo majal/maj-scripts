@@ -1,0 +1,192 @@
+# Contributor reference (full text)
+
+Moved verbatim from `AGENTS.md` on 2026-10-15 (instruction-bloat trim). `AGENTS.md` keeps the
+operative rules and the add-a-script checklist; this file holds the boundary rationale, README
+structure/templates, installer notes, bash portability rationale, tone, heading/TOC and growth rules.
+
+## Purpose
+
+`maj-scripts` is expected to grow into a collection of unrelated or loosely related scripts.
+
+This repo is for public, user-facing utility scripts that can be tested and
+documented as standalone tools. It is not the replacement home for private
+`~/bin` operator scripts and it is not a system overlay repo.
+
+Boundary rules:
+
+- jw.org content tools (downloading/extracting/muxing jw.org videos, music,
+  periodicals, or sign-language clips) belong in `jwkit`
+  (https://github.com/majal/jwkit), not here — `ffrife`, `jwdl` (which also
+  absorbed `jwget`'s periodicals as `jwdl periodicals`), `jwsl` (renamed
+  `slverse`), and `jwvideo-mux`(-shortcuts.sh) moved there on 2026-08-13.
+  Note `jwdl` has a live systemd caller on `emeth4`; see `jwkit`'s own
+  `AGENTS.md` Operational Notes before touching its CLI surface.
+- Private `~/bin` migrations, local ops helpers, systemd timer installers, and
+  fleet maintenance scripts belong in `bin`.
+- emeth4 workstation overlay files and reinstall policy belong in
+  `maj-newemeth`.
+- Cloud/VPS server bootstrap overlays belong in `maj-newserver`.
+- If a script requires private local paths, tokens, machine-specific service
+  files, or root-only config to make sense, stop and consider `bin` or an
+  overlay repo before adding it here.
+- Power, boot, and hibernate helpers may live here only when they are public
+  diagnostic/setup tools with conservative safeguards, clear dry-run/report
+  behavior, and no machine-specific bootloader policy. Durable workstation
+  bootloader, crypttab, fstab, hibernate, and reinstall policy belongs in
+  `maj-newemeth`; private operational recovery helpers belong in `bin`.
+- Keep this repo suitable for public GitHub by default: examples should use
+  placeholders and off-repo config paths, and tests should not depend on the
+  operator's live machine state.
+
+The documentation model is:
+
+- `README.md` is the user-facing index and navigation hub
+- `AGENTS.md` defines how scripts and docs should be added in the future
+
+Recommended top-level README order:
+
+1. Title
+2. Short description
+3. Overview
+4. Table of Contents
+5. Scripts
+6. Your Local Setup
+7. Contributing Docs
+
+## README Rules
+
+When adding a new top-level script to the repo:
+
+1. Add or update the script file.
+2. Add the script to the README table of contents.
+3. Add a dedicated script subsection under `## Scripts` using the standard template.
+4. Keep the `## Scripts` section above the shared Your Local Setup section.
+5. End each major section after the table of contents with `↑ TOC`.
+
+Do not add a new script without updating the README.
+
+## Quick Install
+
+`install.sh` / `uninstall.sh` (macOS, Linux) and `install.ps1` / `uninstall.ps1` (Windows) are the root-level one-liner installers described in the README's Quick Install section. They are adapted from `jwkit`'s installers (same design: idempotent, installs Python 3.11+/`ffmpeg`/`git` if missing, clones to `~/.maj-scripts`, guarded PATH edit, `maj-scripts-update`, uninstall that removes only what the installer added) - keep the two repos' installers aligned when fixing one.
+
+- `install.sh`'s `TOOLS` lists every root script; `install.ps1`/`uninstall.ps1`'s `$Tools` lists only the Python ones (Windows can't run the bash scripts, and `ubuntu-hibernate` is Linux-only). **Add a new script to those lists**, alphabetically, when you add it.
+- Never trust `Get-Command python` on Windows: the Microsoft Store ships a `python.exe` stub that exists but only prints "Python was not found". `install.ps1` runs the candidate and checks its version instead, and the `.cmd` shims resolve `py -3` / `python` at run time.
+- The winget package ID must be version-specific (`Python.Python.3.13`); `Python.Python.3` does not exist.
+- `install.ps1` has not been verified on a real Windows machine by this repo's agents; prefer a real Windows test after touching it. Test `install.sh` with `HOME=/tmp/scratch bash install.sh` so it never edits a real shell profile.
+- `install.sh`/`uninstall.sh` have shebangs but are exempt from the README-section-per-script rule (`INSTALLERS` in `tests/test_readme.py`).
+
+## Bash Script Portability Rule
+
+New or edited bash scripts use `#!/usr/bin/env bash`, not `#!/bin/bash`.
+
+macOS ships bash 3.2 as `/bin/bash` (Apple hasn't updated it since the
+GPLv2/v3 license change), while Homebrew's modern bash sits ahead of it
+on `$PATH` on this user's Mac. `#!/bin/bash` hardcodes the ancient one
+and silently breaks bash 4+ syntax (`${var,,}`) and even some `echo -e`
+escape sequences (`\e` is not recognized by bash 3.2's builtin `echo`,
+so `echo -e "\e[1mBold\e[0m"` prints the literal escape text instead of
+formatting — confirmed 2026-09-20 via `pdflat`). `#!/usr/bin/env bash`
+resolves through `$PATH` to Homebrew's bash on macOS and to the normal
+modern bash on Linux, matching the shebang the `bin` repo already uses
+for the large majority of its bash scripts.
+
+## Script Section Template
+
+The full per-script template (see below) now lives in `docs/<script>.md`, not in `README.md` directly — see the Growth Rule. Each script subsection under `## Scripts` in `README.md` should instead include just:
+
+1. Script name
+   The subsection heading itself should link directly to the script file when the script lives in the repo root.
+2. A short (1-3 sentence) description — what the script does and why it exists.
+3. A `Full docs: [docs/<script>.md](docs/<script>.md)` link.
+4. `↑ TOC`
+
+The full template that used to live inline in `README.md` now lives in `docs/<script>.md`:
+
+1. `# <script>` title, immediately followed by a `[← Back to README](../README.md#table-of-contents)` link.
+2. The same short description as the README blurb (may repeat it verbatim).
+3. `## What It Does`
+4. `## Supported Platforms`
+5. `## Dependencies`
+6. `## Install / First Run Summary`
+7. `## Common Usage Examples`
+8. `## Important Behavior / Defaults`
+9. `## Notes / Caveats`
+10. `[↑ Back to README TOC](../README.md#table-of-contents)` at the end.
+
+Doc filename: `docs/<script-name>.md`, stripping a trailing `.sh` if the script has one. Links from inside a doc file back into README anchors (e.g. `#python`, `#friendly-launchers`) should use `../README.md#anchor`, not a bare `#anchor`.
+
+Keep examples short, practical, and copy-pasteable.
+
+## Local Setup And Friendly Launcher Rules
+
+Shared setup and friendly launcher instructions belong in the shared Your Local Setup section of `README.md`, not duplicated in every script section.
+
+Prefer a hierarchy where the main setup topic is the visible README section and platform-specific variants live underneath it.
+
+Examples of shared topics:
+
+- friendly launcher patterns such as drag-and-drop wrappers, file picker wrappers, and context-menu actions
+- Python installation
+- Git setup and update basics
+- package managers such as Homebrew, `winget`, and Chocolatey
+- platform-level setup like `ffmpeg`
+
+Script-specific setup may be documented in the script section, but it should link back to shared setup sections when possible instead of repeating the same instructions.
+
+Keep Your Local Setup generic and reusable across scripts. If a note only applies to one script, it belongs in that script's subsection, not in Your Local Setup.
+
+Package-manager subsections should describe the package manager itself and show broad reusable examples, not read like setup notes for one script or one dependency.
+
+When a Your Local Setup heading refers to a concrete tool or install target, prefer linking that heading to the official docs, homepage, or official repository.
+
+Friendly launcher guidance should make clear that launchers are thin wrappers around the scripts, should keep output or logs visible, and should not hide errors from non-terminal users.
+
+## Tone Rules
+
+The README should be lightly playful, not chaotic:
+
+- a small number of useful emojis is fine
+- headings and navigation can be friendlier than plain boilerplate
+- body text should still stay practical, readable, and skimmable
+- prefer active sentence structures over passive ones when the wording stays natural
+- avoid phrasing that sounds like a cold computer status message when a warmer natural sentence would work just as well
+
+Do not let “fun” make setup instructions vague.
+
+User-facing script output should also feel warm, calm, and reassuring:
+
+- prefer friendly and supportive wording for normal status messages
+- for interruptions and recoverable errors, avoid cold or alarming phrasing
+- make it clear when the user can safely try again
+- a small amount of personality is welcome if it stays readable
+
+Human-written copy in the README intro should be treated as protected by default:
+
+- do not rewrite the README title unless explicitly asked
+- do not rewrite the short description directly under the title unless explicitly asked
+- do not rewrite the Overview description paragraph unless explicitly asked
+
+Assume these are intentionally human-authored voice and branding choices. AI should preserve them rather than “improving” them.
+
+## Heading And TOC Rules
+
+- Keep README headings stable and predictable so future anchors remain valid.
+- Keep the Overview above the table of contents.
+- Prefer `## Scripts` as the parent section and `### <script-name>` for each script.
+- Within each script subsection, use `####` headings for the internal template sections.
+- Prefer script subsection headings in the form `### [<script-name>](./<script-file>)` when the script file lives at the repo root.
+- Prefer `## Your Local Setup` over separate top-level setup and launcher sections.
+- In the main README TOC, prefer top-level setup topics like `Friendly Launchers`, `Python`, `Git`, and `Package Managers`, with platform-specific entries discoverable inside those sections instead of crowding the main TOC.
+- Script sections in `README.md` are short (blurb + doc link) now that the full template lives in `docs/<script>.md`, so a local mini TOC inside `README.md` is no longer needed there. Within a `docs/<script>.md` file itself, a short "Jump to" list is optional but not required — the file's own heading outline (rendered by GitHub) usually covers it.
+- The `## Scripts` section should appear before Your Local Setup.
+- Use `↑ TOC` for major sections and primary subsections, not every nested platform subsection.
+- When a primary subsection contains nested subsections, place its `↑ TOC` at the end of the last nested subsection, not before the nested content starts.
+- If a new shared subsection is added, it must also be added to the README TOC in the same order it appears in the file.
+
+## Growth Rule
+
+This rule has now fired: the repo outgrew a single-file README (10 scripts, ~2000 lines), so detailed per-script docs live in `docs/<script>.md` per the Script Section Template above, and `README.md` keeps only short blurbs plus links.
+
+- `README.md` remains the canonical entry point and navigation page — it must always list every root script in the Table of Contents and `## Scripts`, even though the detail lives elsewhere.
+- New scripts follow the split from the start: add the short blurb to `README.md` and the full template to `docs/<script>.md` in the same change, not as a later migration.
+- Keep this rule's text in sync with what's actually true — do not let the README quietly grow back into one giant file.
