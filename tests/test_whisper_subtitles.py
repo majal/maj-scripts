@@ -64,3 +64,38 @@ class WhisperSubtitleOutputTest(unittest.TestCase):
 
         self.assertAlmostEqual(trimmed.start, 0.94, places=2)
         self.assertAlmostEqual(trimmed.end, 2.12, places=2)
+
+    def test_short_word_cue_can_use_available_speech_after_segment_boundary(self) -> None:
+        segments = [
+            {
+                "start": 0.0,
+                "end": 0.1,
+                "text": "Yes",
+                "words": [{"start": 0.0, "end": 0.1, "word": "Yes"}],
+            },
+            {
+                "start": 1.0,
+                "end": 1.5,
+                "text": "indeed",
+                "words": [{"start": 1.0, "end": 1.5, "word": "indeed"}],
+            },
+        ]
+
+        cues = list(self.whisper.iter_all_subtitle_cues(segments, speech_intervals=[(0.0, 1.8)]))
+
+        self.assertGreaterEqual(cues[0][1] - cues[0][0], self.whisper.SUBTITLE_STYLE_PRESETS["balanced"].min_cue_duration - 0.001)
+        self.assertLessEqual(cues[0][1], cues[1][0] - self.whisper.SUBTITLE_STYLE_PRESETS["balanced"].min_cue_gap + 0.001)
+
+    def test_short_word_cue_growth_stops_at_detected_speech_end(self) -> None:
+        segments = [
+            {
+                "start": 0.0,
+                "end": 0.1,
+                "text": "Yes",
+                "words": [{"start": 0.0, "end": 0.1, "word": "Yes"}],
+            },
+        ]
+
+        cues = list(self.whisper.iter_all_subtitle_cues(segments, speech_intervals=[(0.0, 0.3)]))
+
+        self.assertLessEqual(cues[0][1], 0.3 + self.whisper.SUBTITLE_SPEECH_TRIM_POSTROLL_SECONDS + 0.001)

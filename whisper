@@ -2954,6 +2954,50 @@ def iter_segment_subtitle_cues(
     return cues
 
 
+def iter_all_subtitle_cues(
+    segments: list[dict[str, float | str | list[dict[str, float | str]]]],
+    speech_intervals: list[tuple[float, float]] | None = None,
+    *,
+    style: SubtitleStyleProfile = SUBTITLE_STYLE_PRESETS["balanced"],
+):
+    """Build cues across segment boundaries so short word cues can use nearby speech time."""
+    cues: list[SubtitleCue] = []
+    for segment in segments:
+        for start, end, line_groups in iter_segment_subtitle_cues(
+            segment, speech_intervals=speech_intervals, style=style,
+        ):
+            items = [item for line in line_groups for item in line]
+            if items:
+                cues.append(SubtitleCue(start, end, items))
+
+    cues.sort(key=lambda cue: (cue.start, cue.end))
+    for index, cue in enumerate(cues):
+        if subtitle_cue_duration(cue) >= style.min_cue_duration or not speech_intervals:
+            continue
+
+        # Only borrow time inside the detected speech interval that contains this cue.
+        speech_end = None
+        for speech_start, candidate_end in speech_intervals:
+            if candidate_end <= cue.start:
+                continue
+            if speech_start > cue.start + SUBTITLE_SPEECH_TRIM_PREROLL_SECONDS:
+                break
+            if candidate_end > cue.start:
+                speech_end = candidate_end + SUBTITLE_SPEECH_TRIM_POSTROLL_SECONDS
+                break
+        if speech_end is None:
+            continue
+
+        maximum_end = min(cue.start + style.min_cue_duration, speech_end)
+        if index + 1 < len(cues):
+            maximum_end = min(maximum_end, cues[index + 1].start - style.min_cue_gap)
+        if maximum_end > cue.end:
+            cue.end = maximum_end
+
+    for cue in cues:
+        yield cue.start, cue.end, subtitle_cue_line_groups(cue, style=style)
+
+
 def format_srt_time(value: float) -> str:
     hours = int(value // 3600)
     minutes = int((value % 3600) // 60)
@@ -4238,24 +4282,25 @@ def write_ass(
         handle.write("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n")
         handle.write(f"Style: Default,{font_name},30,&H00FFFFFF,&H0000FFFF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,40,40,40,1\n\n")
         handle.write("[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n")
-        for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
-                has_word_timings = bool(line_groups and isinstance(line_groups[0][0], dict))
-                if karaoke and has_word_timings:
-                    rendered_lines = []
-                    for line in line_groups:
-                        chunks = []
-                        for word in line:
-                            duration = max(1, int(round((float(word["end"]) - float(word["start"])) * 100)))
-                            chunks.append(f"{{\\k{duration}}}{subtitle_item_text(word)}")
-                        rendered_lines.append(" ".join(chunks))
-                    text = r"\N".join(rendered_lines)
-                else:
-                    text = r"\N".join(
-                        " ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line
-                    )
-                if text:
-                    handle.write(f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},Default,,0,0,0,,{text}\n")
+        for start, end, line_groups in iter_all_subtitle_cues(
+            segments, speech_intervals=speech_intervals, style=style,
+        ):
+            has_word_timings = bool(line_groups and isinstance(line_groups[0][0], dict))
+            if karaoke and has_word_timings:
+                rendered_lines = []
+                for line in line_groups:
+                    chunks = []
+                    for word in line:
+                        duration = max(1, int(round((float(word["end"]) - float(word["start"])) * 100)))
+                        chunks.append(f"{{\\k{duration}}}{subtitle_item_text(word)}")
+                    rendered_lines.append(" ".join(chunks))
+                text = r"\N".join(rendered_lines)
+            else:
+                text = r"\N".join(
+                    " ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line
+                )
+            if text:
+                handle.write(f"Dialogue: 0,{format_ass_time(start)},{format_ass_time(end)},Default,,0,0,0,,{text}\n")
 
 
 def write_srt(
@@ -4267,16 +4312,17 @@ def write_srt(
 ) -> None:
     index = 1
     with path.open("w", encoding="utf-8") as handle:
-        for segment in segments:
-            for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
-                lines = [" ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line]
-                if not lines:
-                    continue
-                handle.write(f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n")
-                for line in lines:
-                    handle.write(f"{line}\n")
-                handle.write("\n")
-                index += 1
+        for start, end, line_groups in iter_all_subtitle_cues(
+            segments, speech_intervals=speech_intervals, style=style,
+        ):
+            lines = [" ".join(subtitle_item_text(item) for item in line).strip() for line in line_groups if line]
+            if not lines:
+                continue
+            handle.write(f"{index}\n{format_srt_time(start)} --> {format_srt_time(end)}\n")
+            for line in lines:
+                handle.write(f"{line}\n")
+            handle.write("\n")
+            index += 1
 
 
 def write_txt(path: Path, text: str) -> None:
@@ -4848,19 +4894,20 @@ def count_high_cps_cues(
 ) -> tuple[int, float]:
     count = 0
     max_cps = 0.0
-    for segment in segments:
-        for start, end, line_groups in iter_segment_subtitle_cues(segment, speech_intervals=speech_intervals, style=style):
-            text = " ".join(
-                " ".join(subtitle_item_text(item) for item in line).strip()
-                for line in line_groups
-                if line
-            ).strip()
-            if not text:
-                continue
-            cps = len(text) / max(0.01, end - start)
-            if cps > style.max_chars_per_second:
-                count += 1
-                max_cps = max(max_cps, cps)
+    for start, end, line_groups in iter_all_subtitle_cues(
+        segments, speech_intervals=speech_intervals, style=style,
+    ):
+        text = " ".join(
+            " ".join(subtitle_item_text(item) for item in line).strip()
+            for line in line_groups
+            if line
+        ).strip()
+        if not text:
+            continue
+        cps = len(text) / max(0.01, end - start)
+        if cps > style.max_chars_per_second:
+            count += 1
+            max_cps = max(max_cps, cps)
     return count, max_cps
 
 
