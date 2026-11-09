@@ -58,6 +58,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
         self.assertEqual(env["WHISPER_PARAGRAPHS"], "0")
         self.assertEqual(env["WHISPER_SPEAKER_LABELS"], "0")
         self.assertEqual(env["WHISPER_SUBTITLE_STYLE"], "strict")
+        self.assertEqual(env["WHISPER_SUBTITLE_LINE_WIDTH"], "")
         self.assertEqual(env["WHISPER_GLOSSARY_FILES"], '["/tmp/glossary.txt"]')
         self.assertEqual(env["WHISPER_SUPPRESSION_FILES"], '["/tmp/suppress.txt"]')
         self.assertEqual(env["WHISPER_RECURSIVE"], "1")
@@ -158,6 +159,7 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                 """
                 [defaults]
                 subtitle-style = "strict"
+                subtitle-line-width = 34
                 extra_glossary = ["project-glossary.txt"]
                 suppress_phrases = ["project-suppress.txt"]
                 jobs = 2
@@ -176,16 +178,22 @@ class WhisperOutputPlanningTest(unittest.TestCase):
                         self.whisper.build_parser(),
                         ["clip.mp4", "--glossary=cli-glossary.txt"],
                     )
+                    width_args = self.whisper.parse_args_with_config(
+                        self.whisper.build_parser(),
+                        ["clip.mp4", "--subtitle-line-width=31"],
+                    )
             finally:
                 os.chdir(previous_cwd)
 
         self.assertEqual(args.lang, "en")
         self.assertEqual(args.subtitle_style, "strict")
+        self.assertEqual(args.subtitle_line_width, 34)
         self.assertEqual(args.glossary, ["global-glossary.txt", "project-glossary.txt"])
         self.assertEqual(args.suppress_phrases, ["project-suppress.txt"])
         self.assertFalse(args.speech_trim)
         self.assertEqual(args.jobs, 2)
         self.assertEqual(cli_args.glossary, ["cli-glossary.txt"])
+        self.assertEqual(width_args.subtitle_line_width, 31)
 
     def test_output_plan_detects_existing_outputs_and_resume_subtitles(self) -> None:
         with TemporaryDirectory() as temp_dir:

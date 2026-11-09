@@ -57,6 +57,16 @@ class WhisperSubtitleOutputTest(unittest.TestCase):
         self.assertGreater(len(cues), 1)
         self.assertTrue(all(split.end > split.start for split in cues))
 
+    def test_custom_line_width_caps_subtitle_rows(self) -> None:
+        style = self.whisper.resolve_subtitle_style_profile("balanced", max_line_width=34)
+        items = "The Bible is the word of God and it is truth".split()
+
+        lines, fits = self.whisper.subtitle_line_groups(items, style=style)
+
+        self.assertTrue(fits)
+        self.assertLessEqual(len(lines), 2)
+        self.assertTrue(all(self.whisper.subtitle_items_width(line) <= 34 for line in lines))
+
     def test_speech_trim_moves_edges_to_detected_speech(self) -> None:
         cue = self.whisper.SubtitleCue(0.0, 5.0, ["long", "lead"])
 

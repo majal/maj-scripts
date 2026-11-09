@@ -87,6 +87,12 @@ Use a stricter subtitle readability profile:
 whisper /path/to/file.mp4 --subtitle-style=strict
 ```
 
+Use shorter lines for a small screen or a presentation display that wraps long SRT lines:
+
+```bash
+whisper /path/to/file.mp4 --subtitle-line-width=34
+```
+
 Layer in a custom glossary and review what postprocessing still looks suspicious:
 
 ```bash
@@ -147,6 +153,7 @@ Keep repeated defaults in a project-local TOML config:
 # .maj-scripts-whisper.toml
 lang = "en"
 subtitle_style = "strict"
+subtitle_line_width = 34
 speaker_labels = false
 glossary = ["./whisper-glossary.txt"]
 suppress_phrases = ["./whisper-suppress.txt"]
@@ -229,6 +236,7 @@ whisper /path/to/file.mp4 --mlx-output-format=text
 - You can pass multiple explicit files and folders in one command, and duplicate matches are skipped after the first one.
 - If you're using `find`, prefer batched forms such as `-exec whisper '{}' +` or `xargs -0 whisper`; plain `-exec whisper '{}' \;` launches a fresh `whisper` process for every file.
 - Reusable CLI defaults can live in `~/.config/maj-scripts/whisper/config.toml` globally or `.maj-scripts-whisper.toml` in a project. Precedence is built-in defaults, global config, nearest project config, then CLI flags.
+- `subtitle_line_width` / `--subtitle-line-width` sets the maximum characters per subtitle line (16-80). It overrides the selected style's width, so a compact project default can prevent video players from rewrapping a two-line SRT cue into three screen lines.
 - Config files use TOML. Use `glossary = [...]` or `suppress_phrases = [...]` to replace earlier config-layer lists, and `extra_glossary = [...]` or `extra_suppress_phrases = [...]` to append to them.
 - Common JW/Bible and general capitalization such as `Jehovah`, `Governing Body`, `Kingdom Hall`, `Bible`, `jw.org`, `OpenAI`, `ChatGPT`, `YouTube`, and `Wi-Fi` is normalized by default.
 - Project glossary files named `.whisper-glossary.json`, `.whisper-glossary.txt`, `whisper-glossary.json`, or `whisper-glossary.txt` are auto-loaded from parent folders when present. You can stack extra glossary files explicitly with repeated `--glossary=PATH`.

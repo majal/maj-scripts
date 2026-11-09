@@ -18,7 +18,7 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 try:
     import tomllib
@@ -1659,6 +1659,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paragraphs", action="store_true")
     parser.add_argument("--speaker-labels", "--diarize", dest="speaker_labels", action="store_true")
     parser.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLE_PRESETS), default="balanced")
+    parser.add_argument("--subtitle-line-width", type=int, default=None, metavar="CHARS")
     parser.add_argument("--glossary", action="append", default=[], metavar="PATH")
     parser.add_argument("--suppress-phrases", action="append", default=[], metavar="PATH")
     parser.add_argument("--state-dir", default="")
@@ -1697,6 +1698,7 @@ CONFIG_VALUE_TYPES: dict[str, object] = {
     "paragraphs": bool,
     "speaker_labels": bool,
     "subtitle_style": str,
+    "subtitle_line_width": int,
     "glossary": list,
     "extra_glossary": list,
     "suppress_phrases": list,
@@ -1739,6 +1741,8 @@ def coerce_config_value(key: str, value: object, path: Path) -> object:
             raise ValueError(f"{key} must be an integer")
         if key == "jobs" and value < 1:
             raise ValueError("jobs must be at least 1")
+        if key == "subtitle_line_width" and not 16 <= value <= 80:
+            raise ValueError("subtitle_line_width must be between 16 and 80")
         return value
     if expected_type is str:
         if not isinstance(value, str):
@@ -1895,6 +1899,8 @@ def parse_args_with_config(parser: argparse.ArgumentParser, argv: list[str] | No
     for dest, value in config_values.items():
         if dest not in provided_dests:
             setattr(args, dest, value)
+    if args.subtitle_line_width is not None and not 16 <= args.subtitle_line_width <= 80:
+        parser.error("--subtitle-line-width must be between 16 and 80")
     args._config_sources = config_sources
     return args
 
@@ -1941,6 +1947,7 @@ def print_help() -> None:
             ("--bible-reference-phrases", "Opt in to spoken Bible-reference parsing like Psalm 83 verse 18."),
             ("--no-speech-trim", "Skip speech-aware timing and edge-word cleanup."),
             ("--subtitle-style=balanced|strict", "Choose the subtitle readability profile; balanced is the default."),
+            ("--subtitle-line-width=CHARS", "Set a per-line character limit (16-80); smaller values reduce player rewrapping."),
             ("--glossary=PATH", "Load a custom capitalization/replacement glossary; repeat to stack files."),
             ("--suppress-phrases=PATH", "Load known intro/outro phrases to suppress; repeat to stack files."),
             ("--review-postprocessing, --lint", "Report suspicious leftovers such as spoken references or dense cues."),
@@ -2187,6 +2194,7 @@ def build_processing_env(args: argparse.Namespace) -> dict[str, str]:
         "WHISPER_PARAGRAPHS": "1" if args.paragraphs else "0",
         "WHISPER_SPEAKER_LABELS": "1" if speaker_labels_requested else "0",
         "WHISPER_SUBTITLE_STYLE": args.subtitle_style,
+        "WHISPER_SUBTITLE_LINE_WIDTH": str(getattr(args, "subtitle_line_width", None) or ""),
         "WHISPER_GLOSSARY_FILES": json.dumps(list(args.glossary or [])),
         "WHISPER_SUPPRESSION_FILES": json.dumps(list(args.suppress_phrases or [])),
         "WHISPER_RECURSIVE": "1" if args.recursive else "0",
@@ -3929,8 +3937,9 @@ def run_make_sample_media(path_value: str) -> int:
     return 0
 
 
-def resolve_subtitle_style_profile(name: str) -> SubtitleStyleProfile:
-    return SUBTITLE_STYLE_PRESETS.get(name, SUBTITLE_STYLE_PRESETS["balanced"])
+def resolve_subtitle_style_profile(name: str, max_line_width: int | None = None) -> SubtitleStyleProfile:
+    profile = SUBTITLE_STYLE_PRESETS.get(name, SUBTITLE_STYLE_PRESETS["balanced"])
+    return replace(profile, max_line_width=max_line_width) if max_line_width is not None else profile
 
 
 def probe_duration_seconds(media_path: Path) -> float | None:
@@ -4803,6 +4812,7 @@ def build_dry_run_payload(args: argparse.Namespace, plan: RuntimePlan) -> dict[s
             "jobs": args.jobs,
             "outdir": args.outdir,
             "subtitle_style": args.subtitle_style,
+            "subtitle_line_width": getattr(args, "subtitle_line_width", None),
             "ass": args.ass,
             "karaoke": args.karaoke,
             "transcript": effective_transcript,
@@ -5237,7 +5247,11 @@ def process_file(
     )
     spinner_state = {"stopped": False}
     mlx_word_timestamps = env.get("WHISPER_MLX_WORD_TIMESTAMPS", "auto")
-    subtitle_style = resolve_subtitle_style_profile(env.get("WHISPER_SUBTITLE_STYLE", "balanced"))
+    line_width_value = env.get("WHISPER_SUBTITLE_LINE_WIDTH", "").strip()
+    subtitle_line_width = int(line_width_value) if line_width_value else None
+    subtitle_style = resolve_subtitle_style_profile(
+        env.get("WHISPER_SUBTITLE_STYLE", "balanced"), max_line_width=subtitle_line_width
+    )
     review_postprocessing = env.get("WHISPER_REVIEW_POSTPROCESSING", "0") == "1"
     glossary_replacements, glossary_lengths, glossary_sources = load_effective_glossary(
         media_path,
