@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import unittest
@@ -36,11 +37,11 @@ class InstallerTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(sorted(ps_tools(path)), python_scripts)
 
+    @unittest.skipIf(os.name == "nt", "Bash syntax is checked on Unix CI runners")
     def test_shell_installers_parse(self) -> None:
         for path in ("install.sh", "uninstall.sh"):
             with self.subTest(path=path):
-                script = (REPO_ROOT / path).read_text(encoding="utf-8")
-                result = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+                result = subprocess.run(["bash", "-n", str(REPO_ROOT / path)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_windows_installer_checks_real_python_and_valid_winget_id(self) -> None:
