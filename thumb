@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""thumb: batch thumbnail generator for images and videos.
+"""thumb: thumbnail generator for images and videos (whole folders or single files).
 
 Features
 --------
 - Preserves aspect ratio; neither dimension exceeds --size.
-- Default output directory is ./thumbnails.
+- Folders: default output directory is ./thumbnails inside the folder.
+- Single files: the thumbnail is written next to the source by default.
+- Defaults can be set in ~/.config/maj-scripts/thumb/config.toml.
 - Default output format is JPEG for broad compatibility.
 - Images are auto-oriented from EXIF metadata.
 - Videos prefer embedded artwork by default.
@@ -41,6 +43,22 @@ VIDEO_EXTS = {
     ".mts", ".m2ts", ".ts", ".3gp", ".wmv", ".flv", ".ogv",
 }
 SUPPORTED_OUTPUTS = ("jpg", "jpeg", "png", "webp", "avif")
+CONFIG_PATH = Path.home() / ".config" / "maj-scripts" / "thumb" / "config.toml"
+# config key -> expected type; keys match the long option names (dashes -> underscores)
+CONFIG_KEYS: dict[str, type] = {
+    "output": str,
+    "file_output": str,
+    "size": int,
+    "quality": int,
+    "format": str,
+    "suffix": str,
+    "samples": int,
+    "jobs": int,
+    "recursive": bool,
+    "quiet": bool,
+    "mtime_only": bool,
+    "no_artwork": bool,
+}
 
 
 @dataclass
@@ -376,6 +394,30 @@ def should_process(src: Path, dst: Path, *, force: bool, mtime_only: bool) -> tu
     return False, "thumbnail already exists"
 
 
+def load_config(path: Path) -> dict[str, object]:
+    """Read optional TOML defaults; a missing file is fine, a bad one is a clear error."""
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+    except ImportError:
+        raise SystemExit(f"{path}: config files need Python 3.11+ (tomllib); remove it or upgrade Python")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"{path}: cannot read config: {exc}")
+    out: dict[str, object] = {}
+    for raw_key, value in data.items():
+        key = raw_key.replace("-", "_")
+        expected = CONFIG_KEYS.get(key)
+        if expected is None:
+            raise SystemExit(f"{path}: unknown setting '{raw_key}' (allowed: {', '.join(sorted(CONFIG_KEYS))})")
+        if not isinstance(value, expected) or (expected is int and isinstance(value, bool)):
+            raise SystemExit(f"{path}: '{raw_key}' must be {expected.__name__}")
+        out[key] = value
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="thumb",
@@ -387,6 +429,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  thumb\n"
+            "  thumb photo.jpg clip.mp4          (thumbnails land next to each file)\n"
+            "  thumb -o ~/thumbs photo.jpg\n"
             "  thumb ~/Pictures\n"
             "  thumb -r ~/Media\n"
             "  thumb -r --include '*.jpg' --include '*.mp4' ~/Media\n"
@@ -405,8 +449,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  --suffix=-thumb gives photo.png-thumb.jpg.\n"
             "\n"
             "Defaults:\n"
-            "  input directory : .\n"
-            "  output directory: ./thumbnails\n"
+            "  input           : . (files and/or directories)\n"
+            "  output (folders): ./thumbnails inside each folder\n"
+            "  output (files)  : the file's own folder (--file-output)\n"
+            "  config file     : ~/.config/maj-scripts/thumb/config.toml (CLI flags win)\n"
             "  maximum size    : 256 px\n"
             "  output format   : jpg\n"
             "  quality         : 85\n"
@@ -420,18 +466,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "path",
-        nargs="?",
-        default=".",
-        help="directory to scan (default: .)",
+        "paths",
+        nargs="*",
+        default=["."],
+        metavar="PATH",
+        help="files and/or directories to process (default: .)",
     )
     parser.add_argument(
         "-o", "--output",
-        default="thumbnails",
+        default=None,
         metavar="DIR",
         help=(
-            "output directory; relative paths are created inside PATH "
-            "(default: thumbnails)"
+            "output directory for both folders and files; relative paths are created "
+            "inside each scanned folder, or beside each single file "
+            "(default: thumbnails for folders, --file-output for files)"
+        ),
+    )
+    parser.add_argument(
+        "--file-output",
+        default=".",
+        metavar="DIR",
+        help=(
+            "output directory for individually named files; relative to the file's "
+            "folder (default: . = next to the source)"
         ),
     )
     parser.add_argument(
@@ -476,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-r", "--recursive",
         action="store_true",
-        help="scan subdirectories and mirror their layout under the output directory",
+        help="scan subdirectories of folder arguments and mirror their layout under the output directory",
     )
     parser.add_argument(
         "--include",
@@ -484,8 +541,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="GLOB",
         help=(
-            "process only paths matching this glob; may be repeated. "
-            "Matches basename or path relative to PATH"
+            "when scanning folders, process only paths matching this glob; may be repeated. "
+            "Matches basename or path relative to the folder; ignored for files named directly"
         ),
     )
     parser.add_argument(
@@ -555,12 +612,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def process_one(
     src: Path,
+    dst: Path,
     *,
-    root: Path,
-    outdir: Path,
-    recursive: bool,
     outfmt: str,
-    suffix: str,
     size: int,
     quality: int,
     samples: int,
@@ -570,7 +624,9 @@ def process_one(
     mtime_only: bool,
     dry_run: bool,
 ) -> Result:
-    dst = output_for(src, root, outdir, recursive, outfmt, suffix)
+    if src.suffix.lower() not in IMAGE_EXTS and src.suffix.lower() not in VIDEO_EXTS:
+        return Result("skip", src, dst, "unsupported file type")
+
     do_it, reason = should_process(src, dst, force=force, mtime_only=mtime_only)
 
     if not do_it:
@@ -609,13 +665,14 @@ def show_path(path: Path, root: Path) -> str:
 
 def main() -> int:
     parser = build_parser()
+    config = load_config(CONFIG_PATH)
+    parser.set_defaults(**config)
     args = parser.parse_args()
 
     require_tools()
 
-    root = Path(args.path).expanduser().resolve()
-    if not root.is_dir():
-        parser.error(f"not a directory: {root}")
+    if args.format not in SUPPORTED_OUTPUTS:
+        parser.error(f"format must be one of: {', '.join(SUPPORTED_OUTPUTS)}")
     if args.size < 1:
         parser.error("--size must be >= 1")
     if not 1 <= args.quality <= 100:
@@ -625,33 +682,30 @@ def main() -> int:
     if args.jobs < 0:
         parser.error("--jobs must be >= 0")
 
-    outdir_arg = Path(args.output).expanduser()
-    outdir = outdir_arg if outdir_arg.is_absolute() else root / outdir_arg
+    jobs = min(8, max(1, os.cpu_count() or 1)) if args.jobs == 0 else args.jobs
 
-    if args.jobs == 0:
-        jobs = min(8, max(1, os.cpu_count() or 1))
-    else:
-        jobs = args.jobs
+    def resolve_out(arg: str, base: Path) -> Path:
+        p = Path(arg).expanduser()
+        return p if p.is_absolute() else base / p
 
-    if not args.dry_run:
-        outdir.mkdir(parents=True, exist_ok=True)
-
-    media = list(
-        iter_media(
-            root,
-            args.recursive,
-            outdir,
-            args.include,
-            args.exclude,
-        )
-    )
+    # Plan: list of (source, destination, display root)
+    plan: list[tuple[Path, Path, Path]] = []
+    for raw in args.paths:
+        target = Path(raw).expanduser().resolve()
+        if target.is_dir():
+            outdir = resolve_out(args.output or "thumbnails", target)
+            for src in iter_media(target, args.recursive, outdir, args.include, args.exclude):
+                dst = output_for(src, target, outdir, args.recursive, args.format, args.suffix)
+                plan.append((src, dst, target))
+        elif target.is_file():
+            outdir = resolve_out(args.output or args.file_output, target.parent)
+            dst = output_for(target, target.parent, outdir, False, args.format, args.suffix)
+            plan.append((target, dst, target.parent))
+        else:
+            parser.error(f"no such file or directory: {raw}")
 
     common = dict(
-        root=root,
-        outdir=outdir,
-        recursive=args.recursive,
         outfmt=args.format,
-        suffix=args.suffix,
         size=args.size,
         quality=args.quality,
         samples=args.samples,
@@ -661,17 +715,18 @@ def main() -> int:
         mtime_only=args.mtime_only,
         dry_run=args.dry_run,
     )
+    roots = {src: root for src, _dst, root in plan}
 
     results: list[Result] = []
 
     if jobs == 1:
-        for src in media:
-            results.append(process_one(src, **common))
+        for src, dst, _root in plan:
+            results.append(process_one(src, dst, **common))
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
             future_map = {
-                executor.submit(process_one, src, **common): src
-                for src in media
+                executor.submit(process_one, src, dst, **common): src
+                for src, dst, _root in plan
             }
             for future in concurrent.futures.as_completed(future_map):
                 src = future_map[future]
@@ -686,11 +741,11 @@ def main() -> int:
         if result.status == "ok":
             created += 1
             if not args.quiet:
-                print(f"OK    {result.src.name} -> {show_path(result.dst, root)}")
+                print(f"OK    {result.src.name} -> {show_path(result.dst, roots[result.src])}")
         elif result.status == "dry":
             dry += 1
             if not args.quiet:
-                print(f"DRY   {result.src.name} -> {show_path(result.dst, root)}")
+                print(f"DRY   {result.src.name} -> {show_path(result.dst, roots[result.src])}")
         elif result.status == "skip":
             skipped += 1
             if not args.quiet:
