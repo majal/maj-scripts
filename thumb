@@ -13,7 +13,7 @@ Features
 - Otherwise, samples nearly the whole timeline and lets FFmpeg choose a
   representative frame, then compares it with fallback timestamps to avoid
   black/blank selections.
-- Folder scans cover images only unless --videos is given. Optional recursive scan, include/exclude globs, mtime-only rebuilds,
+- Folder scans cover images only unless --videos is given; hidden files are skipped. Optional recursive scan, include/exclude globs, mtime-only rebuilds,
   parallel jobs (auto by default), artwork-only mode, custom suffixes, and dry-run.
 - Uses only Python's standard library plus ffmpeg/ffprobe/ImageMagick.
 """
@@ -27,6 +27,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,9 @@ CONFIG_KEYS: dict[str, type] = {
     "mtime_only": bool,
     "no_artwork": bool,
     "videos": bool,
+    "video_at": str,
+    "hidden": bool,
+    "stale_check": bool,
 }
 
 
@@ -145,7 +149,60 @@ def probe_video(path: Path) -> tuple[Optional[float], Optional[int]]:
     return duration, attached
 
 
-def magick_thumb(src: Path, dst: Path, size: int, quality: int, outfmt: str) -> None:
+def fingerprint(size: int, quality: int, outfmt: str, video_at: str, is_video: bool) -> str:
+    """Settings that shape a thumbnail, stored in jpg/png metadata to spot stale ones."""
+    parts = [f"size={size}"]
+    if outfmt != "png":
+        parts.append(f"quality={quality}")
+    if is_video and video_at != "auto":
+        parts.append(f"at={video_at}")
+    return "thumb:1 " + " ".join(parts)
+
+
+def read_thumb_info(path: Path) -> Optional[tuple[int, str]]:
+    """Return (longest side, embedded fingerprint or '') for an existing thumbnail."""
+    try:
+        cp = run(["magick", "identify", "-format", "%w %h|%c", f"{path}[0]"], capture=True)
+        dims, _, comment = cp.stdout.partition("|")
+        w, h = (int(x) for x in dims.split())
+        return max(w, h), comment.strip()
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def source_longest_side(path: Path) -> Optional[int]:
+    try:
+        cp = run(["magick", "identify", "-format", "%w %h", f"{path}[0]"], capture=True)
+        w, h = (int(x) for x in cp.stdout.split())
+        return max(w, h)
+    except (subprocess.CalledProcessError, ValueError):
+        return None
+
+
+def is_stale(src: Path, dst: Path, size: int, fp: str, is_video: bool) -> bool:
+    """True when an existing thumbnail was made with different size/quality settings.
+
+    Best effort: jpg/png carry an exact fingerprint; other formats are compared by
+    dimensions only. Anything unreadable counts as not stale (never churn quietly).
+    """
+    info = read_thumb_info(dst)
+    if info is None:
+        return False
+    longest, comment = info
+    if longest > size:
+        return True
+    if comment.startswith("thumb:") and comment != fp:
+        return True
+    if not is_video and longest < size:
+        src_longest = source_longest_side(src)
+        if src_longest is not None and src_longest > longest + 1:
+            return True
+    return False
+
+
+def magick_thumb(
+    src: Path, dst: Path, size: int, quality: int, outfmt: str, fp: str = "",
+) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     source = f"{src}[0]"
 
@@ -155,6 +212,10 @@ def magick_thumb(src: Path, dst: Path, size: int, quality: int, outfmt: str) -> 
         "-thumbnail", f"{size}x{size}>",
         "-strip",
     ]
+    if fp and outfmt in {"jpg", "jpeg", "png"}:
+        if outfmt == "png":
+            cmd += ["-define", "png:include-chunk=tEXt"]
+        cmd += ["-set", "comment", fp]
 
     if outfmt in {"jpg", "jpeg"}:
         cmd += [
@@ -184,6 +245,19 @@ def extract_attached_art(video: Path, stream_index: int, dst: Path) -> None:
             str(dst),
         ]
     )
+
+
+def resolve_video_at(video_at: str, duration: Optional[float]) -> Optional[float]:
+    """Seconds for a fixed --video-at value ('25%' or '12.5'); None for 'auto'."""
+    if video_at == "auto":
+        return None
+    if video_at.endswith("%"):
+        pct = float(video_at[:-1]) / 100.0
+        return duration * pct if duration else 10.0
+    seconds = float(video_at)
+    if duration:
+        seconds = min(seconds, max(0.0, duration - 0.1))
+    return seconds
 
 
 def extract_frame(video: Path, timestamp: float, dst: Path) -> None:
@@ -299,6 +373,8 @@ def video_thumb(
     prefer_artwork: bool,
     artwork_only: bool,
     outfmt: str,
+    video_at: str = "auto",
+    fp: str = "",
 ) -> None:
     duration, attached = probe_video(src)
 
@@ -312,7 +388,7 @@ def video_thumb(
             artwork = workdir / "artwork.png"
             try:
                 extract_attached_art(src, attached, artwork)
-                magick_thumb(artwork, dst, size, quality, outfmt)
+                magick_thumb(artwork, dst, size, quality, outfmt, fp)
                 return
             except subprocess.CalledProcessError:
                 if artwork_only:
@@ -321,13 +397,17 @@ def video_thumb(
         if artwork_only:
             raise SkipMedia("video has no usable embedded artwork")
 
-        if duration is None:
+        fixed = resolve_video_at(video_at, duration)
+        if fixed is not None:
+            frame = workdir / "frame.jpg"
+            extract_frame(src, fixed, frame)
+        elif duration is None:
             frame = workdir / "frame.jpg"
             extract_frame(src, 10.0, frame)
         else:
             frame = choose_video_frame(src, duration, workdir, samples)
 
-        magick_thumb(frame, dst, size, quality, outfmt)
+        magick_thumb(frame, dst, size, quality, outfmt, fp)
 
 
 def pattern_matches(path: Path, root: Path, patterns: list[str]) -> bool:
@@ -348,34 +428,41 @@ def iter_media(
     includes: list[str],
     excludes: list[str],
     videos: bool = True,
+    hidden: bool = False,
 ) -> Iterable[Path]:
-    it = root.rglob("*") if recursive else root.iterdir()
+    """Yield supported media under root in a stable, sorted order.
+
+    Hidden files/directories (including macOS ``._*`` files) are skipped unless
+    ``hidden`` is set; the output directory is never descended into.
+    """
     out_resolved = outdir.resolve()
 
-    for path in it:
-        if not path.is_file():
-            continue
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if recursive
+            and (hidden or not d.startswith("."))
+            and (here / d).resolve() != out_resolved
+        )
 
-        try:
-            resolved = path.resolve()
-            if out_resolved == resolved.parent or out_resolved in resolved.parents:
+        for name in sorted(filenames):
+            if name.startswith(".") and (not hidden or PART_MARK in name):
+                continue  # hidden, or a leftover temp file from an interrupted run
+
+            path = here / name
+            ext = path.suffix.lower()
+            if ext not in IMAGE_EXTS and not (videos and ext in VIDEO_EXTS):
                 continue
-        except OSError:
-            pass
+            if not path.is_file():
+                continue
 
-        if path.name.startswith(".") and PART_MARK in path.name:
-            continue  # leftover temp file from an interrupted run
+            if includes and not pattern_matches(path, root, includes):
+                continue
+            if excludes and pattern_matches(path, root, excludes):
+                continue
 
-        ext = path.suffix.lower()
-        if ext not in IMAGE_EXTS and not (videos and ext in VIDEO_EXTS):
-            continue
-
-        if includes and not pattern_matches(path, root, includes):
-            continue
-        if excludes and pattern_matches(path, root, excludes):
-            continue
-
-        yield path
+            yield path
 
 
 def output_for(
@@ -547,6 +634,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--video-at",
+        default="auto",
+        metavar="POS",
+        help=(
+            "pick video frames at a fixed position instead of automatically: a "
+            "percentage ('25%%') or seconds ('12.5'). Embedded artwork still wins "
+            "unless --no-artwork (default: auto)"
+        ),
+    )
+    parser.add_argument(
+        "--hidden",
+        action="store_true",
+        help="include hidden files and folders (dot-files, macOS ._* files) in scans",
+    )
+    parser.add_argument(
+        "--stale-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "rebuild existing thumbnails that were made with a different --size or "
+            "--quality (best effort; default: on, use --no-stale-check to leave "
+            "existing thumbnails alone)"
+        ),
+    )
+    parser.add_argument(
         "--samples",
         type=int,
         default=120,
@@ -649,24 +761,31 @@ def process_one(
     force: bool,
     mtime_only: bool,
     dry_run: bool,
+    video_at: str = "auto",
+    stale_check: bool = False,
 ) -> Result:
     if src.suffix.lower() not in IMAGE_EXTS and src.suffix.lower() not in VIDEO_EXTS:
         return Result("skip", src, dst, "unsupported file type")
 
+    is_video = src.suffix.lower() in VIDEO_EXTS
+    fp = fingerprint(size, quality, outfmt, video_at, is_video)
     do_it, reason = should_process(src, dst, force=force, mtime_only=mtime_only)
+
+    if not do_it and stale_check and is_stale(src, dst, size, fp, is_video):
+        do_it, reason = True, "settings changed"
 
     if not do_it:
         return Result("skip", src, dst, reason)
 
     if dry_run:
-        return Result("dry", src, dst, "would create")
+        return Result("dry", src, dst, reason or "would create")
 
     # Write to a temp name, then rename, so an interrupted run never leaves a
     # half-written file that later looks like a finished thumbnail.
     tmp = dst.with_name(f".{dst.name}{PART_MARK}{dst.suffix}")
     try:
         if src.suffix.lower() in IMAGE_EXTS:
-            magick_thumb(src, tmp, size, quality, outfmt)
+            magick_thumb(src, tmp, size, quality, outfmt, fp)
         else:
             video_thumb(
                 src,
@@ -677,9 +796,11 @@ def process_one(
                 prefer_artwork=prefer_artwork,
                 artwork_only=artwork_only,
                 outfmt=outfmt,
+                video_at=video_at,
+                fp=fp,
             )
         os.replace(tmp, dst)
-        return Result("ok", src, dst)
+        return Result("ok", src, dst, reason)
     except SkipMedia as exc:
         tmp.unlink(missing_ok=True)
         return Result("skip", src, dst, str(exc))
@@ -699,6 +820,8 @@ def show_path(path: Path, root: Path) -> str:
 
 
 def main() -> int:
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # `thumb | head` exits quietly
     parser = build_parser()
     config = load_config(CONFIG_PATH)
     parser.set_defaults(**config)
@@ -716,6 +839,10 @@ def main() -> int:
         parser.error("--samples must be >= 12")
     if args.jobs < 0:
         parser.error("--jobs must be >= 0")
+    try:
+        resolve_video_at(args.video_at, 100.0)
+    except ValueError:
+        parser.error("--video-at must be 'auto', a percentage like 25%, or seconds like 12.5")
 
     jobs = min(8, max(1, os.cpu_count() or 1)) if args.jobs == 0 else args.jobs
 
@@ -731,7 +858,7 @@ def main() -> int:
             outdir = resolve_out(args.output or "thumbnails", target)
             for src in iter_media(
                 target, args.recursive, outdir, args.include, args.exclude,
-                videos=args.videos or args.artwork_only,
+                videos=args.videos or args.artwork_only, hidden=args.hidden,
             ):
                 dst = output_for(src, target, outdir, args.recursive, args.format, args.suffix)
                 plan.append((src, dst, target))
@@ -759,24 +886,32 @@ def main() -> int:
         force=args.force,
         mtime_only=args.mtime_only,
         dry_run=args.dry_run,
+        video_at=args.video_at,
+        stale_check=args.stale_check,
     )
     roots = {src: root for src, _dst, root in plan}
 
     counts = {"ok": 0, "dry": 0, "skip": 0, "fail": 0}
 
+    total = len(plan)
+    width = len(str(total))
+
     def report(result: Result) -> None:
         counts[result.status] += 1
+        done = sum(counts.values())
+        tag = f"[{done:>{width}}/{total}] "
         if result.status == "fail":
             eprint(f"FAIL  {result.src}: {result.reason}")
         elif not args.quiet:
             where = show_path(result.dst, roots[result.src]) if result.dst else ""
             if result.status == "ok":
-                print(f"OK    {result.src.name} -> {where}", flush=True)
+                note = f" ({result.reason})" if result.reason else ""
+                print(f"{tag}OK    {result.src.name} -> {where}{note}", flush=True)
             elif result.status == "dry":
-                print(f"DRY   {result.src.name} -> {where}", flush=True)
+                print(f"{tag}DRY   {result.src.name} -> {where}", flush=True)
             else:
                 note = f" ({result.reason})" if result.reason else ""
-                print(f"SKIP  {result.src.name}{note}", flush=True)
+                print(f"{tag}SKIP  {result.src.name}{note}", flush=True)
 
     try:
         if jobs == 1 or len(plan) <= 1:

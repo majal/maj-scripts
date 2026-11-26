@@ -79,6 +79,44 @@ class ThumbOutputTest(unittest.TestCase):
             self.assertEqual(res.status, "fail")
             self.assertEqual(sorted(p.name for p in root.iterdir()), ["bad.jpg"])
 
+    def test_scan_skips_hidden_unless_asked(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "a.jpg").write_bytes(b"x")
+            (root / "._a.jpg").write_bytes(b"x")
+            (root / ".hid").mkdir()
+            (root / ".hid" / "b.jpg").write_bytes(b"x")
+            scan = lambda **kw: sorted(
+                str(p.relative_to(root))
+                for p in self.thumb.iter_media(root, True, root / "t", [], [], **kw)
+            )
+            self.assertEqual(scan(), ["a.jpg"])
+            self.assertEqual(scan(hidden=True), ["._a.jpg", ".hid/b.jpg", "a.jpg"])
+
+    def test_scan_order_is_sorted(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            for n in ("c.jpg", "a.jpg", "b.jpg"):
+                (root / n).write_bytes(b"x")
+            found = [p.name for p in self.thumb.iter_media(root, False, root / "t", [], [])]
+            self.assertEqual(found, ["a.jpg", "b.jpg", "c.jpg"])
+
+    def test_resolve_video_at(self) -> None:
+        r = self.thumb.resolve_video_at
+        self.assertIsNone(r("auto", 100.0))
+        self.assertEqual(r("25%", 200.0), 50.0)
+        self.assertEqual(r("12.5", 100.0), 12.5)
+        self.assertAlmostEqual(r("999", 10.0), 9.9)
+        with self.assertRaises(ValueError):
+            r("abc", 10.0)
+
+    def test_fingerprint_reflects_settings(self) -> None:
+        fp = self.thumb.fingerprint
+        self.assertNotEqual(fp(256, 85, "jpg", "auto", False), fp(128, 85, "jpg", "auto", False))
+        self.assertNotEqual(fp(256, 85, "jpg", "auto", False), fp(256, 50, "jpg", "auto", False))
+        self.assertEqual(fp(256, 85, "png", "auto", False), fp(256, 50, "png", "auto", False))
+        self.assertNotEqual(fp(256, 85, "jpg", "25%", True), fp(256, 85, "jpg", "auto", True))
+
     def test_unsupported_file_is_skipped(self) -> None:
         res = self.thumb.process_one(
             Path("notes.txt"), Path("notes.txt.jpg"),

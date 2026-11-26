@@ -83,6 +83,9 @@ thumb --format webp --quality 80 .
 - `--no-artwork` ignores embedded video artwork; `--artwork-only` skips videos that have none. The two are mutually exclusive.
 - `--exclude` overrides `--include`; patterns match the basename or the path relative to the scanned directory.
 - `--include`/`--exclude` filter folder scans only; a file you name directly is always processed (unsupported types are skipped with a note).
+- Existing thumbnails made with a different `--size`/`--quality` (or `--video-at`) are rebuilt automatically ("settings changed"). This is best effort: jpg/png thumbnails carry their settings in metadata, other formats are compared by dimensions only, and anything unreadable is left alone. Turn it off with `--no-stale-check`.
+- Scans skip hidden files and folders (including macOS `._*` files) unless `--hidden`; files are processed in sorted order and each line shows a `[n/total]` counter.
+- `--video-at 25%` (or `--video-at 12.5` seconds) takes a fixed frame instead of the automatic pick, which is often the more predictable choice. Embedded artwork still wins unless `--no-artwork`.
 - `--quiet` hides per-file OK/SKIP lines; failures and the final summary still print.
 - `--jobs` defaults to auto (0): one worker per CPU, up to 8. Use `-j 1` for strictly serial runs.
 - Thumbnails are written under a temporary name and renamed when complete, so an interrupted run (Ctrl-C) never leaves a half-written file that looks finished; re-running is safe.
@@ -90,7 +93,7 @@ thumb --format webp --quality 80 .
 ## Notes / Caveats
 
 - Relative `-o` / `--file-output` paths are created inside the scanned directory (or beside the named file), not the current working directory; absolute paths are used as-is.
-- Optional defaults live in `~/.config/maj-scripts/thumb/config.toml` (Python 3.11+). Keys match the long options: `output`, `file_output`, `size`, `quality`, `format`, `suffix`, `samples`, `jobs`, `recursive`, `quiet`, `mtime_only`, `no_artwork`, `videos`. CLI flags win. Example:
+- Optional defaults live in `~/.config/maj-scripts/thumb/config.toml` (Python 3.11+). Keys match the long options: `output`, `file_output`, `size`, `quality`, `format`, `suffix`, `samples`, `jobs`, `recursive`, `quiet`, `mtime_only`, `no_artwork`, `videos`, `video_at`, `hidden`, `stale_check`. CLI flags win. Example:
 
   ```toml
   size = 320
