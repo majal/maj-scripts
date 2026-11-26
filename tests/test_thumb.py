@@ -57,6 +57,28 @@ class ThumbOutputTest(unittest.TestCase):
             self.assertEqual(names(videos=False), ["a.jpg"])
             self.assertEqual(names(videos=True), ["a.jpg", "b.mp4"])
 
+    def test_scan_ignores_leftover_part_files(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "a.jpg").write_bytes(b"x")
+            (root / f".a.jpg.jpg{self.thumb.PART_MARK}.jpg").write_bytes(b"x")
+            found = [p.name for p in self.thumb.iter_media(root, False, root / "t", [], [])]
+            self.assertEqual(found, ["a.jpg"])
+
+    def test_failed_conversion_leaves_no_temp_file(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "bad.jpg"
+            src.write_bytes(b"not an image")
+            res = self.thumb.process_one(
+                src, root / "bad.jpg.jpg",
+                outfmt="jpg", size=256, quality=85, samples=120,
+                prefer_artwork=True, artwork_only=False,
+                force=False, mtime_only=False, dry_run=False,
+            )
+            self.assertEqual(res.status, "fail")
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["bad.jpg"])
+
     def test_unsupported_file_is_skipped(self) -> None:
         res = self.thumb.process_one(
             Path("notes.txt"), Path("notes.txt.jpg"),

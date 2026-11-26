@@ -14,7 +14,7 @@ Features
   representative frame, then compares it with fallback timestamps to avoid
   black/blank selections.
 - Folder scans cover images only unless --videos is given. Optional recursive scan, include/exclude globs, mtime-only rebuilds,
-  parallel jobs, artwork-only mode, custom suffixes, and dry-run.
+  parallel jobs (auto by default), artwork-only mode, custom suffixes, and dry-run.
 - Uses only Python's standard library plus ffmpeg/ffprobe/ImageMagick.
 """
 
@@ -43,6 +43,7 @@ VIDEO_EXTS = {
     ".mts", ".m2ts", ".ts", ".3gp", ".wmv", ".flv", ".ogv",
 }
 SUPPORTED_OUTPUTS = ("jpg", "jpeg", "png", "webp", "avif")
+PART_MARK = ".thumb-part"
 CONFIG_PATH = Path.home() / ".config" / "maj-scripts" / "thumb" / "config.toml"
 # config key -> expected type; keys match the long option names (dashes -> underscores)
 CONFIG_KEYS: dict[str, type] = {
@@ -86,6 +87,15 @@ def run(cmd: list[str], *, capture: bool = False) -> subprocess.CompletedProcess
         stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
+
+
+def describe_error(exc: BaseException) -> str:
+    """Short, human-readable reason for a failed external command."""
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or "").strip().splitlines()
+        tool = Path(str(exc.cmd[0])).name if exc.cmd else "command"
+        return f"{tool} failed: {detail[-1]}" if detail else f"{tool} failed (exit {exc.returncode})"
+    return str(exc)
 
 
 def require_tools() -> None:
@@ -353,6 +363,9 @@ def iter_media(
         except OSError:
             pass
 
+        if path.name.startswith(".") and PART_MARK in path.name:
+            continue  # leftover temp file from an interrupted run
+
         ext = path.suffix.lower()
         if ext not in IMAGE_EXTS and not (videos and ext in VIDEO_EXTS):
             continue
@@ -460,7 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  maximum size    : 256 px\n"
             "  output format   : jpg\n"
             "  quality         : 85\n"
-            "  jobs            : 1\n"
+            "  jobs            : auto (one per CPU, max 8)\n"
             "\n"
             "Requirements:\n"
             "  ffmpeg, ffprobe, ImageMagick ('magick')\n"
@@ -602,11 +615,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-j", "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
         help=(
-            "number of files to process in parallel; 0 = auto "
-            "(default: 1)"
+            "number of files to process in parallel; 0 = auto, one per CPU up to 8 "
+            "(default: 0)"
         ),
     )
     parser.add_argument(
@@ -648,13 +661,16 @@ def process_one(
     if dry_run:
         return Result("dry", src, dst, "would create")
 
+    # Write to a temp name, then rename, so an interrupted run never leaves a
+    # half-written file that later looks like a finished thumbnail.
+    tmp = dst.with_name(f".{dst.name}{PART_MARK}{dst.suffix}")
     try:
         if src.suffix.lower() in IMAGE_EXTS:
-            magick_thumb(src, dst, size, quality, outfmt)
+            magick_thumb(src, tmp, size, quality, outfmt)
         else:
             video_thumb(
                 src,
-                dst,
+                tmp,
                 size,
                 quality,
                 samples,
@@ -662,11 +678,17 @@ def process_one(
                 artwork_only=artwork_only,
                 outfmt=outfmt,
             )
+        os.replace(tmp, dst)
         return Result("ok", src, dst)
     except SkipMedia as exc:
+        tmp.unlink(missing_ok=True)
         return Result("skip", src, dst, str(exc))
-    except (subprocess.CalledProcessError, RuntimeError, json.JSONDecodeError) as exc:
-        return Result("fail", src, dst, str(exc))
+    except (subprocess.CalledProcessError, RuntimeError, OSError, json.JSONDecodeError) as exc:
+        tmp.unlink(missing_ok=True)
+        return Result("fail", src, dst, describe_error(exc))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def show_path(path: Path, root: Path) -> str:
@@ -720,6 +742,13 @@ def main() -> int:
         else:
             parser.error(f"no such file or directory: {raw}")
 
+    seen: set[Path] = set()
+    plan = [item for item in plan if not (item[0] in seen or seen.add(item[0]))]
+
+    if jobs > 1:
+        # we already parallelise across files; avoid ImageMagick oversubscribing CPUs
+        os.environ.setdefault("MAGICK_THREAD_LIMIT", "1")
+
     common = dict(
         outfmt=args.format,
         size=args.size,
@@ -733,43 +762,47 @@ def main() -> int:
     )
     roots = {src: root for src, _dst, root in plan}
 
-    results: list[Result] = []
+    counts = {"ok": 0, "dry": 0, "skip": 0, "fail": 0}
 
-    if jobs == 1:
-        for src, dst, _root in plan:
-            results.append(process_one(src, dst, **common))
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-            future_map = {
-                executor.submit(process_one, src, dst, **common): src
-                for src, dst, _root in plan
-            }
-            for future in concurrent.futures.as_completed(future_map):
-                src = future_map[future]
-                try:
-                    results.append(future.result())
-                except Exception as exc:  # defensive: worker should normally convert errors
-                    results.append(Result("fail", src, reason=str(exc)))
-
-    created = skipped = failed = dry = 0
-
-    for result in results:
-        if result.status == "ok":
-            created += 1
-            if not args.quiet:
-                print(f"OK    {result.src.name} -> {show_path(result.dst, roots[result.src])}")
-        elif result.status == "dry":
-            dry += 1
-            if not args.quiet:
-                print(f"DRY   {result.src.name} -> {show_path(result.dst, roots[result.src])}")
-        elif result.status == "skip":
-            skipped += 1
-            if not args.quiet:
-                suffix = f" ({result.reason})" if result.reason else ""
-                print(f"SKIP  {result.src.name}{suffix}")
-        else:
-            failed += 1
+    def report(result: Result) -> None:
+        counts[result.status] += 1
+        if result.status == "fail":
             eprint(f"FAIL  {result.src}: {result.reason}")
+        elif not args.quiet:
+            where = show_path(result.dst, roots[result.src]) if result.dst else ""
+            if result.status == "ok":
+                print(f"OK    {result.src.name} -> {where}", flush=True)
+            elif result.status == "dry":
+                print(f"DRY   {result.src.name} -> {where}", flush=True)
+            else:
+                note = f" ({result.reason})" if result.reason else ""
+                print(f"SKIP  {result.src.name}{note}", flush=True)
+
+    try:
+        if jobs == 1 or len(plan) <= 1:
+            for src, dst, _root in plan:
+                report(process_one(src, dst, **common))
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+                future_map = {
+                    executor.submit(process_one, src, dst, **common): src
+                    for src, dst, _root in plan
+                }
+                try:
+                    for future in concurrent.futures.as_completed(future_map):
+                        try:
+                            report(future.result())
+                        except Exception as exc:  # defensive: worker should convert errors
+                            report(Result("fail", future_map[future], reason=str(exc)))
+                except KeyboardInterrupt:
+                    for f in future_map:
+                        f.cancel()
+                    raise
+    except KeyboardInterrupt:
+        eprint("\nInterrupted. Nothing half-written was kept; it is safe to re-run.")
+        return 130
+
+    created, skipped, failed, dry = counts["ok"], counts["skip"], counts["fail"], counts["dry"]
 
     if args.dry_run:
         print(f"Done: {dry} would create, {skipped} skipped, {failed} failed")

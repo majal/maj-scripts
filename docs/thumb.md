@@ -58,7 +58,7 @@ Include videos in a folder scan:
 thumb -r --videos ~/Media
 ```
 
-Recursive, only some types, 4 parallel jobs:
+Recursive, only some types, limited to 4 parallel jobs:
 
 ```bash
 thumb -r -j 4 --include '*.jpg' --include '*.png' ~/Media
@@ -84,7 +84,8 @@ thumb --format webp --quality 80 .
 - `--exclude` overrides `--include`; patterns match the basename or the path relative to the scanned directory.
 - `--include`/`--exclude` filter folder scans only; a file you name directly is always processed (unsupported types are skipped with a note).
 - `--quiet` hides per-file OK/SKIP lines; failures and the final summary still print.
-- `--jobs 0` picks a parallelism automatically (default is 1).
+- `--jobs` defaults to auto (0): one worker per CPU, up to 8. Use `-j 1` for strictly serial runs.
+- Thumbnails are written under a temporary name and renamed when complete, so an interrupted run (Ctrl-C) never leaves a half-written file that looks finished; re-running is safe.
 
 ## Notes / Caveats
 
