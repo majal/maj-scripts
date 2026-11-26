@@ -45,6 +45,18 @@ class ThumbOutputTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 self.thumb.load_config(cfg)
 
+    def test_folder_scan_skips_videos_unless_requested(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "a.jpg").write_bytes(b"x")
+            (root / "b.mp4").write_bytes(b"x")
+            out = root / "thumbnails"
+            names = lambda **kw: sorted(
+                p.name for p in self.thumb.iter_media(root, False, out, [], [], **kw)
+            )
+            self.assertEqual(names(videos=False), ["a.jpg"])
+            self.assertEqual(names(videos=True), ["a.jpg", "b.mp4"])
+
     def test_unsupported_file_is_skipped(self) -> None:
         res = self.thumb.process_one(
             Path("notes.txt"), Path("notes.txt.jpg"),

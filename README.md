@@ -121,7 +121,7 @@ Full docs: [docs/printing-mode.md](docs/printing-mode.md)
 
 ### [`thumb`](./thumb)
 
-`thumb` generates aspect-ratio-preserving thumbnails for folders or individual files (single files get their thumbnail right next to them), using embedded video artwork when present or an FFmpeg-chosen representative frame otherwise.
+`thumb` generates aspect-ratio-preserving thumbnails for folders (images by default, videos with `--videos`) or individual files (placed right next to them), using embedded video artwork when present or an FFmpeg-chosen representative frame otherwise.
 
 Full docs: [docs/thumb.md](docs/thumb.md)
 

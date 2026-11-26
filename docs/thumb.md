@@ -6,6 +6,7 @@
 
 ## What It Does
 
+- folder scans cover images only by default (`--videos` adds videos); files you name directly are always processed
 - takes any mix of directories and files (default: the current directory; `-r` scans folders recursively)
 - for folders, writes thumbnails to `./thumbnails` inside the folder (or `-o DIR`); for files you name directly, writes the thumbnail next to the source (`--file-output DIR` or `-o DIR` to change that), keeping aspect ratio so neither side exceeds `--size` (default 256 px)
 - images are auto-oriented from EXIF; videos prefer embedded artwork, otherwise FFmpeg picks a representative frame sampled across nearly the whole timeline and `thumb` compares it with fallback timestamps to avoid black/blank frames
@@ -51,10 +52,16 @@ Individual file into a different folder:
 thumb -o ~/thumbs photo.jpg
 ```
 
+Include videos in a folder scan:
+
+```bash
+thumb -r --videos ~/Media
+```
+
 Recursive, only some types, 4 parallel jobs:
 
 ```bash
-thumb -r -j 4 --include '*.jpg' --include '*.mp4' ~/Media
+thumb -r -j 4 --include '*.jpg' --include '*.png' ~/Media
 ```
 
 Rebuild only thumbnails whose source changed:
@@ -72,6 +79,7 @@ thumb --format webp --quality 80 .
 ## Important Behavior / Defaults
 
 - Existing thumbnails are skipped unless `--force` (recreate all) or `--mtime-only` (recreate when the source is newer) is given.
+- Folder scans skip videos unless `--videos` (or `--artwork-only`, which implies it) is given, because automatic frame choice is best-effort. Set `videos = true` in the config to make it the default.
 - `--no-artwork` ignores embedded video artwork; `--artwork-only` skips videos that have none. The two are mutually exclusive.
 - `--exclude` overrides `--include`; patterns match the basename or the path relative to the scanned directory.
 - `--include`/`--exclude` filter folder scans only; a file you name directly is always processed (unsupported types are skipped with a note).
@@ -81,7 +89,7 @@ thumb --format webp --quality 80 .
 ## Notes / Caveats
 
 - Relative `-o` / `--file-output` paths are created inside the scanned directory (or beside the named file), not the current working directory; absolute paths are used as-is.
-- Optional defaults live in `~/.config/maj-scripts/thumb/config.toml` (Python 3.11+). Keys match the long options: `output`, `file_output`, `size`, `quality`, `format`, `suffix`, `samples`, `jobs`, `recursive`, `quiet`, `mtime_only`, `no_artwork`. CLI flags win. Example:
+- Optional defaults live in `~/.config/maj-scripts/thumb/config.toml` (Python 3.11+). Keys match the long options: `output`, `file_output`, `size`, `quality`, `format`, `suffix`, `samples`, `jobs`, `recursive`, `quiet`, `mtime_only`, `no_artwork`, `videos`. CLI flags win. Example:
 
   ```toml
   size = 320

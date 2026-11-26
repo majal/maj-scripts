@@ -13,7 +13,7 @@ Features
 - Otherwise, samples nearly the whole timeline and lets FFmpeg choose a
   representative frame, then compares it with fallback timestamps to avoid
   black/blank selections.
-- Optional recursive scan, include/exclude globs, mtime-only rebuilds,
+- Folder scans cover images only unless --videos is given. Optional recursive scan, include/exclude globs, mtime-only rebuilds,
   parallel jobs, artwork-only mode, custom suffixes, and dry-run.
 - Uses only Python's standard library plus ffmpeg/ffprobe/ImageMagick.
 """
@@ -58,6 +58,7 @@ CONFIG_KEYS: dict[str, type] = {
     "quiet": bool,
     "mtime_only": bool,
     "no_artwork": bool,
+    "videos": bool,
 }
 
 
@@ -336,6 +337,7 @@ def iter_media(
     outdir: Path,
     includes: list[str],
     excludes: list[str],
+    videos: bool = True,
 ) -> Iterable[Path]:
     it = root.rglob("*") if recursive else root.iterdir()
     out_resolved = outdir.resolve()
@@ -352,7 +354,7 @@ def iter_media(
             pass
 
         ext = path.suffix.lower()
-        if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
+        if ext not in IMAGE_EXTS and not (videos and ext in VIDEO_EXTS):
             continue
 
         if includes and not pattern_matches(path, root, includes):
@@ -422,9 +424,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="thumb",
         description=(
-            "Create aspect-ratio-preserving thumbnails for images and videos.\n"
-            "Videos prefer embedded artwork by default; otherwise FFmpeg chooses\n"
-            "a representative frame from across nearly the whole timeline."
+            "Create aspect-ratio-preserving thumbnails for images (and, with --videos\n"
+            "or when named directly, videos). Videos prefer embedded artwork;\n"
+            "otherwise FFmpeg chooses a representative frame from across the timeline."
         ),
         epilog=(
             "Examples:\n"
@@ -433,7 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  thumb -o ~/thumbs photo.jpg\n"
             "  thumb ~/Pictures\n"
             "  thumb -r ~/Media\n"
-            "  thumb -r --include '*.jpg' --include '*.mp4' ~/Media\n"
+            "  thumb -r --videos ~/Media          (include videos in folder scans)\n"
+            "  thumb -r --include '*.jpg' --include '*.png' ~/Media\n"
             "  thumb -r --exclude 'cache/*' --exclude '*-preview.*' ~/Media\n"
             "  thumb --mtime-only ~/Pictures\n"
             "  thumb -j 4 -r ~/Media\n"
@@ -450,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "Defaults:\n"
             "  input           : . (files and/or directories)\n"
+            "  folder scans    : images only (add --videos for videos)\n"
             "  output (folders): ./thumbnails inside each folder\n"
             "  output (files)  : the file's own folder (--file-output)\n"
             "  config file     : ~/.config/maj-scripts/thumb/config.toml (CLI flags win)\n"
@@ -518,6 +522,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "text appended after the source filename and before the output extension "
             "(default: none)"
+        ),
+    )
+    parser.add_argument(
+        "--videos",
+        action="store_true",
+        help=(
+            "also thumbnail videos when scanning folders (default: images only, since "
+            "automatic video frame choice is best-effort). Videos named directly as "
+            "files are always processed; --artwork-only implies --videos"
         ),
     )
     parser.add_argument(
@@ -694,7 +707,10 @@ def main() -> int:
         target = Path(raw).expanduser().resolve()
         if target.is_dir():
             outdir = resolve_out(args.output or "thumbnails", target)
-            for src in iter_media(target, args.recursive, outdir, args.include, args.exclude):
+            for src in iter_media(
+                target, args.recursive, outdir, args.include, args.exclude,
+                videos=args.videos or args.artwork_only,
+            ):
                 dst = output_for(src, target, outdir, args.recursive, args.format, args.suffix)
                 plan.append((src, dst, target))
         elif target.is_file():
